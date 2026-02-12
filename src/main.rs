@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
-use umi_core::extract::{ExtractConfig, extract_reads};
+use umi_core::extract::{ExtractConfig, QualityEncoding, extract_reads};
 use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
 
 #[derive(Parser)]
@@ -44,6 +44,14 @@ enum Commands {
         /// UMI separator character in read name
         #[arg(long = "umi-separator", default_value = "_")]
         umi_separator: String,
+
+        /// Minimum per-base quality score for UMI bases (reads below are discarded)
+        #[arg(long = "quality-filter-threshold")]
+        quality_filter_threshold: Option<u8>,
+
+        /// Quality encoding scheme: phred33, phred64, solexa
+        #[arg(long = "quality-encoding", default_value = "phred33")]
+        quality_encoding: String,
     },
 }
 
@@ -58,6 +66,8 @@ fn main() -> Result<()> {
             output,
             prime3,
             umi_separator,
+            quality_filter_threshold,
+            quality_encoding,
         } => run_extract(
             &bc_pattern,
             &extract_method,
@@ -65,10 +75,13 @@ fn main() -> Result<()> {
             output.as_deref(),
             prime3,
             &umi_separator,
+            quality_filter_threshold,
+            &quality_encoding,
         ),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_extract(
     bc_pattern: &str,
     extract_method: &str,
@@ -76,6 +89,8 @@ fn run_extract(
     output_path: Option<&str>,
     prime3: bool,
     umi_separator: &str,
+    quality_filter_threshold: Option<u8>,
+    quality_encoding: &str,
 ) -> Result<()> {
     let pattern = match extract_method {
         "string" => {
@@ -97,9 +112,20 @@ fn run_extract(
 
     let sep_byte = umi_separator.as_bytes().first().copied().unwrap_or(b'_');
 
+    let qe = match quality_encoding {
+        "phred33" => QualityEncoding::Phred33,
+        "phred64" => QualityEncoding::Phred64,
+        "solexa" => QualityEncoding::Solexa,
+        other => {
+            bail!("unknown quality encoding '{other}'; expected 'phred33', 'phred64', or 'solexa'")
+        }
+    };
+
     let config = ExtractConfig {
         pattern,
         umi_separator: sep_byte,
+        quality_filter_threshold,
+        quality_encoding: qe,
     };
 
     let reader: Box<dyn Read + Send> = match input_path {
@@ -131,8 +157,12 @@ fn run_extract(
     let stats = extract_reads(&config, reader, writer).context("extraction failed")?;
 
     eprintln!(
-        "Reads input: {}, output: {}, too short: {}, no match: {}",
-        stats.input_reads, stats.output_reads, stats.too_short, stats.no_match
+        "Reads input: {}, output: {}, too short: {}, no match: {}, quality filtered: {}",
+        stats.input_reads,
+        stats.output_reads,
+        stats.too_short,
+        stats.no_match,
+        stats.quality_filtered
     );
 
     Ok(())

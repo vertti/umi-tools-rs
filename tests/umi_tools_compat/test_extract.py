@@ -14,6 +14,7 @@ ENABLED_TESTS = [
     "extract_single_string",
     "extract_single",
     "extract_3prime",
+    "extract_quality",
 ]
 
 # Flags the Rust binary doesn't support yet — stripped before invocation.
