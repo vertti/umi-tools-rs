@@ -76,6 +76,14 @@ enum Commands {
         /// Quality encoding scheme: phred33, phred64, solexa
         #[arg(long = "quality-encoding", default_value = "phred33")]
         quality_encoding: String,
+
+        /// Strip /1 and /2 suffixes from read names before appending UMI
+        #[arg(long = "ignore-read-pair-suffixes")]
+        ignore_read_pair_suffixes: bool,
+
+        /// Reconcile read pairs when read1 is a pre-filtered subset of read2
+        #[arg(long = "reconcile-pairs")]
+        reconcile_pairs: bool,
     },
 }
 
@@ -97,6 +105,8 @@ fn main() -> Result<()> {
             umi_separator,
             quality_filter_threshold,
             quality_encoding,
+            ignore_read_pair_suffixes,
+            reconcile_pairs,
         } => {
             let is_paired = read2_in.is_some();
             if !is_paired && bc_pattern.is_none() {
@@ -120,6 +130,8 @@ fn main() -> Result<()> {
                 &umi_separator,
                 quality_filter_threshold,
                 &quality_encoding,
+                ignore_read_pair_suffixes,
+                reconcile_pairs,
             )
         }
     }
@@ -173,7 +185,7 @@ fn open_output(path: Option<&str>) -> Result<Box<dyn Write>> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn run_extract(
     bc_pattern: Option<&str>,
     bc_pattern2: Option<&str>,
@@ -188,6 +200,8 @@ fn run_extract(
     umi_separator: &str,
     quality_filter_threshold: Option<u8>,
     quality_encoding: &str,
+    ignore_read_pair_suffixes: bool,
+    reconcile_pairs: bool,
 ) -> Result<()> {
     let pattern = bc_pattern
         .map(|p| parse_pattern(p, extract_method, prime3))
@@ -216,6 +230,8 @@ fn run_extract(
         quality_filter_threshold,
         quality_encoding: qe,
         whitelist,
+        ignore_read_pair_suffixes,
+        reconcile_pairs,
     };
 
     let reader1 = open_input(input_path)?;
