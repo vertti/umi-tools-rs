@@ -1,0 +1,7 @@
+[project]
+name = "umi-tools-rs-tests"
+version = "0.0.0"
+requires-python = ">=3.10"
+
+[dependency-groups]
+test = ["pytest", "pyyaml"]

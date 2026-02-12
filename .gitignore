@@ -1,2 +1,5 @@
 /target
 .claude/settings.local.json
+.venv/
+.pytest_cache/
+__pycache__/
