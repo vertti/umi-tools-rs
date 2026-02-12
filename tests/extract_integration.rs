@@ -22,6 +22,7 @@ fn extract_string_matches_umi_tools_reference() {
         umi_separator: b'_',
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
+        whitelist: None,
     };
 
     let input = File::open("tests/data/slim.fastq.gz").unwrap();
@@ -57,6 +58,7 @@ fn extract_regex_matches_string_method() {
         umi_separator: b'_',
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
+        whitelist: None,
     };
     let regex_config = ExtractConfig {
         pattern: Some(regex_pattern),
@@ -64,6 +66,7 @@ fn extract_regex_matches_string_method() {
         umi_separator: b'_',
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
+        whitelist: None,
     };
 
     let string_input = File::open("tests/data/slim.fastq.gz").unwrap();
