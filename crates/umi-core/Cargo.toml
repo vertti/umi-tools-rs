@@ -9,4 +9,5 @@ workspace = true
 [dependencies]
 needletail = "0.6"
 flate2 = "1"
+regex = "1"
 thiserror = "2"

@@ -18,6 +18,7 @@ pub struct ExtractStats {
     pub input_reads: u64,
     pub output_reads: u64,
     pub too_short: u64,
+    pub no_match: u64,
 }
 
 /// Extract UMIs from FASTQ reads, writing modified reads to `output`.
@@ -44,6 +45,9 @@ pub fn extract_reads<R: std::io::Read + Send, W: Write>(
             }
             Err(ExtractError::ReadTooShort { .. }) => {
                 stats.too_short += 1;
+            }
+            Err(ExtractError::RegexNoMatch) => {
+                stats.no_match += 1;
             }
             Err(e) => return Err(e),
         }

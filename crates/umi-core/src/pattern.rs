@@ -9,7 +9,7 @@ pub struct ExtractionResult {
     pub trimmed_quality: Vec<u8>,
 }
 
-/// Which end of the read to extract the barcode from.
+/// Which end of the read to extract the barcode from (string method only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimeEnd {
     Five,
@@ -17,13 +17,35 @@ pub enum PrimeEnd {
 }
 
 /// A parsed barcode pattern that knows how to extract UMI/cell/sample bases from a read.
+#[derive(Debug, Clone)]
+pub enum BarcodePattern {
+    String(StringPattern),
+    Regex(RegexPattern),
+}
+
+impl BarcodePattern {
+    /// # Errors
+    /// Returns error if the read is too short (string method) or doesn't match (regex method).
+    pub fn extract(
+        &self,
+        sequence: &[u8],
+        quality: &[u8],
+    ) -> Result<ExtractionResult, ExtractError> {
+        match self {
+            Self::String(p) => p.extract(sequence, quality),
+            Self::Regex(p) => p.extract(sequence, quality),
+        }
+    }
+}
+
+/// String-method pattern using fixed-position characters.
 ///
 /// Pattern characters:
 /// - `N` — UMI base (extracted to read name)
 /// - `C` — Cell barcode base (extracted to read name)
 /// - `X` — Sample/discard base (stays in output sequence, removed from barcode region)
 #[derive(Debug, Clone)]
-pub struct BarcodePattern {
+pub struct StringPattern {
     umi_positions: Vec<usize>,
     cell_positions: Vec<usize>,
     sample_positions: Vec<usize>,
@@ -31,7 +53,7 @@ pub struct BarcodePattern {
     prime_end: PrimeEnd,
 }
 
-impl BarcodePattern {
+impl StringPattern {
     /// Parse a string-method pattern like `NNNXXXXNN`.
     ///
     /// # Errors
@@ -126,6 +148,135 @@ impl BarcodePattern {
     }
 }
 
+/// Regex-method pattern using named capture groups.
+///
+/// Groups starting with `umi_` are extracted as UMI, `cell_` as cell barcode,
+/// `discard_` as bases to remove. Everything else is kept in the output sequence.
+#[derive(Debug, Clone)]
+pub struct RegexPattern {
+    pattern: regex::Regex,
+}
+
+impl RegexPattern {
+    /// Parse a regex pattern string.
+    ///
+    /// # Errors
+    /// Returns error if the regex is invalid or has no `umi_` or `cell_` groups.
+    pub fn parse(pattern_str: &str) -> Result<Self, ExtractError> {
+        let pattern = regex::Regex::new(pattern_str)
+            .map_err(|e| ExtractError::InvalidPattern(format!("invalid regex: {e}")))?;
+
+        let has_barcode_group = pattern
+            .capture_names()
+            .flatten()
+            .any(|name| name.starts_with("umi_") || name.starts_with("cell_"));
+
+        if !has_barcode_group {
+            return Err(ExtractError::InvalidPattern(
+                "regex must contain at least one named group starting with 'umi_' or 'cell_'"
+                    .into(),
+            ));
+        }
+
+        Ok(Self { pattern })
+    }
+
+    /// Extract barcodes from a read's sequence and quality strings.
+    ///
+    /// # Errors
+    /// Returns `RegexNoMatch` if the regex doesn't match the sequence.
+    pub fn extract(
+        &self,
+        sequence: &[u8],
+        quality: &[u8],
+    ) -> Result<ExtractionResult, ExtractError> {
+        let seq_str = std::str::from_utf8(sequence)
+            .map_err(|e| ExtractError::FastqParse(format!("non-UTF8 sequence: {e}")))?;
+
+        let caps = self
+            .pattern
+            .captures(seq_str)
+            .ok_or(ExtractError::RegexNoMatch)?;
+
+        // Collect named group spans into (name, start, end) sorted by name
+        let mut umi_spans: Vec<(&str, usize, usize)> = Vec::new();
+        let mut cell_spans: Vec<(&str, usize, usize)> = Vec::new();
+        let mut discard_spans: Vec<(usize, usize)> = Vec::new();
+
+        for name in self.pattern.capture_names().flatten() {
+            if let Some(m) = caps.name(name) {
+                let span = (m.start(), m.end());
+                if name.starts_with("umi_") {
+                    umi_spans.push((name, span.0, span.1));
+                } else if name.starts_with("cell_") {
+                    cell_spans.push((name, span.0, span.1));
+                } else if name.starts_with("discard_") {
+                    discard_spans.push(span);
+                }
+            }
+        }
+
+        // Sort by group name for deterministic concatenation
+        umi_spans.sort_by_key(|&(name, _, _)| name);
+        cell_spans.sort_by_key(|&(name, _, _)| name);
+
+        // Build position sets
+        let mut umi_positions = Vec::new();
+        for &(_, start, end) in &umi_spans {
+            for i in start..end {
+                umi_positions.push(i);
+            }
+        }
+
+        let mut cell_positions = Vec::new();
+        for &(_, start, end) in &cell_spans {
+            for i in start..end {
+                cell_positions.push(i);
+            }
+        }
+
+        let mut discard_positions = Vec::new();
+        for &(start, end) in &discard_spans {
+            for i in start..end {
+                discard_positions.push(i);
+            }
+        }
+
+        // Build UMI and cell by concatenating group values in sorted name order
+        let mut umi = Vec::new();
+        for &(_, start, end) in &umi_spans {
+            umi.extend_from_slice(&sequence[start..end]);
+        }
+
+        let mut cell_barcode = Vec::new();
+        for &(_, start, end) in &cell_spans {
+            cell_barcode.extend_from_slice(&sequence[start..end]);
+        }
+
+        // Build trimmed sequence/quality: keep positions not in any extraction set
+        let mut trimmed_sequence = Vec::new();
+        let mut trimmed_quality = Vec::new();
+
+        for i in 0..sequence.len() {
+            if umi_positions.contains(&i)
+                || cell_positions.contains(&i)
+                || discard_positions.contains(&i)
+            {
+                continue;
+            }
+            trimmed_sequence.push(sequence[i]);
+            trimmed_quality.push(quality[i]);
+        }
+
+        Ok(ExtractionResult {
+            umi,
+            cell_barcode,
+            trimmed_sequence,
+            trimmed_quality,
+        })
+    }
+}
+
 fn gather_positions(source: &[u8], positions: &[usize]) -> Vec<u8> {
     positions.iter().map(|&i| source[i]).collect()
 }
@@ -141,9 +292,11 @@ fn join_slices(a: &[u8], b: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    // --- StringPattern tests ---
+
     #[test]
     fn parse_valid_pattern() {
-        let pat = BarcodePattern::parse("NNNXXXXNN", PrimeEnd::Five).unwrap();
+        let pat = StringPattern::parse("NNNXXXXNN", PrimeEnd::Five).unwrap();
         assert_eq!(pat.umi_positions, vec![0, 1, 2, 7, 8]);
         assert_eq!(pat.sample_positions, vec![3, 4, 5, 6]);
         assert!(pat.cell_positions.is_empty());
@@ -152,7 +305,7 @@ mod tests {
 
     #[test]
     fn parse_pattern_with_cell() {
-        let pat = BarcodePattern::parse("CCCNNNNXXXX", PrimeEnd::Five).unwrap();
+        let pat = StringPattern::parse("CCCNNNNXXXX", PrimeEnd::Five).unwrap();
         assert_eq!(pat.cell_positions, vec![0, 1, 2]);
         assert_eq!(pat.umi_positions, vec![3, 4, 5, 6]);
         assert_eq!(pat.sample_positions, vec![7, 8, 9, 10]);
@@ -160,13 +313,13 @@ mod tests {
 
     #[test]
     fn parse_invalid_pattern() {
-        assert!(BarcodePattern::parse("NNNZXXNN", PrimeEnd::Five).is_err());
-        assert!(BarcodePattern::parse("", PrimeEnd::Five).is_err());
+        assert!(StringPattern::parse("NNNZXXNN", PrimeEnd::Five).is_err());
+        assert!(StringPattern::parse("", PrimeEnd::Five).is_err());
     }
 
     #[test]
     fn extract_5prime_nnnxxxxnn() {
-        let pat = BarcodePattern::parse("NNNXXXXNN", PrimeEnd::Five).unwrap();
+        let pat = StringPattern::parse("NNNXXXXNN", PrimeEnd::Five).unwrap();
         let seq = b"CAGGTTCAATCTCGGTGGGACCTC";
         let qual = b"1=DFFFFHHHHHJJJFGIJIJJIJ";
 
@@ -180,24 +333,82 @@ mod tests {
 
     #[test]
     fn extract_read_too_short() {
-        let pat = BarcodePattern::parse("NNNXXXXNN", PrimeEnd::Five).unwrap();
+        let pat = StringPattern::parse("NNNXXXXNN", PrimeEnd::Five).unwrap();
         assert!(pat.extract(b"ACGT", b"IIII").is_err());
     }
 
     #[test]
     fn extract_3prime() {
-        let pat = BarcodePattern::parse("NNXX", PrimeEnd::Three).unwrap();
+        let pat = StringPattern::parse("NNXX", PrimeEnd::Three).unwrap();
         let seq = b"ACGTAATTGG";
         let qual = b"IIIIIIIIII";
 
         let result = pat.extract(seq, qual).unwrap();
 
-        // Last 4 bases: TTGG
-        // UMI positions 0,1 → TT
-        // Sample positions 2,3 → GG
-        // Remaining: ACGTAA
-        // Trimmed = remaining + sample = ACGTAAGG
         assert_eq!(result.umi, b"TT");
         assert_eq!(result.trimmed_sequence, b"ACGTAAGG");
+    }
+
+    // --- RegexPattern tests ---
+
+    #[test]
+    fn regex_parse_valid() {
+        let pat = RegexPattern::parse(r"^(?P<umi_1>.{3}).{4}(?P<umi_2>.{2})").unwrap();
+        assert!(pat.pattern.is_match("CAGGTTCAATCTCGGTGGGACCTC"));
+    }
+
+    #[test]
+    fn regex_parse_no_barcode_groups() {
+        assert!(RegexPattern::parse(r"^(.{3}).{4}(.{2})").is_err());
+    }
+
+    #[test]
+    fn regex_parse_invalid_regex() {
+        assert!(RegexPattern::parse(r"^(?P<umi_1>.{3").is_err());
+    }
+
+    #[test]
+    fn regex_extract_equivalent_to_string() {
+        // Regex ^(?P<umi_1>.{3}).{4}(?P<umi_2>.{2}) should produce same result as NNNXXXXNN
+        let string_pat = StringPattern::parse("NNNXXXXNN", PrimeEnd::Five).unwrap();
+        let regex_pat = RegexPattern::parse(r"^(?P<umi_1>.{3}).{4}(?P<umi_2>.{2})").unwrap();
+
+        let seq = b"CAGGTTCAATCTCGGTGGGACCTC";
+        let qual = b"1=DFFFFHHHHHJJJFGIJIJJIJ";
+
+        let string_result = string_pat.extract(seq, qual).unwrap();
+        let regex_result = regex_pat.extract(seq, qual).unwrap();
+
+        assert_eq!(string_result.umi, regex_result.umi);
+        assert_eq!(string_result.cell_barcode, regex_result.cell_barcode);
+        assert_eq!(
+            string_result.trimmed_sequence,
+            regex_result.trimmed_sequence
+        );
+        assert_eq!(string_result.trimmed_quality, regex_result.trimmed_quality);
+    }
+
+    #[test]
+    fn regex_extract_with_cell() {
+        let pat =
+            RegexPattern::parse(r"^(?P<cell_1>.{3})(?P<umi_1>.{4})(?P<discard_1>.{2})").unwrap();
+
+        let seq = b"ABCDEFGHIJKLM";
+        let qual = b"1234567890ABC";
+
+        let result = pat.extract(seq, qual).unwrap();
+
+        assert_eq!(result.cell_barcode, b"ABC");
+        assert_eq!(result.umi, b"DEFG");
+        // Positions 0-8 extracted/discarded, remaining: JKLM (positions 9-12)
+        assert_eq!(result.trimmed_sequence, b"JKLM");
+        assert_eq!(result.trimmed_quality, b"0ABC");
+    }
+
+    #[test]
+    fn regex_no_match() {
+        let pat = RegexPattern::parse(r"^(?P<umi_1>ZZZZZ)").unwrap();
+        let result = pat.extract(b"ACGTACGT", b"IIIIIIII");
+        assert!(matches!(result, Err(ExtractError::RegexNoMatch)));
     }
 }

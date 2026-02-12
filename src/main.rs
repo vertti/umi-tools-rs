@@ -2,13 +2,13 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use umi_core::extract::{ExtractConfig, extract_reads};
-use umi_core::pattern::{BarcodePattern, PrimeEnd};
+use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
 
 #[derive(Parser)]
 #[command(name = "umi-tools-rs", version, about = "Fast UMI tools in Rust")]
@@ -24,6 +24,10 @@ enum Commands {
         /// Barcode pattern (e.g. NNNXXXXNN). N=UMI, C=cell, X=discard.
         #[arg(long = "bc-pattern")]
         bc_pattern: String,
+
+        /// Extraction method: "string" for fixed-position, "regex" for named capture groups
+        #[arg(long = "extract-method", default_value = "string")]
+        extract_method: String,
 
         /// Input FASTQ file (default: stdin). Gzip detected by .gz extension.
         #[arg(short = 'I', long = "stdin")]
@@ -49,12 +53,14 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Extract {
             bc_pattern,
+            extract_method,
             input,
             output,
             prime3,
             umi_separator,
         } => run_extract(
             &bc_pattern,
+            &extract_method,
             input.as_deref(),
             output.as_deref(),
             prime3,
@@ -65,19 +71,29 @@ fn main() -> Result<()> {
 
 fn run_extract(
     bc_pattern: &str,
+    extract_method: &str,
     input_path: Option<&str>,
     output_path: Option<&str>,
     prime3: bool,
     umi_separator: &str,
 ) -> Result<()> {
-    let prime_end = if prime3 {
-        PrimeEnd::Three
-    } else {
-        PrimeEnd::Five
+    let pattern = match extract_method {
+        "string" => {
+            let prime_end = if prime3 {
+                PrimeEnd::Three
+            } else {
+                PrimeEnd::Five
+            };
+            BarcodePattern::String(
+                StringPattern::parse(bc_pattern, prime_end)
+                    .context("failed to parse barcode pattern")?,
+            )
+        }
+        "regex" => BarcodePattern::Regex(
+            RegexPattern::parse(bc_pattern).context("failed to parse regex pattern")?,
+        ),
+        other => bail!("unknown extract method '{other}'; expected 'string' or 'regex'"),
     };
-
-    let pattern =
-        BarcodePattern::parse(bc_pattern, prime_end).context("failed to parse barcode pattern")?;
 
     let sep_byte = umi_separator.as_bytes().first().copied().unwrap_or(b'_');
 
@@ -115,8 +131,8 @@ fn run_extract(
     let stats = extract_reads(&config, reader, writer).context("extraction failed")?;
 
     eprintln!(
-        "Reads input: {}, output: {}, too short: {}",
-        stats.input_reads, stats.output_reads, stats.too_short
+        "Reads input: {}, output: {}, too short: {}, no match: {}",
+        stats.input_reads, stats.output_reads, stats.too_short, stats.no_match
     );
 
     Ok(())

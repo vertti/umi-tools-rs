@@ -8,6 +8,9 @@ pub enum ExtractError {
     #[error("read too short ({read_len} bp) for pattern ({pattern_len} bp)")]
     ReadTooShort { read_len: usize, pattern_len: usize },
 
+    #[error("regex did not match read sequence")]
+    RegexNoMatch,
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
