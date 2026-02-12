@@ -21,3 +21,8 @@ description = "Type check"
 [tasks.ci]
 depends = ["fmt", "check", "lint", "test"]
 description = "Run all CI checks"
+
+[tasks.compat]
+run = "uv run --group test pytest tests/umi_tools_compat -v"
+description = "Run umi-tools compatibility tests"
+depends = ["check"]
