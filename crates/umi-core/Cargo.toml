@@ -1,0 +1,12 @@
+[package]
+name = "umi-core"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+needletail = "0.6"
+flate2 = "1"
+thiserror = "2"
