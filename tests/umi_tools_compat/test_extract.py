@@ -19,6 +19,8 @@ ENABLED_TESTS = [
     "extract_read2_only_regex",
     "extract_scrb_seq",
     "extract_scrb_seq_string",
+    "extract_scrb_seq_suffix",
+    "extract_scrb_seq_prefiltered",
 ]
 
 # Flags the Rust binary doesn't support yet — stripped before invocation.
