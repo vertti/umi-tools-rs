@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -7,7 +8,10 @@ use clap::{Parser, Subcommand};
 use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
-use umi_core::extract::{ExtractConfig, QualityEncoding, extract_reads, extract_reads_paired};
+use umi_core::extract::{
+    ExtractConfig, QualityEncoding, extract_reads, extract_reads_paired,
+    extract_reads_paired_r1_pattern,
+};
 use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
 
 #[derive(Parser)]
@@ -49,6 +53,14 @@ enum Commands {
         #[arg(long = "read2-out")]
         read2_out: Option<String>,
 
+        /// Write read2 to stdout (paired-end mode, pattern on read1)
+        #[arg(long = "read2-stdout")]
+        read2_stdout: bool,
+
+        /// Whitelist file of accepted cell barcodes (one per line)
+        #[arg(long = "whitelist")]
+        whitelist: Option<String>,
+
         /// Extract from 3' end instead of 5'
         #[arg(long = "3prime")]
         prime3: bool,
@@ -79,6 +91,8 @@ fn main() -> Result<()> {
             output,
             read2_in,
             read2_out,
+            read2_stdout,
+            whitelist,
             prime3,
             umi_separator,
             quality_filter_threshold,
@@ -100,6 +114,8 @@ fn main() -> Result<()> {
                 output.as_deref(),
                 read2_in.as_deref(),
                 read2_out.as_deref(),
+                read2_stdout,
+                whitelist.as_deref(),
                 prime3,
                 &umi_separator,
                 quality_filter_threshold,
@@ -166,6 +182,8 @@ fn run_extract(
     output_path: Option<&str>,
     read2_in_path: Option<&str>,
     read2_out_path: Option<&str>,
+    read2_stdout: bool,
+    whitelist_path: Option<&str>,
     prime3: bool,
     umi_separator: &str,
     quality_filter_threshold: Option<u8>,
@@ -189,37 +207,63 @@ fn run_extract(
         }
     };
 
+    let whitelist = whitelist_path.map(load_whitelist).transpose()?;
+
     let config = ExtractConfig {
         pattern,
         pattern2,
         umi_separator: sep_byte,
         quality_filter_threshold,
         quality_encoding: qe,
+        whitelist,
     };
 
     let reader1 = open_input(input_path)?;
-    let writer1 = open_output(output_path)?;
 
     let stats = if let Some(r2_path) = read2_in_path {
         let reader2 = open_input(Some(r2_path))?;
-        let writer2 = open_output(read2_out_path)
-            .context("--read2-out is required when --read2-in is specified")?;
-        extract_reads_paired(&config, reader1, reader2, writer1, writer2)
-            .context("paired-end extraction failed")?
+        if read2_stdout {
+            let writer = open_output(output_path)?;
+            extract_reads_paired_r1_pattern(&config, reader1, reader2, writer)
+                .context("paired-end extraction failed")?
+        } else {
+            let writer1 = open_output(output_path)?;
+            let writer2 = open_output(read2_out_path)
+                .context("--read2-out is required when --read2-in is specified")?;
+            extract_reads_paired(&config, reader1, reader2, writer1, writer2)
+                .context("paired-end extraction failed")?
+        }
     } else {
+        let writer1 = open_output(output_path)?;
         extract_reads(&config, reader1, writer1).context("extraction failed")?
     };
 
     eprintln!(
-        "Reads input: {}, output: {}, too short: {}, no match: {}, quality filtered: {}",
+        "Reads input: {}, output: {}, too short: {}, no match: {}, quality filtered: {}, whitelist filtered: {}",
         stats.input_reads,
         stats.output_reads,
         stats.too_short,
         stats.no_match,
-        stats.quality_filtered
+        stats.quality_filtered,
+        stats.whitelist_filtered,
     );
 
     Ok(())
+}
+
+fn load_whitelist(path: &str) -> Result<HashSet<Vec<u8>>> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open whitelist file: {path}"))?;
+    let reader = io::BufReader::new(file);
+    let mut set = HashSet::new();
+    for line in reader.lines() {
+        let line = line.with_context(|| format!("failed to read whitelist file: {path}"))?;
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            set.insert(trimmed.as_bytes().to_vec());
+        }
+    }
+    Ok(set)
 }
 
 fn is_gzipped(path: &str) -> bool {
