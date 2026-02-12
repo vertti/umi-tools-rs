@@ -4,6 +4,7 @@ use crate::error::ExtractError;
 #[derive(Debug, Clone)]
 pub struct ExtractionResult {
     pub umi: Vec<u8>,
+    pub umi_quality: Vec<u8>,
     pub cell_barcode: Vec<u8>,
     pub trimmed_sequence: Vec<u8>,
     pub trimmed_quality: Vec<u8>,
@@ -124,6 +125,7 @@ impl StringPattern {
         };
 
         let umi = gather_positions(barcode_region, &self.umi_positions);
+        let umi_quality = gather_positions(barcode_qual, &self.umi_positions);
         let cell_barcode = gather_positions(barcode_region, &self.cell_positions);
         let sample_seq = gather_positions(barcode_region, &self.sample_positions);
         let sample_qual = gather_positions(barcode_qual, &self.sample_positions);
@@ -141,6 +143,7 @@ impl StringPattern {
 
         Ok(ExtractionResult {
             umi,
+            umi_quality,
             cell_barcode,
             trimmed_sequence,
             trimmed_quality,
@@ -244,8 +247,10 @@ impl RegexPattern {
 
         // Build UMI and cell by concatenating group values in sorted name order
         let mut umi = Vec::new();
+        let mut umi_quality = Vec::new();
         for &(_, start, end) in &umi_spans {
             umi.extend_from_slice(&sequence[start..end]);
+            umi_quality.extend_from_slice(&quality[start..end]);
         }
 
         let mut cell_barcode = Vec::new();
@@ -270,6 +275,7 @@ impl RegexPattern {
 
         Ok(ExtractionResult {
             umi,
+            umi_quality,
             cell_barcode,
             trimmed_sequence,
             trimmed_quality,
@@ -326,6 +332,7 @@ mod tests {
         let result = pat.extract(seq, qual).unwrap();
 
         assert_eq!(result.umi, b"CAGAA");
+        assert_eq!(result.umi_quality, b"1=DHH");
         assert!(result.cell_barcode.is_empty());
         assert_eq!(result.trimmed_sequence, b"GTTCTCTCGGTGGGACCTC");
         assert_eq!(result.trimmed_quality, b"FFFFHHHJJJFGIJIJJIJ");

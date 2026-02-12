@@ -5,11 +5,33 @@ use needletail::parser::{FastqReader, FastxReader, SequenceRecord};
 use crate::error::ExtractError;
 use crate::pattern::BarcodePattern;
 
+/// Quality score encoding scheme.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum QualityEncoding {
+    #[default]
+    Phred33,
+    Phred64,
+    Solexa,
+}
+
+impl QualityEncoding {
+    #[must_use]
+    pub const fn offset(self) -> u8 {
+        match self {
+            Self::Phred33 => 33,
+            Self::Phred64 => 64,
+            Self::Solexa => 59,
+        }
+    }
+}
+
 /// Configuration for the extract command.
 #[derive(Debug, Clone)]
 pub struct ExtractConfig {
     pub pattern: BarcodePattern,
     pub umi_separator: u8,
+    pub quality_filter_threshold: Option<u8>,
+    pub quality_encoding: QualityEncoding,
 }
 
 /// Statistics from an extraction run.
@@ -19,6 +41,7 @@ pub struct ExtractStats {
     pub output_reads: u64,
     pub too_short: u64,
     pub no_match: u64,
+    pub quality_filtered: u64,
 }
 
 /// Extract UMIs from FASTQ reads, writing modified reads to `output`.
@@ -40,6 +63,17 @@ pub fn extract_reads<R: std::io::Read + Send, W: Write>(
 
         match process_record(&record, config) {
             Ok(processed) => {
+                if let Some(threshold) = config.quality_filter_threshold {
+                    let offset = config.quality_encoding.offset();
+                    if processed
+                        .umi_quality
+                        .iter()
+                        .any(|&q| q.saturating_sub(offset) < threshold)
+                    {
+                        stats.quality_filtered += 1;
+                        continue;
+                    }
+                }
                 write_fastq_record(&mut writer, &processed.id, &processed.seq, &processed.qual)?;
                 stats.output_reads += 1;
             }
@@ -61,6 +95,7 @@ struct ProcessedRecord {
     id: Vec<u8>,
     seq: Vec<u8>,
     qual: Vec<u8>,
+    umi_quality: Vec<u8>,
 }
 
 fn process_record(
@@ -85,6 +120,7 @@ fn process_record(
         id,
         seq: result.trimmed_sequence,
         qual: result.trimmed_quality,
+        umi_quality: result.umi_quality,
     })
 }
 
