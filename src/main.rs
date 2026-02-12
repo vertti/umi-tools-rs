@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
-use umi_core::extract::{ExtractConfig, QualityEncoding, extract_reads};
+use umi_core::extract::{ExtractConfig, QualityEncoding, extract_reads, extract_reads_paired};
 use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
 
 #[derive(Parser)]
@@ -21,9 +21,13 @@ struct Cli {
 enum Commands {
     /// Extract UMI from FASTQ reads
     Extract {
-        /// Barcode pattern (e.g. NNNXXXXNN). N=UMI, C=cell, X=discard.
+        /// Barcode pattern for read1 (e.g. NNNXXXXNN). N=UMI, C=cell, X=discard.
         #[arg(long = "bc-pattern")]
-        bc_pattern: String,
+        bc_pattern: Option<String>,
+
+        /// Barcode pattern for read2 (paired-end mode)
+        #[arg(long = "bc-pattern2")]
+        bc_pattern2: Option<String>,
 
         /// Extraction method: "string" for fixed-position, "regex" for named capture groups
         #[arg(long = "extract-method", default_value = "string")]
@@ -36,6 +40,14 @@ enum Commands {
         /// Output FASTQ file (default: stdout). Gzip if .gz extension.
         #[arg(short = 'S', long = "stdout")]
         output: Option<String>,
+
+        /// Read2 input FASTQ file (paired-end mode)
+        #[arg(long = "read2-in")]
+        read2_in: Option<String>,
+
+        /// Read2 output FASTQ file (paired-end mode)
+        #[arg(long = "read2-out")]
+        read2_out: Option<String>,
 
         /// Extract from 3' end instead of 5'
         #[arg(long = "3prime")]
@@ -61,54 +73,110 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Extract {
             bc_pattern,
+            bc_pattern2,
             extract_method,
             input,
             output,
+            read2_in,
+            read2_out,
             prime3,
             umi_separator,
             quality_filter_threshold,
             quality_encoding,
-        } => run_extract(
-            &bc_pattern,
-            &extract_method,
-            input.as_deref(),
-            output.as_deref(),
-            prime3,
-            &umi_separator,
-            quality_filter_threshold,
-            &quality_encoding,
-        ),
+        } => {
+            let is_paired = read2_in.is_some();
+            if !is_paired && bc_pattern.is_none() {
+                bail!("--bc-pattern is required for single-end extraction");
+            }
+            if is_paired && bc_pattern.is_none() && bc_pattern2.is_none() {
+                bail!("at least one of --bc-pattern or --bc-pattern2 is required");
+            }
+
+            run_extract(
+                bc_pattern.as_deref(),
+                bc_pattern2.as_deref(),
+                &extract_method,
+                input.as_deref(),
+                output.as_deref(),
+                read2_in.as_deref(),
+                read2_out.as_deref(),
+                prime3,
+                &umi_separator,
+                quality_filter_threshold,
+                &quality_encoding,
+            )
+        }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_extract(
-    bc_pattern: &str,
-    extract_method: &str,
-    input_path: Option<&str>,
-    output_path: Option<&str>,
-    prime3: bool,
-    umi_separator: &str,
-    quality_filter_threshold: Option<u8>,
-    quality_encoding: &str,
-) -> Result<()> {
-    let pattern = match extract_method {
+fn parse_pattern(raw: &str, extract_method: &str, prime3: bool) -> Result<BarcodePattern> {
+    match extract_method {
         "string" => {
             let prime_end = if prime3 {
                 PrimeEnd::Three
             } else {
                 PrimeEnd::Five
             };
-            BarcodePattern::String(
-                StringPattern::parse(bc_pattern, prime_end)
-                    .context("failed to parse barcode pattern")?,
-            )
+            Ok(BarcodePattern::String(
+                StringPattern::parse(raw, prime_end).context("failed to parse barcode pattern")?,
+            ))
         }
-        "regex" => BarcodePattern::Regex(
-            RegexPattern::parse(bc_pattern).context("failed to parse regex pattern")?,
-        ),
+        "regex" => Ok(BarcodePattern::Regex(
+            RegexPattern::parse(raw).context("failed to parse regex pattern")?,
+        )),
         other => bail!("unknown extract method '{other}'; expected 'string' or 'regex'"),
-    };
+    }
+}
+
+fn open_input(path: Option<&str>) -> Result<Box<dyn Read + Send>> {
+    match path {
+        Some(p) => {
+            let file = File::open(p).with_context(|| format!("failed to open input file: {p}"))?;
+            if is_gzipped(p) {
+                Ok(Box::new(MultiGzDecoder::new(file)))
+            } else {
+                Ok(Box::new(file))
+            }
+        }
+        None => Ok(Box::new(io::stdin())),
+    }
+}
+
+fn open_output(path: Option<&str>) -> Result<Box<dyn Write>> {
+    match path {
+        Some(p) => {
+            let file =
+                File::create(p).with_context(|| format!("failed to create output file: {p}"))?;
+            if is_gzipped(p) {
+                Ok(Box::new(GzEncoder::new(file, Compression::default())))
+            } else {
+                Ok(Box::new(file))
+            }
+        }
+        None => Ok(Box::new(io::stdout().lock())),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_extract(
+    bc_pattern: Option<&str>,
+    bc_pattern2: Option<&str>,
+    extract_method: &str,
+    input_path: Option<&str>,
+    output_path: Option<&str>,
+    read2_in_path: Option<&str>,
+    read2_out_path: Option<&str>,
+    prime3: bool,
+    umi_separator: &str,
+    quality_filter_threshold: Option<u8>,
+    quality_encoding: &str,
+) -> Result<()> {
+    let pattern = bc_pattern
+        .map(|p| parse_pattern(p, extract_method, prime3))
+        .transpose()?;
+    let pattern2 = bc_pattern2
+        .map(|p| parse_pattern(p, extract_method, prime3))
+        .transpose()?;
 
     let sep_byte = umi_separator.as_bytes().first().copied().unwrap_or(b'_');
 
@@ -123,38 +191,24 @@ fn run_extract(
 
     let config = ExtractConfig {
         pattern,
+        pattern2,
         umi_separator: sep_byte,
         quality_filter_threshold,
         quality_encoding: qe,
     };
 
-    let reader: Box<dyn Read + Send> = match input_path {
-        Some(path) => {
-            let file =
-                File::open(path).with_context(|| format!("failed to open input file: {path}"))?;
-            if is_gzipped(path) {
-                Box::new(MultiGzDecoder::new(file))
-            } else {
-                Box::new(file)
-            }
-        }
-        None => Box::new(io::stdin()),
-    };
+    let reader1 = open_input(input_path)?;
+    let writer1 = open_output(output_path)?;
 
-    let writer: Box<dyn Write> = match output_path {
-        Some(path) => {
-            let file = File::create(path)
-                .with_context(|| format!("failed to create output file: {path}"))?;
-            if is_gzipped(path) {
-                Box::new(GzEncoder::new(file, Compression::default()))
-            } else {
-                Box::new(file)
-            }
-        }
-        None => Box::new(io::stdout().lock()),
+    let stats = if let Some(r2_path) = read2_in_path {
+        let reader2 = open_input(Some(r2_path))?;
+        let writer2 = open_output(read2_out_path)
+            .context("--read2-out is required when --read2-in is specified")?;
+        extract_reads_paired(&config, reader1, reader2, writer1, writer2)
+            .context("paired-end extraction failed")?
+    } else {
+        extract_reads(&config, reader1, writer1).context("extraction failed")?
     };
-
-    let stats = extract_reads(&config, reader, writer).context("extraction failed")?;
 
     eprintln!(
         "Reads input: {}, output: {}, too short: {}, no match: {}, quality filtered: {}",

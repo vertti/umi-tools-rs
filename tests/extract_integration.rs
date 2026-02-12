@@ -17,7 +17,8 @@ fn extract_string_matches_umi_tools_reference() {
     let pattern =
         BarcodePattern::String(StringPattern::parse("NNNXXXXNN", PrimeEnd::Five).unwrap());
     let config = ExtractConfig {
-        pattern,
+        pattern: Some(pattern),
+        pattern2: None,
         umi_separator: b'_',
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
@@ -51,13 +52,15 @@ fn extract_regex_matches_string_method() {
         BarcodePattern::Regex(RegexPattern::parse(r"^(?P<umi_1>.{3}).{4}(?P<umi_2>.{2})").unwrap());
 
     let string_config = ExtractConfig {
-        pattern: string_pattern,
+        pattern: Some(string_pattern),
+        pattern2: None,
         umi_separator: b'_',
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
     };
     let regex_config = ExtractConfig {
-        pattern: regex_pattern,
+        pattern: Some(regex_pattern),
+        pattern2: None,
         umi_separator: b'_',
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
