@@ -21,6 +21,9 @@ ENABLED_TESTS = [
     "extract_scrb_seq_string",
     "extract_scrb_seq_suffix",
     "extract_scrb_seq_prefiltered",
+    "extract_indrop_blacklist",
+    "extract_indrop_fuzzy",
+    "extract_indrop_output_filtered",
 ]
 
 # Flags the Rust binary doesn't support yet — stripped before invocation.

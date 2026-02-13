@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write};
 
 use needletail::parser::{FastqReader, FastxReader, SequenceRecord};
@@ -35,6 +35,8 @@ pub struct ExtractConfig {
     pub quality_filter_threshold: Option<u8>,
     pub quality_encoding: QualityEncoding,
     pub whitelist: Option<HashSet<Vec<u8>>>,
+    pub correction_map: Option<HashMap<Vec<u8>, Vec<u8>>>,
+    pub blacklist: Option<HashSet<Vec<u8>>>,
     pub ignore_read_pair_suffixes: bool,
     pub reconcile_pairs: bool,
 }
@@ -364,16 +366,31 @@ fn process_r1_pattern_pair<W: Write>(
         }
     }
 
-    if let Some(ref whitelist) = config.whitelist
-        && !whitelist.contains(&extraction.cell_barcode)
+    if let Some(ref blacklist) = config.blacklist
+        && blacklist.contains(&extraction.cell_barcode)
     {
         stats.whitelist_filtered += 1;
         return Ok(false);
     }
 
+    let cell_barcode = if let Some(ref whitelist) = config.whitelist {
+        if whitelist.contains(&extraction.cell_barcode) {
+            extraction.cell_barcode.clone()
+        } else if let Some(ref correction_map) = config.correction_map
+            && let Some(corrected) = correction_map.get(&extraction.cell_barcode)
+        {
+            corrected.clone()
+        } else {
+            stats.whitelist_filtered += 1;
+            return Ok(false);
+        }
+    } else {
+        extraction.cell_barcode.clone()
+    };
+
     let r2_id = build_read_name(
         r2.id(),
-        &extraction.cell_barcode,
+        &cell_barcode,
         &extraction.umi,
         config.umi_separator,
         config.ignore_read_pair_suffixes,
@@ -389,6 +406,28 @@ fn process_r1_pattern_pair<W: Write>(
     Ok(true)
 }
 
+/// Write original untrimmed reads to filtered output files (headers NOT modified).
+fn write_filtered_pair<W: Write>(
+    r1: &SequenceRecord,
+    r2: &SequenceRecord,
+    filt_writer1: &mut Option<BufWriter<W>>,
+    filt_writer2: &mut Option<BufWriter<W>>,
+) -> Result<(), ExtractError> {
+    if let Some(fw) = filt_writer1.as_mut() {
+        let r1_qual = r1
+            .qual()
+            .ok_or_else(|| ExtractError::FastqParse("missing quality scores in read1".into()))?;
+        write_fastq_record(fw, r1.id(), &r1.seq(), r1_qual)?;
+    }
+    if let Some(fw) = filt_writer2.as_mut() {
+        let r2_qual = r2
+            .qual()
+            .ok_or_else(|| ExtractError::FastqParse("missing quality scores in read2".into()))?;
+        write_fastq_record(fw, r2.id(), &r2.seq(), r2_qual)?;
+    }
+    Ok(())
+}
+
 /// Extract UMIs from paired-end FASTQ reads (read1-pattern mode with read2 output).
 ///
 /// Pattern is applied to read1 to extract cell barcode + UMI. Read2 is written
@@ -402,6 +441,8 @@ pub fn extract_reads_paired_r1_pattern<R1, R2, W>(
     input1: R1,
     input2: R2,
     output: W,
+    filtered_out1: Option<Box<dyn Write>>,
+    filtered_out2: Option<Box<dyn Write>>,
 ) -> Result<ExtractStats, ExtractError>
 where
     R1: std::io::Read + Send,
@@ -416,6 +457,8 @@ where
 
     let mut stats = ExtractStats::default();
     let mut writer = BufWriter::new(output);
+    let mut filt_writer1 = filtered_out1.map(BufWriter::new);
+    let mut filt_writer2 = filtered_out2.map(BufWriter::new);
     let mut reader1 = FastqReader::new(input1);
     let mut reader2 = FastqReader::new(input2);
 
@@ -433,7 +476,7 @@ where
                     Some(r2_result) => {
                         let r2 = r2_result.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
                         if read_name(r2.id()) == r1_name {
-                            process_r1_pattern_pair(
+                            let kept = process_r1_pattern_pair(
                                 &r1,
                                 &r2,
                                 pattern,
@@ -441,6 +484,14 @@ where
                                 &mut stats,
                                 &mut writer,
                             )?;
+                            if !kept {
+                                write_filtered_pair(
+                                    &r1,
+                                    &r2,
+                                    &mut filt_writer1,
+                                    &mut filt_writer2,
+                                )?;
+                            }
                             break;
                         }
                     }
@@ -464,7 +515,17 @@ where
                     let r1 = r1.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
                     let r2 = r2.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
                     stats.input_reads += 1;
-                    process_r1_pattern_pair(&r1, &r2, pattern, config, &mut stats, &mut writer)?;
+                    let kept = process_r1_pattern_pair(
+                        &r1,
+                        &r2,
+                        pattern,
+                        config,
+                        &mut stats,
+                        &mut writer,
+                    )?;
+                    if !kept {
+                        write_filtered_pair(&r1, &r2, &mut filt_writer1, &mut filt_writer2)?;
+                    }
                 }
                 (None, None) => break,
                 _ => {
@@ -477,5 +538,11 @@ where
     }
 
     writer.flush()?;
+    if let Some(fw) = filt_writer1.as_mut() {
+        fw.flush()?;
+    }
+    if let Some(fw) = filt_writer2.as_mut() {
+        fw.flush()?;
+    }
     Ok(stats)
 }
