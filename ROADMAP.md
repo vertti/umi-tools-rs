@@ -2,73 +2,18 @@
 
 Implementation roadmap derived from the umi-tools compatibility test suite (`tests/tests.yaml` in the Python umi-tools repo). The test suite has **66 tests** total; we use it to track feature parity.
 
-## Current state: 4 / 66 tests passing
+## Current state: 14 / 66 tests passing
 
-| Test | Status |
-|------|--------|
-| `extract_single_string` | Done |
-| `extract_single` | Done |
-| `extract_3prime` | Done |
-| `extract_quality` | Done |
-
-All four are single-end extract with stdin/stdout, covering string method, regex method, 3' patterns, and quality filtering.
+| Phase | Tests | Status |
+|-------|-------|--------|
+| Baseline | `extract_single_string`, `extract_single`, `extract_3prime`, `extract_quality` | Done |
+| Phase 1 | `extract_read2_only_string`, `extract_read2_only_regex` | Done |
+| Phase 2 | `extract_scrb_seq`, `extract_scrb_seq_string` | Done |
+| Phase 3 | `extract_scrb_seq_suffix`, `extract_scrb_seq_prefiltered` | Done |
+| Phase 4 | `extract_indrop_fuzzy`, `extract_indrop_blacklist`, `extract_indrop_output_filtered` | Done |
+| Phase 5 | `extract_either_read` | Done |
 
 ---
-
-## Phase 1: Paired-end extract basics (2 tests)
-
-New flags: `--read2-in`, `--read2-out`, `--bc-pattern2`
-
-| Test | Method | Key flags |
-|------|--------|-----------|
-| `extract_read2_only_string` | string | `--read2-in`, `--bc-pattern2=NNNNNNNNNN`, `--read2-out` |
-| `extract_read2_only_regex` | regex | `--read2-in`, `--bc-pattern2="^(?P<umi_1>.{10}).*"`, `--read2-out` |
-
-These extract UMI from read2 only (pattern on read2, not read1). Stdout gets processed read1; `--read2-out` gets processed read2.
-
-## Phase 2: Paired-end + whitelist (2 tests)
-
-New flags: `--read2-stdout`, `--whitelist`, cell barcode support (`cell_N` capture groups)
-
-| Test | Method | Key flags |
-|------|--------|-----------|
-| `extract_scrb_seq` | regex | `--read2-in`, `--read2-stdout`, `--whitelist`, `--bc-pattern="^(?P<cell_1>.{6})(?P<umi_1>.{10})"` |
-| `extract_scrb_seq_string` | string | `--read2-in`, `--read2-stdout`, `--whitelist`, `--bc-pattern=CCCCCCNNNNNNNNNN` |
-
-Pattern is on read1 (cell + UMI); `--read2-stdout` outputs processed read2. Whitelist filters cell barcodes.
-
-## Phase 3: Paired-end edge cases (2 tests)
-
-New flags: `--ignore-read-pair-suffixes`, `--reconcile-pairs`
-
-| Test | Method | Key flags |
-|------|--------|-----------|
-| `extract_scrb_seq_suffix` | string | Phase 2 flags + `--ignore-read-pair-suffixes` |
-| `extract_scrb_seq_prefiltered` | string | `--read2-in`, `--read2-stdout`, `--reconcile-pairs` (no whitelist) |
-
-`--ignore-read-pair-suffixes` strips `/1` `/2` suffixes before matching read names. `--reconcile-pairs` handles pre-filtered inputs where read1/read2 sets may not be in sync.
-
-## Phase 4: Fuzzy regex + cell error correction (3 tests)
-
-New features: `{s<=N}` fuzzy regex syntax, `--error-correct-cell`, `--blacklist`, `--filtered-out`/`--filtered-out2`
-
-| Test | Key flags |
-|------|-----------|
-| `extract_indrop_fuzzy` | fuzzy regex (`{s<=2}`), `--error-correct-cell`, `--whitelist` |
-| `extract_indrop_blacklist` | exact regex, `--error-correct-cell`, `--whitelist`, `--blacklist` |
-| `extract_indrop_output_filtered` | fuzzy regex, `--error-correct-cell`, `--whitelist`, `--filtered-out`, `--filtered-out2` |
-
-The indrop pattern: `(?P<cell_1>.{8,12})(?P<discard_2>GAGTGATTGCTTGTGACGCCTT{s<=2})(?P<cell_3>.{8})(?P<umi_1>.{6})T{3}.*`
-
-## Phase 5: Either-read mode (1 test)
-
-New flags: `--either-read`, `--bc-pattern2` with fuzzy regex
-
-| Test | Key flags |
-|------|-----------|
-| `extract_either_read` | `--either-read`, `--bc-pattern2` (same fuzzy pattern on both reads), `--read2-out` |
-
-Tries pattern on both reads; uses whichever matches.
 
 ## Phase 6: Whitelist subcommand (9 tests)
 
