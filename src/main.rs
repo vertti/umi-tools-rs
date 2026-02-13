@@ -13,6 +13,7 @@ use umi_core::extract::{
     extract_reads_paired_r1_pattern,
 };
 use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
+use umi_core::whitelist::{EdAboveThreshold, KneeMethod, WhitelistConfig, run_whitelist};
 
 #[derive(Parser)]
 #[command(name = "umi-tools-rs", version, about = "Fast UMI tools in Rust")]
@@ -105,6 +106,61 @@ enum Commands {
         #[arg(long = "either-read")]
         either_read: bool,
     },
+
+    /// Build a whitelist of valid cell barcodes from FASTQ
+    Whitelist {
+        /// Barcode pattern (e.g. CCCCCCNNNNNNNNNN). N=UMI, C=cell, X=discard.
+        #[arg(long = "bc-pattern")]
+        bc_pattern: String,
+
+        /// Extraction method: "string" for fixed-position, "regex" for named capture groups
+        #[arg(long = "extract-method", default_value = "string")]
+        extract_method: String,
+
+        /// Input FASTQ file (default: stdin). Gzip detected by .gz extension.
+        #[arg(short = 'I', long = "stdin")]
+        input: Option<String>,
+
+        /// Output TSV file (default: stdout).
+        #[arg(short = 'S', long = "stdout")]
+        output: Option<String>,
+
+        /// Extract from 3' end instead of 5'
+        #[arg(long = "3prime")]
+        prime3: bool,
+
+        /// Knee detection method: "distance" or "density"
+        #[arg(long = "knee-method", default_value = "distance")]
+        knee_method: String,
+
+        /// Force whitelist to include this many cells
+        #[arg(long = "set-cell-number")]
+        set_cell_number: Option<usize>,
+
+        /// Expected number of cells (hint for density method)
+        #[arg(long = "expect-cells")]
+        expect_cells: Option<usize>,
+
+        /// Maximum Hamming distance for error correction (default: 1)
+        #[arg(long = "error-correct-threshold", default_value = "1")]
+        error_correct_threshold: usize,
+
+        /// Handle whitelist barcodes within edit distance of higher-count whitelist barcode
+        #[arg(long = "ed-above-threshold")]
+        ed_above_threshold: Option<String>,
+
+        /// Plot prefix (accepted but ignored)
+        #[arg(long = "plot-prefix")]
+        _plot_prefix: Option<String>,
+
+        /// Output file for reads that failed barcode extraction
+        #[arg(long = "filtered-out")]
+        filtered_out: Option<String>,
+
+        /// Max reads to process (default: `100_000_000`)
+        #[arg(long = "subset-reads", default_value = "100000000")]
+        subset_reads: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -164,6 +220,33 @@ fn main() -> Result<()> {
                 either_read,
             )
         }
+        Commands::Whitelist {
+            bc_pattern,
+            extract_method,
+            input,
+            output,
+            prime3,
+            knee_method,
+            set_cell_number,
+            expect_cells,
+            error_correct_threshold,
+            ed_above_threshold,
+            _plot_prefix: _,
+            filtered_out: _,
+            subset_reads,
+        } => run_whitelist_cmd(
+            &bc_pattern,
+            &extract_method,
+            input.as_deref(),
+            output.as_deref(),
+            prime3,
+            &knee_method,
+            set_cell_number,
+            expect_cells,
+            error_correct_threshold,
+            ed_above_threshold.as_deref(),
+            subset_reads,
+        ),
     }
 }
 
@@ -382,6 +465,61 @@ fn load_blacklist(path: &str) -> Result<HashSet<Vec<u8>>> {
         }
     }
     Ok(set)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_whitelist_cmd(
+    bc_pattern: &str,
+    extract_method: &str,
+    input_path: Option<&str>,
+    output_path: Option<&str>,
+    prime3: bool,
+    knee_method: &str,
+    set_cell_number: Option<usize>,
+    expect_cells: Option<usize>,
+    error_correct_threshold: usize,
+    ed_above_threshold: Option<&str>,
+    subset_reads: usize,
+) -> Result<()> {
+    let pattern = parse_pattern(bc_pattern, extract_method, prime3)?;
+
+    let km = match knee_method {
+        "distance" => KneeMethod::Distance,
+        "density" => KneeMethod::Density,
+        other => bail!("unknown knee method '{other}'; expected 'distance' or 'density'"),
+    };
+
+    let ed_above = ed_above_threshold
+        .map(|s| match s {
+            "discard" => Ok(EdAboveThreshold::Discard),
+            "correct" => Ok(EdAboveThreshold::Correct),
+            other => {
+                bail!("unknown --ed-above-threshold '{other}'; expected 'discard' or 'correct'")
+            }
+        })
+        .transpose()?;
+
+    let config = WhitelistConfig {
+        pattern,
+        knee_method: km,
+        cell_number: set_cell_number,
+        expect_cells,
+        error_correct_threshold,
+        ed_above_threshold: ed_above,
+        subset_reads,
+    };
+
+    let reader = open_input(input_path)?;
+    let writer = open_output(output_path)?;
+
+    let stats = run_whitelist(&config, reader, writer).context("whitelist command failed")?;
+
+    eprintln!(
+        "Reads input: {}, no barcode match: {}",
+        stats.input_reads, stats.no_match,
+    );
+
+    Ok(())
 }
 
 fn is_gzipped(path: &str) -> bool {
