@@ -23,6 +23,8 @@ fn extract_string_matches_umi_tools_reference() {
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
         whitelist: None,
+        correction_map: None,
+        blacklist: None,
         ignore_read_pair_suffixes: false,
         reconcile_pairs: false,
     };
@@ -61,6 +63,8 @@ fn extract_regex_matches_string_method() {
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
         whitelist: None,
+        correction_map: None,
+        blacklist: None,
         ignore_read_pair_suffixes: false,
         reconcile_pairs: false,
     };
@@ -71,6 +75,8 @@ fn extract_regex_matches_string_method() {
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
         whitelist: None,
+        correction_map: None,
+        blacklist: None,
         ignore_read_pair_suffixes: false,
         reconcile_pairs: false,
     };

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
@@ -84,6 +84,22 @@ enum Commands {
         /// Reconcile read pairs when read1 is a pre-filtered subset of read2
         #[arg(long = "reconcile-pairs")]
         reconcile_pairs: bool,
+
+        /// Error-correct cell barcodes using whitelist correction map
+        #[arg(long = "error-correct-cell")]
+        error_correct_cell: bool,
+
+        /// Blacklist file of rejected cell barcodes (one per line)
+        #[arg(long = "blacklist")]
+        blacklist: Option<String>,
+
+        /// Output file for filtered read1 (reads that fail any filter)
+        #[arg(long = "filtered-out")]
+        filtered_out: Option<String>,
+
+        /// Output file for filtered read2 (reads that fail any filter)
+        #[arg(long = "filtered-out2")]
+        filtered_out2: Option<String>,
     },
 }
 
@@ -107,6 +123,10 @@ fn main() -> Result<()> {
             quality_encoding,
             ignore_read_pair_suffixes,
             reconcile_pairs,
+            error_correct_cell,
+            blacklist,
+            filtered_out,
+            filtered_out2,
         } => {
             let is_paired = read2_in.is_some();
             if !is_paired && bc_pattern.is_none() {
@@ -132,6 +152,10 @@ fn main() -> Result<()> {
                 &quality_encoding,
                 ignore_read_pair_suffixes,
                 reconcile_pairs,
+                error_correct_cell,
+                blacklist.as_deref(),
+                filtered_out.as_deref(),
+                filtered_out2.as_deref(),
             )
         }
     }
@@ -202,6 +226,10 @@ fn run_extract(
     quality_encoding: &str,
     ignore_read_pair_suffixes: bool,
     reconcile_pairs: bool,
+    error_correct_cell: bool,
+    blacklist_path: Option<&str>,
+    filtered_out_path: Option<&str>,
+    filtered_out2_path: Option<&str>,
 ) -> Result<()> {
     let pattern = bc_pattern
         .map(|p| parse_pattern(p, extract_method, prime3))
@@ -221,7 +249,14 @@ fn run_extract(
         }
     };
 
-    let whitelist = whitelist_path.map(load_whitelist).transpose()?;
+    let (whitelist, correction_map) = if let Some(wl_path) = whitelist_path {
+        let (wl, cm) = load_whitelist_with_correction(wl_path, error_correct_cell)?;
+        (Some(wl), cm)
+    } else {
+        (None, None)
+    };
+
+    let blacklist = blacklist_path.map(load_blacklist).transpose()?;
 
     let config = ExtractConfig {
         pattern,
@@ -230,6 +265,8 @@ fn run_extract(
         quality_filter_threshold,
         quality_encoding: qe,
         whitelist,
+        correction_map,
+        blacklist,
         ignore_read_pair_suffixes,
         reconcile_pairs,
     };
@@ -240,7 +277,15 @@ fn run_extract(
         let reader2 = open_input(Some(r2_path))?;
         if read2_stdout {
             let writer = open_output(output_path)?;
-            extract_reads_paired_r1_pattern(&config, reader1, reader2, writer)
+            let filt1 = filtered_out_path
+                .map(|p| open_output(Some(p)))
+                .transpose()
+                .context("failed to open --filtered-out")?;
+            let filt2 = filtered_out2_path
+                .map(|p| open_output(Some(p)))
+                .transpose()
+                .context("failed to open --filtered-out2")?;
+            extract_reads_paired_r1_pattern(&config, reader1, reader2, writer, filt1, filt2)
                 .context("paired-end extraction failed")?
         } else {
             let writer1 = open_output(output_path)?;
@@ -267,16 +312,60 @@ fn run_extract(
     Ok(())
 }
 
-fn load_whitelist(path: &str) -> Result<HashSet<Vec<u8>>> {
+type WhitelistWithCorrection = (HashSet<Vec<u8>>, Option<HashMap<Vec<u8>, Vec<u8>>>);
+
+fn load_whitelist_with_correction(
+    path: &str,
+    error_correct: bool,
+) -> Result<WhitelistWithCorrection> {
     let file =
         File::open(path).with_context(|| format!("failed to open whitelist file: {path}"))?;
     let reader = io::BufReader::new(file);
-    let mut set = HashSet::new();
+    let mut whitelist = HashSet::new();
+    let mut correction_map = HashMap::new();
+
     for line in reader.lines() {
         let line = line.with_context(|| format!("failed to read whitelist file: {path}"))?;
         let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut cols = trimmed.split('\t');
+        let barcode = cols.next().unwrap().as_bytes().to_vec();
+        whitelist.insert(barcode.clone());
+
+        if error_correct
+            && let Some(variants_col) = cols.next()
+            && !variants_col.is_empty()
+        {
+            for variant in variants_col.split(',') {
+                let v = variant.trim();
+                if !v.is_empty() {
+                    correction_map.insert(v.as_bytes().to_vec(), barcode.clone());
+                }
+            }
+        }
+    }
+
+    let cm = if error_correct && !correction_map.is_empty() {
+        Some(correction_map)
+    } else {
+        None
+    };
+    Ok((whitelist, cm))
+}
+
+fn load_blacklist(path: &str) -> Result<HashSet<Vec<u8>>> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open blacklist file: {path}"))?;
+    let reader = io::BufReader::new(file);
+    let mut set = HashSet::new();
+    for line in reader.lines() {
+        let line = line.with_context(|| format!("failed to read blacklist file: {path}"))?;
+        let trimmed = line.trim();
         if !trimmed.is_empty() {
-            set.insert(trimmed.as_bytes().to_vec());
+            let barcode = trimmed.split('\t').next().unwrap();
+            set.insert(barcode.as_bytes().to_vec());
         }
     }
     Ok(set)

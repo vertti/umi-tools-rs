@@ -166,7 +166,9 @@ impl RegexPattern {
     /// # Errors
     /// Returns error if the regex is invalid or has no `umi_` or `cell_` groups.
     pub fn parse(pattern_str: &str) -> Result<Self, ExtractError> {
-        let pattern = regex::Regex::new(pattern_str)
+        let processed = preprocess_fuzzy(pattern_str)?;
+
+        let pattern = regex::Regex::new(&processed)
             .map_err(|e| ExtractError::InvalidPattern(format!("invalid regex: {e}")))?;
 
         let has_barcode_group = pattern
@@ -281,6 +283,62 @@ impl RegexPattern {
             trimmed_quality,
         })
     }
+}
+
+/// Pre-process a regex string, replacing `CHAR{s<=N}` fuzzy quantifiers.
+///
+/// In Python's `regex` module, `{s<=N}` applies to the single preceding character
+/// (not to an entire literal sequence). For N >= 1, `CHAR{s<=N}` matches any
+/// single character, equivalent to `.`. For N == 0, it's an exact match (no-op).
+fn preprocess_fuzzy(pattern_str: &str) -> Result<String, ExtractError> {
+    let mut result = String::with_capacity(pattern_str.len());
+    let bytes = pattern_str.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if bytes[i] == b'{'
+            && i + 4 < len
+            && bytes[i + 1] == b's'
+            && bytes[i + 2] == b'<'
+            && bytes[i + 3] == b'='
+        {
+            let num_start = i + 4;
+            let mut num_end = num_start;
+            while num_end < len && bytes[num_end].is_ascii_digit() {
+                num_end += 1;
+            }
+            if num_end == num_start || num_end >= len || bytes[num_end] != b'}' {
+                return Err(ExtractError::InvalidPattern(format!(
+                    "malformed fuzzy quantifier at position {i}"
+                )));
+            }
+            let max_subs: usize = std::str::from_utf8(&bytes[num_start..num_end])
+                .unwrap()
+                .parse()
+                .unwrap();
+
+            if result.is_empty() {
+                return Err(ExtractError::InvalidPattern(format!(
+                    "fuzzy quantifier at position {i} has no preceding character"
+                )));
+            }
+
+            if max_subs >= 1 {
+                // Replace the preceding character with '.' (any character)
+                result.pop();
+                result.push('.');
+            }
+            // For max_subs == 0, keep the character as-is (exact match)
+
+            i = num_end + 1;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    Ok(result)
 }
 
 fn gather_positions(source: &[u8], positions: &[usize]) -> Vec<u8> {
