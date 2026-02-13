@@ -4,7 +4,7 @@ use std::io::{BufWriter, Write};
 use needletail::parser::{FastqReader, FastxReader, SequenceRecord};
 
 use crate::error::ExtractError;
-use crate::pattern::BarcodePattern;
+use crate::pattern::{BarcodePattern, ExtractionResult};
 
 /// Quality score encoding scheme.
 #[derive(Debug, Clone, Copy, Default)]
@@ -50,6 +50,7 @@ pub struct ExtractStats {
     pub no_match: u64,
     pub quality_filtered: u64,
     pub whitelist_filtered: u64,
+    pub both_matched: u64,
 }
 
 /// Extract UMIs from FASTQ reads, writing modified reads to `output`.
@@ -544,5 +545,167 @@ where
     if let Some(fw) = filt_writer2.as_mut() {
         fw.flush()?;
     }
+    Ok(stats)
+}
+
+/// Try extracting with a pattern, returning `None` for recoverable failures (too short, no match).
+fn try_extract(
+    pattern: &BarcodePattern,
+    seq: &[u8],
+    qual: &[u8],
+) -> Result<Option<ExtractionResult>, ExtractError> {
+    match pattern.extract(seq, qual) {
+        Ok(result) => Ok(Some(result)),
+        Err(ExtractError::ReadTooShort { .. } | ExtractError::RegexNoMatch) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Extract UMIs from paired-end FASTQ reads in either-read mode.
+///
+/// Both patterns are tried on their respective reads. If exactly one matches,
+/// the UMI is taken from that read (and only that read is trimmed). If both
+/// match, the pair is discarded (default `--either-read-resolve=discard`).
+/// If neither matches, the pair is discarded as `no_match`.
+///
+/// # Errors
+/// Returns error on I/O failures, parse errors, or mismatched read counts.
+#[allow(clippy::too_many_lines)]
+pub fn extract_reads_either_read<R1, R2, W1, W2>(
+    config: &ExtractConfig,
+    input1: R1,
+    input2: R2,
+    output1: W1,
+    output2: W2,
+) -> Result<ExtractStats, ExtractError>
+where
+    R1: std::io::Read + Send,
+    R2: std::io::Read + Send,
+    W1: Write,
+    W2: Write,
+{
+    let pattern1 = config.pattern.as_ref().ok_or_else(|| {
+        ExtractError::InvalidPattern("no pattern provided for either-read extraction".into())
+    })?;
+    let pattern2 = config.pattern2.as_ref().ok_or_else(|| {
+        ExtractError::InvalidPattern("no pattern2 provided for either-read extraction".into())
+    })?;
+
+    let mut stats = ExtractStats::default();
+    let mut writer1 = BufWriter::new(output1);
+    let mut writer2 = BufWriter::new(output2);
+    let mut reader1 = FastqReader::new(input1);
+    let mut reader2 = FastqReader::new(input2);
+
+    loop {
+        let rec1 = reader1.next();
+        let rec2 = reader2.next();
+
+        match (rec1, rec2) {
+            (Some(r1), Some(r2)) => {
+                let r1 = r1.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
+                let r2 = r2.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
+                stats.input_reads += 1;
+
+                let r1_seq = r1.seq();
+                let r1_qual = r1.qual().ok_or_else(|| {
+                    ExtractError::FastqParse("missing quality scores in read1".into())
+                })?;
+                let r2_seq = r2.seq();
+                let r2_qual = r2.qual().ok_or_else(|| {
+                    ExtractError::FastqParse("missing quality scores in read2".into())
+                })?;
+
+                let r1_result = try_extract(pattern1, &r1_seq, r1_qual)?;
+                let r2_result = try_extract(pattern2, &r2_seq, r2_qual)?;
+
+                match (r1_result, r2_result) {
+                    (Some(_), Some(_)) => {
+                        stats.both_matched += 1;
+                    }
+                    (Some(extraction), None) => {
+                        if let Some(threshold) = config.quality_filter_threshold {
+                            let offset = config.quality_encoding.offset();
+                            if extraction
+                                .umi_quality
+                                .iter()
+                                .any(|&q| q.saturating_sub(offset) < threshold)
+                            {
+                                stats.quality_filtered += 1;
+                                continue;
+                            }
+                        }
+
+                        // Both headers built from read1 (matches Python umi-tools behavior)
+                        let new_id = build_read_name(
+                            r1.id(),
+                            &extraction.cell_barcode,
+                            &extraction.umi,
+                            config.umi_separator,
+                            false,
+                        );
+
+                        // Read1: trimmed
+                        write_fastq_record(
+                            &mut writer1,
+                            &new_id,
+                            &extraction.trimmed_sequence,
+                            &extraction.trimmed_quality,
+                        )?;
+                        // Read2: untrimmed
+                        write_fastq_record(&mut writer2, &new_id, &r2_seq, r2_qual)?;
+
+                        stats.output_reads += 1;
+                    }
+                    (None, Some(extraction)) => {
+                        if let Some(threshold) = config.quality_filter_threshold {
+                            let offset = config.quality_encoding.offset();
+                            if extraction
+                                .umi_quality
+                                .iter()
+                                .any(|&q| q.saturating_sub(offset) < threshold)
+                            {
+                                stats.quality_filtered += 1;
+                                continue;
+                            }
+                        }
+
+                        // Both headers built from read1 (matches Python umi-tools behavior)
+                        let new_id = build_read_name(
+                            r1.id(),
+                            &extraction.cell_barcode,
+                            &extraction.umi,
+                            config.umi_separator,
+                            false,
+                        );
+
+                        // Read1: untrimmed
+                        write_fastq_record(&mut writer1, &new_id, &r1_seq, r1_qual)?;
+                        // Read2: trimmed
+                        write_fastq_record(
+                            &mut writer2,
+                            &new_id,
+                            &extraction.trimmed_sequence,
+                            &extraction.trimmed_quality,
+                        )?;
+
+                        stats.output_reads += 1;
+                    }
+                    (None, None) => {
+                        stats.no_match += 1;
+                    }
+                }
+            }
+            (None, None) => break,
+            _ => {
+                return Err(ExtractError::FastqParse(
+                    "read1 and read2 files have different numbers of records".into(),
+                ));
+            }
+        }
+    }
+
+    writer1.flush()?;
+    writer2.flush()?;
     Ok(stats)
 }

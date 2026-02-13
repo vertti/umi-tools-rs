@@ -24,6 +24,7 @@ ENABLED_TESTS = [
     "extract_indrop_blacklist",
     "extract_indrop_fuzzy",
     "extract_indrop_output_filtered",
+    "extract_either_read",
 ]
 
 # Flags the Rust binary doesn't support yet — stripped before invocation.
