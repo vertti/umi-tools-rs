@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::f64::consts::PI;
 use std::io::{BufWriter, Write};
 
 use needletail::parser::{FastqReader, FastxReader};
@@ -50,14 +51,21 @@ pub struct WhitelistStats {
 ///
 /// # Errors
 /// Returns error on I/O or pattern-matching failures.
-pub fn run_whitelist<R: std::io::Read + Send, W: Write>(
+pub fn run_whitelist<R: std::io::Read + Send, W: Write, FW: Write>(
     config: &WhitelistConfig,
     input: R,
     output: W,
+    filtered_out: Option<FW>,
 ) -> Result<WhitelistStats, ExtractError> {
-    let (all_counts, stats) = count_barcodes(&config.pattern, input, config.subset_reads)?;
+    let (all_counts, stats) =
+        count_barcodes(&config.pattern, input, config.subset_reads, filtered_out)?;
 
-    let whitelist = determine_whitelist(&all_counts, config.knee_method, config.cell_number);
+    let whitelist = determine_whitelist(
+        &all_counts,
+        config.knee_method,
+        config.cell_number,
+        config.expect_cells,
+    );
 
     let corrections =
         build_error_correction_map(&all_counts, &whitelist, config.error_correct_threshold);
@@ -85,16 +93,19 @@ pub fn run_whitelist<R: std::io::Read + Send, W: Write>(
 }
 
 /// Read FASTQ, extract cell barcodes, count frequencies.
-fn count_barcodes<R: std::io::Read + Send>(
+/// Optionally writes non-matching reads to `filtered_out`.
+fn count_barcodes<R: std::io::Read + Send, FW: Write>(
     pattern: &BarcodePattern,
     input: R,
     subset_reads: usize,
+    filtered_out: Option<FW>,
 ) -> Result<(HashMap<String, u64>, WhitelistStats), ExtractError> {
     let mut counts: HashMap<String, u64> = HashMap::new();
     let mut stats = WhitelistStats {
         input_reads: 0,
         no_match: 0,
     };
+    let mut filt_writer = filtered_out.map(BufWriter::new);
 
     let mut reader = FastqReader::new(input);
 
@@ -120,12 +131,36 @@ fn count_barcodes<R: std::io::Read + Send>(
             }
             Err(ExtractError::ReadTooShort { .. } | ExtractError::RegexNoMatch) => {
                 stats.no_match += 1;
+                if let Some(fw) = filt_writer.as_mut() {
+                    write_fastq_record(fw, record.id(), &seq, qual)?;
+                }
             }
             Err(e) => return Err(e),
         }
     }
 
+    if let Some(fw) = filt_writer.as_mut() {
+        fw.flush()?;
+    }
+
     Ok((counts, stats))
+}
+
+/// Write a FASTQ record (used for filtered-out output).
+fn write_fastq_record<W: Write>(
+    writer: &mut W,
+    id: &[u8],
+    seq: &[u8],
+    qual: &[u8],
+) -> Result<(), ExtractError> {
+    writer.write_all(b"@")?;
+    writer.write_all(id)?;
+    writer.write_all(b"\n")?;
+    writer.write_all(seq)?;
+    writer.write_all(b"\n+\n")?;
+    writer.write_all(qual)?;
+    writer.write_all(b"\n")?;
+    Ok(())
 }
 
 /// Determine which barcodes to whitelist based on knee detection or explicit cell number.
@@ -133,6 +168,7 @@ fn determine_whitelist(
     all_counts: &HashMap<String, u64>,
     knee_method: KneeMethod,
     cell_number: Option<usize>,
+    expect_cells: Option<usize>,
 ) -> Vec<String> {
     let mut sorted_barcodes: Vec<(&String, &u64)> = all_counts.iter().collect();
     sorted_barcodes.sort_by(|a, b| b.1.cmp(a.1));
@@ -161,10 +197,7 @@ fn determine_whitelist(
                     .map(|(bc, _)| (*bc).clone())
                     .collect()
             }
-            KneeMethod::Density => {
-                // Will be implemented in PR 6b
-                Vec::new()
-            }
+            KneeMethod::Density => knee_density(&sorted_barcodes, expect_cells),
         }
     }
 }
@@ -230,6 +263,126 @@ fn cumulative_sum(counts: &[u64]) -> Vec<f64> {
         result.push(sum);
     }
     result
+}
+
+/// Density-based knee detection using Gaussian KDE on log10-transformed counts.
+/// Matches scipy's `gaussian_kde(data, bw_method=0.1)` behavior.
+#[allow(clippy::cast_precision_loss)]
+fn knee_density(sorted_barcodes: &[(&String, &u64)], expect_cells: Option<usize>) -> Vec<String> {
+    if sorted_barcodes.is_empty() {
+        return Vec::new();
+    }
+
+    let max_count = *sorted_barcodes[0].1 as f64;
+    let abundance_threshold = max_count * 0.001;
+
+    // Log10-transform counts above abundance threshold
+    let log_counts: Vec<f64> = sorted_barcodes
+        .iter()
+        .map(|(_, c)| **c as f64)
+        .filter(|&c| c > abundance_threshold)
+        .map(f64::log10)
+        .collect();
+
+    if log_counts.is_empty() {
+        return Vec::new();
+    }
+
+    let bw = sample_std(&log_counts) * 0.1;
+    if bw <= 0.0 {
+        return Vec::new();
+    }
+
+    let log_min = log_counts.iter().copied().fold(f64::INFINITY, f64::min);
+    let log_max = log_counts.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+    let num_points: usize = 10_000;
+    let xx: Vec<f64> = (0..num_points)
+        .map(|i| (log_max - log_min).mul_add(i as f64 / (num_points - 1) as f64, log_min))
+        .collect();
+
+    let density = gaussian_kde(&log_counts, bw, &xx);
+
+    // Find local minima: density[i] < density[i-1] && density[i] < density[i+1]
+    let local_mins: Vec<usize> = (1..density.len() - 1)
+        .filter(|&i| density[i] < density[i - 1] && density[i] < density[i + 1])
+        .collect();
+
+    if local_mins.is_empty() {
+        return Vec::new();
+    }
+
+    // Select the appropriate local minimum by iterating in reverse
+    let mut selected_min: Option<usize> = None;
+    for &min_idx in local_mins.iter().rev() {
+        let threshold = 10.0_f64.powf(xx[min_idx]);
+        let passing_count = sorted_barcodes
+            .iter()
+            .filter(|(_, c)| **c as f64 > threshold)
+            .count();
+
+        if let Some(expected) = expect_cells {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let lo = (expected as f64 * 0.1) as usize;
+            if passing_count > lo && passing_count <= expected {
+                selected_min = Some(min_idx);
+                break;
+            }
+        } else {
+            let xx_values = xx.len();
+            let at_least_20pct = min_idx as f64 >= 0.2 * xx_values as f64;
+            let far_from_max = log_max - xx[min_idx] > 0.5;
+            let below_half_max = xx[min_idx] < log_max / 2.0;
+
+            if at_least_20pct && (far_from_max || below_half_max) {
+                selected_min = Some(min_idx);
+                break;
+            }
+        }
+    }
+
+    let Some(min_idx) = selected_min else {
+        return Vec::new();
+    };
+
+    let threshold = 10.0_f64.powf(xx[min_idx]);
+    sorted_barcodes
+        .iter()
+        .filter(|(_, c)| **c as f64 > threshold)
+        .map(|(bc, _)| (*bc).clone())
+        .collect()
+}
+
+/// Gaussian KDE evaluation matching scipy's `gaussian_kde` behavior.
+#[allow(clippy::cast_precision_loss)]
+fn gaussian_kde(data: &[f64], bw: f64, points: &[f64]) -> Vec<f64> {
+    let n = data.len() as f64;
+    let coeff = 1.0 / (n * bw * (2.0 * PI).sqrt());
+    points
+        .iter()
+        .map(|&x| {
+            coeff
+                * data
+                    .iter()
+                    .map(|&d| {
+                        let z = (x - d) / bw;
+                        (-0.5 * z * z).exp()
+                    })
+                    .sum::<f64>()
+        })
+        .collect()
+}
+
+/// Sample standard deviation (ddof=1, Bessel's correction).
+#[allow(clippy::cast_precision_loss)]
+fn sample_std(data: &[f64]) -> f64 {
+    let n = data.len() as f64;
+    if n <= 1.0 {
+        return 0.0;
+    }
+    let mean = data.iter().sum::<f64>() / n;
+    let var = data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    var.sqrt()
 }
 
 /// Build error correction map: for each non-whitelist barcode, find if it maps
@@ -339,5 +492,23 @@ mod tests {
         let values = vec![10.0, 15.0, 18.0, 19.0, 20.0];
         let idx = get_max_distance_index(&values);
         assert!(idx > 0 && idx < values.len() - 1);
+    }
+
+    #[test]
+    fn test_sample_std() {
+        let data = vec![2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let s = sample_std(&data);
+        // Expected: sqrt(32/7) ≈ 2.138
+        assert!((s - 2.138).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_gaussian_kde_single_point() {
+        let data = vec![0.0];
+        let bw = 1.0;
+        let points = vec![0.0];
+        let result = gaussian_kde(&data, bw, &points);
+        // At data point with bw=1: 1/(1*1*sqrt(2*pi)) * exp(0) ≈ 0.3989
+        assert!((result[0] - 0.3989).abs() < 0.001);
     }
 }
