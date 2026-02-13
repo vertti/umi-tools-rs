@@ -9,7 +9,7 @@ use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use umi_core::extract::{
-    ExtractConfig, QualityEncoding, extract_reads, extract_reads_paired,
+    ExtractConfig, QualityEncoding, extract_reads, extract_reads_either_read, extract_reads_paired,
     extract_reads_paired_r1_pattern,
 };
 use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
@@ -100,6 +100,10 @@ enum Commands {
         /// Output file for filtered read2 (reads that fail any filter)
         #[arg(long = "filtered-out2")]
         filtered_out2: Option<String>,
+
+        /// Either-read mode: try pattern on both reads, use whichever matches
+        #[arg(long = "either-read")]
+        either_read: bool,
     },
 }
 
@@ -127,6 +131,7 @@ fn main() -> Result<()> {
             blacklist,
             filtered_out,
             filtered_out2,
+            either_read,
         } => {
             let is_paired = read2_in.is_some();
             if !is_paired && bc_pattern.is_none() {
@@ -156,6 +161,7 @@ fn main() -> Result<()> {
                 blacklist.as_deref(),
                 filtered_out.as_deref(),
                 filtered_out2.as_deref(),
+                either_read,
             )
         }
     }
@@ -230,6 +236,7 @@ fn run_extract(
     blacklist_path: Option<&str>,
     filtered_out_path: Option<&str>,
     filtered_out2_path: Option<&str>,
+    either_read: bool,
 ) -> Result<()> {
     let pattern = bc_pattern
         .map(|p| parse_pattern(p, extract_method, prime3))
@@ -275,7 +282,13 @@ fn run_extract(
 
     let stats = if let Some(r2_path) = read2_in_path {
         let reader2 = open_input(Some(r2_path))?;
-        if read2_stdout {
+        if either_read {
+            let writer1 = open_output(output_path)?;
+            let writer2 = open_output(read2_out_path)
+                .context("--read2-out is required when --either-read is specified")?;
+            extract_reads_either_read(&config, reader1, reader2, writer1, writer2)
+                .context("either-read extraction failed")?
+        } else if read2_stdout {
             let writer = open_output(output_path)?;
             let filt1 = filtered_out_path
                 .map(|p| open_output(Some(p)))
