@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::error::ExtractError;
 
 /// Result of extracting barcodes from a single read's sequence and quality.
@@ -50,6 +52,9 @@ pub struct StringPattern {
     umi_positions: Vec<usize>,
     cell_positions: Vec<usize>,
     sample_positions: Vec<usize>,
+    umi_range: Option<Range<usize>>,
+    cell_range: Option<Range<usize>>,
+    sample_range: Option<Range<usize>>,
     pattern_length: usize,
     prime_end: PrimeEnd,
 }
@@ -84,10 +89,17 @@ impl StringPattern {
             }
         }
 
+        let umi_range = as_contiguous_range(&umi_positions);
+        let cell_range = as_contiguous_range(&cell_positions);
+        let sample_range = as_contiguous_range(&sample_positions);
+
         Ok(Self {
             umi_positions,
             cell_positions,
             sample_positions,
+            umi_range,
+            cell_range,
+            sample_range,
             pattern_length: pattern_str.len(),
             prime_end,
         })
@@ -124,21 +136,37 @@ impl StringPattern {
             ),
         };
 
-        let umi = gather_positions(barcode_region, &self.umi_positions);
-        let umi_quality = gather_positions(barcode_qual, &self.umi_positions);
-        let cell_barcode = gather_positions(barcode_region, &self.cell_positions);
-        let sample_seq = gather_positions(barcode_region, &self.sample_positions);
-        let sample_qual = gather_positions(barcode_qual, &self.sample_positions);
+        let umi = extract_slice(barcode_region, self.umi_range.as_ref(), &self.umi_positions);
+        let umi_quality = extract_slice(barcode_qual, self.umi_range.as_ref(), &self.umi_positions);
+        let cell_barcode = extract_slice(
+            barcode_region,
+            self.cell_range.as_ref(),
+            &self.cell_positions,
+        );
 
-        let (trimmed_sequence, trimmed_quality) = match self.prime_end {
-            PrimeEnd::Five => (
-                join_slices(&sample_seq, remaining_seq),
-                join_slices(&sample_qual, remaining_qual),
-            ),
-            PrimeEnd::Three => (
-                join_slices(remaining_seq, &sample_seq),
-                join_slices(remaining_qual, &sample_qual),
-            ),
+        let (trimmed_sequence, trimmed_quality) = if self.sample_positions.is_empty() {
+            (remaining_seq.to_vec(), remaining_qual.to_vec())
+        } else {
+            let sample_seq = extract_slice(
+                barcode_region,
+                self.sample_range.as_ref(),
+                &self.sample_positions,
+            );
+            let sample_qual = extract_slice(
+                barcode_qual,
+                self.sample_range.as_ref(),
+                &self.sample_positions,
+            );
+            match self.prime_end {
+                PrimeEnd::Five => (
+                    join_slices(&sample_seq, remaining_seq),
+                    join_slices(&sample_qual, remaining_qual),
+                ),
+                PrimeEnd::Three => (
+                    join_slices(remaining_seq, &sample_seq),
+                    join_slices(remaining_qual, &sample_qual),
+                ),
+            }
         };
 
         Ok(ExtractionResult {
@@ -341,8 +369,22 @@ fn preprocess_fuzzy(pattern_str: &str) -> Result<String, ExtractError> {
     Ok(result)
 }
 
-fn gather_positions(source: &[u8], positions: &[usize]) -> Vec<u8> {
-    positions.iter().map(|&i| source[i]).collect()
+/// If `positions` is a contiguous ascending sequence [a, a+1, ..., b-1], return Some(a..b).
+fn as_contiguous_range(positions: &[usize]) -> Option<Range<usize>> {
+    let start = *positions.first()?;
+    let is_contiguous = positions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .all(|(i, &pos)| pos == start + i);
+    is_contiguous.then(|| start..start + positions.len())
+}
+
+fn extract_slice(source: &[u8], range: Option<&Range<usize>>, positions: &[usize]) -> Vec<u8> {
+    range.map_or_else(
+        || positions.iter().map(|&i| source[i]).collect(),
+        |r| source[r.clone()].to_vec(),
+    )
 }
 
 fn join_slices(a: &[u8], b: &[u8]) -> Vec<u8> {
