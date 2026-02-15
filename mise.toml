@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "1.93", profile = "default" }
+rust = { version = "1.93", profile = "default", components = ["rustfmt", "clippy"] }
 uv = "latest"
 "aqua:sharkdp/hyperfine" = "latest"
 
