@@ -3,3 +3,5 @@
 .venv/
 .pytest_cache/
 __pycache__/
+benchmarks/data/
+benchmarks/results_*.md

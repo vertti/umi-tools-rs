@@ -1,6 +1,7 @@
 [tools]
-rust = "1.93"
+rust = { version = "1.93", profile = "default" }
 uv = "latest"
+"aqua:sharkdp/hyperfine" = "latest"
 
 [tasks.fmt]
 run = "cargo fmt --all -- --check"
@@ -26,3 +27,12 @@ description = "Run all CI checks"
 run = "uv run --group test pytest tests/umi_tools_compat -v"
 description = "Run umi-tools compatibility tests"
 depends = ["check"]
+
+[tasks.bench-setup]
+run = "bash benchmarks/setup.sh"
+description = "Download benchmark data"
+
+[tasks.bench]
+run = "bash benchmarks/run.sh"
+depends = ["bench-setup"]
+description = "Run extract benchmarks"
