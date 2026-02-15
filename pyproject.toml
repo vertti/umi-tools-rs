@@ -5,3 +5,4 @@ requires-python = ">=3.10"
 
 [dependency-groups]
 test = ["pytest", "pyyaml"]
+bench = ["umi_tools"]
