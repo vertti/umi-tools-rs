@@ -15,6 +15,9 @@ ENABLED_TESTS = [
     "whitelist_indrop",
     "whitelist_indrop_set_cell",
     "whitelist_indrop_3_errors",
+    "whitelist_indrop_density",
+    "whitelist_indrop_expect_cells_density",
+    "whitelist_indrop_filtered_out",
 ]
 
 # Flags the Rust binary doesn't support yet — stripped before invocation.

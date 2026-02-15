@@ -232,7 +232,7 @@ fn main() -> Result<()> {
             error_correct_threshold,
             ed_above_threshold,
             _plot_prefix: _,
-            filtered_out: _,
+            filtered_out,
             subset_reads,
         } => run_whitelist_cmd(
             &bc_pattern,
@@ -245,6 +245,7 @@ fn main() -> Result<()> {
             expect_cells,
             error_correct_threshold,
             ed_above_threshold.as_deref(),
+            filtered_out.as_deref(),
             subset_reads,
         ),
     }
@@ -479,6 +480,7 @@ fn run_whitelist_cmd(
     expect_cells: Option<usize>,
     error_correct_threshold: usize,
     ed_above_threshold: Option<&str>,
+    filtered_out_path: Option<&str>,
     subset_reads: usize,
 ) -> Result<()> {
     let pattern = parse_pattern(bc_pattern, extract_method, prime3)?;
@@ -511,8 +513,13 @@ fn run_whitelist_cmd(
 
     let reader = open_input(input_path)?;
     let writer = open_output(output_path)?;
+    let filt_out = filtered_out_path
+        .map(|p| open_output(Some(p)))
+        .transpose()
+        .context("failed to open --filtered-out")?;
 
-    let stats = run_whitelist(&config, reader, writer).context("whitelist command failed")?;
+    let stats =
+        run_whitelist(&config, reader, writer, filt_out).context("whitelist command failed")?;
 
     eprintln!(
         "Reads input: {}, no barcode match: {}",
