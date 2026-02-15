@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
+use umi_core::dedup::{DedupConfig, DedupMethod, run_dedup};
 use umi_core::extract::{
     ExtractConfig, QualityEncoding, extract_reads, extract_reads_either_read, extract_reads_paired,
     extract_reads_paired_r1_pattern,
@@ -161,8 +162,44 @@ enum Commands {
         #[arg(long = "subset-reads", default_value = "100000000")]
         subset_reads: usize,
     },
+
+    /// Deduplicate BAM reads based on UMI and mapping position
+    Dedup {
+        /// Input BAM file
+        #[arg(short = 'I', long = "stdin")]
+        input: Option<String>,
+
+        /// Dedup method: unique, percentile, cluster, adjacency, directional
+        #[arg(long = "method", default_value = "directional")]
+        method: String,
+
+        /// Ignore UMI — deduplicate by position only
+        #[arg(long = "ignore-umi")]
+        ignore_umi: bool,
+
+        /// Output SAM instead of BAM
+        #[arg(long = "out-sam")]
+        out_sam: bool,
+
+        /// Random seed for reproducible tie-breaking
+        #[arg(long = "random-seed", default_value = "0")]
+        random_seed: u64,
+
+        /// UMI separator in read name
+        #[arg(long = "umi-separator", default_value = "_")]
+        umi_separator: String,
+
+        /// Only process reads on this chromosome
+        #[arg(long = "chrom")]
+        chrom: Option<String>,
+
+        /// Log file (accepted but ignored)
+        #[arg(short = 'L', long = "log")]
+        _log: Option<String>,
+    },
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -247,6 +284,24 @@ fn main() -> Result<()> {
             ed_above_threshold.as_deref(),
             filtered_out.as_deref(),
             subset_reads,
+        ),
+        Commands::Dedup {
+            input,
+            method,
+            ignore_umi,
+            out_sam,
+            random_seed,
+            umi_separator,
+            chrom,
+            _log: _,
+        } => run_dedup_cmd(
+            input.as_deref(),
+            &method,
+            ignore_umi,
+            out_sam,
+            random_seed,
+            &umi_separator,
+            chrom.as_deref(),
         ),
     }
 }
@@ -524,6 +579,48 @@ fn run_whitelist_cmd(
     eprintln!(
         "Reads input: {}, no barcode match: {}",
         stats.input_reads, stats.no_match,
+    );
+
+    Ok(())
+}
+
+fn run_dedup_cmd(
+    input_path: Option<&str>,
+    method: &str,
+    ignore_umi: bool,
+    out_sam: bool,
+    random_seed: u64,
+    umi_separator: &str,
+    chrom: Option<&str>,
+) -> Result<()> {
+    let input = input_path.context("--stdin is required for dedup (BAM input path)")?;
+
+    let dedup_method = match method {
+        "unique" => DedupMethod::Unique,
+        "percentile" => DedupMethod::Percentile,
+        "cluster" => DedupMethod::Cluster,
+        "adjacency" => DedupMethod::Adjacency,
+        "directional" => DedupMethod::Directional,
+        other => bail!("unknown dedup method '{other}'"),
+    };
+
+    let sep_byte = umi_separator.as_bytes().first().copied().unwrap_or(b'_');
+
+    let config = DedupConfig {
+        method: dedup_method,
+        ignore_umi,
+        umi_separator: sep_byte,
+        random_seed,
+        out_sam,
+        chrom: chrom.map(String::from),
+    };
+
+    let mut stdout = io::stdout().lock();
+    let stats = run_dedup(&config, input, &mut stdout).context("dedup failed")?;
+
+    eprintln!(
+        "Reads input: {}, output: {}, positions: {}",
+        stats.input_reads, stats.output_reads, stats.positions,
     );
 
     Ok(())

@@ -10,4 +10,5 @@ workspace = true
 needletail = "0.6"
 flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
 regex = "1"
+rust-htslib = { version = "1", default-features = false }
 thiserror = "2"
