@@ -1,0 +1,13 @@
+amends "package://github.com/jdx/hk/releases/download/v1.36.0/hk@1.36.0#/Config.pkl"
+
+hooks {
+    ["pre-commit"] {
+        stash = "git"
+        steps {
+            ["cargo-fmt"] {
+                glob = List("*.rs")
+                check = "cargo fmt --all -- --check"
+            }
+        }
+    }
+}

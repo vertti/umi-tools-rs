@@ -2,6 +2,8 @@
 rust = { version = "1.93", profile = "default" }
 uv = "latest"
 "aqua:sharkdp/hyperfine" = "latest"
+hk = "latest"
+pkl = "latest"
 
 [tasks.fmt]
 run = "cargo fmt --all -- --check"
