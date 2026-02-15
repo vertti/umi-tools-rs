@@ -57,7 +57,7 @@ pub fn run_whitelist<R: std::io::Read + Send, W: Write, FW: Write>(
     output: W,
     filtered_out: Option<FW>,
 ) -> Result<WhitelistStats, ExtractError> {
-    let (all_counts, stats) =
+    let (all_counts, first_seen, stats) =
         count_barcodes(&config.pattern, input, config.subset_reads, filtered_out)?;
 
     let whitelist = determine_whitelist(
@@ -67,8 +67,21 @@ pub fn run_whitelist<R: std::io::Read + Send, W: Write, FW: Write>(
         config.expect_cells,
     );
 
-    let corrections =
+    let mut corrections =
         build_error_correction_map(&all_counts, &whitelist, config.error_correct_threshold);
+
+    let whitelist = if let Some(mode) = config.ed_above_threshold {
+        error_detect_above_threshold(
+            &all_counts,
+            &first_seen,
+            whitelist,
+            &mut corrections,
+            config.error_correct_threshold,
+            mode,
+        )
+    } else {
+        whitelist
+    };
 
     let mut entries: Vec<WhitelistEntry> = whitelist
         .into_iter()
@@ -94,13 +107,16 @@ pub fn run_whitelist<R: std::io::Read + Send, W: Write, FW: Write>(
 
 /// Read FASTQ, extract cell barcodes, count frequencies.
 /// Optionally writes non-matching reads to `filtered_out`.
+#[allow(clippy::type_complexity)]
 fn count_barcodes<R: std::io::Read + Send, FW: Write>(
     pattern: &BarcodePattern,
     input: R,
     subset_reads: usize,
     filtered_out: Option<FW>,
-) -> Result<(HashMap<String, u64>, WhitelistStats), ExtractError> {
+) -> Result<(HashMap<String, u64>, HashMap<String, usize>, WhitelistStats), ExtractError> {
     let mut counts: HashMap<String, u64> = HashMap::new();
+    let mut first_seen: HashMap<String, usize> = HashMap::new();
+    let mut seen_order: usize = 0;
     let mut stats = WhitelistStats {
         input_reads: 0,
         no_match: 0,
@@ -126,6 +142,10 @@ fn count_barcodes<R: std::io::Read + Send, FW: Write>(
             Ok(extraction) => {
                 let cell = String::from_utf8_lossy(&extraction.cell_barcode).into_owned();
                 if !cell.is_empty() {
+                    if !counts.contains_key(&cell) {
+                        first_seen.insert(cell.clone(), seen_order);
+                        seen_order += 1;
+                    }
                     *counts.entry(cell).or_insert(0) += 1;
                 }
             }
@@ -143,7 +163,7 @@ fn count_barcodes<R: std::io::Read + Send, FW: Write>(
         fw.flush()?;
     }
 
-    Ok((counts, stats))
+    Ok((counts, first_seen, stats))
 }
 
 /// Write a FASTQ record (used for filtered-out output).
@@ -383,6 +403,107 @@ fn sample_std(data: &[f64]) -> f64 {
     let mean = data.iter().sum::<f64>() / n;
     let var = data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
     var.sqrt()
+}
+
+/// Detect whitelist barcodes that may be errors of higher-count whitelist barcodes.
+/// Removes them from the whitelist, optionally correcting substitution errors.
+fn error_detect_above_threshold(
+    all_counts: &HashMap<String, u64>,
+    first_seen: &HashMap<String, usize>,
+    whitelist: Vec<String>,
+    corrections: &mut HashMap<String, Vec<(String, u64)>>,
+    threshold: usize,
+    mode: EdAboveThreshold,
+) -> Vec<String> {
+    // Sort whitelist by count ascending, with first-seen order as tiebreaker
+    // (matches Python's stable sort on Counter.most_common() insertion order)
+    let mut sorted_wl: Vec<String> = whitelist;
+    sorted_wl.sort_by(|a, b| {
+        let count_a = all_counts.get(a).copied().unwrap_or(0);
+        let count_b = all_counts.get(b).copied().unwrap_or(0);
+        count_a
+            .cmp(&count_b)
+            .then_with(|| first_seen.get(a).cmp(&first_seen.get(b)))
+    });
+
+    let mut discard: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for ix in 0..sorted_wl.len() {
+        let cb = &sorted_wl[ix];
+
+        // Find near misses among higher-count barcodes
+        let mut near_misses: Vec<String> = Vec::new();
+        for higher_bc in &sorted_wl[ix + 1..] {
+            let cb_len = cb.len();
+            let h_len = higher_bc.len();
+            if cb_len.max(h_len) > cb_len.min(h_len) + threshold {
+                continue;
+            }
+            if prefix_edit_distance(cb.as_bytes(), higher_bc.as_bytes()) <= threshold {
+                near_misses.push(higher_bc.clone());
+                if near_misses.len() > 1 {
+                    break;
+                }
+            }
+        }
+
+        if near_misses.is_empty() {
+            continue;
+        }
+
+        match mode {
+            EdAboveThreshold::Discard => {
+                discard.insert(cb.clone());
+            }
+            EdAboveThreshold::Correct => {
+                if near_misses.len() == 1
+                    && cb.len() == near_misses[0].len()
+                    && hamming_distance(cb.as_bytes(), near_misses[0].as_bytes()) <= threshold
+                {
+                    // Pure substitution: correct by adding to the higher-count barcode's map
+                    let count = all_counts.get(cb).copied().unwrap_or(0);
+                    corrections
+                        .entry(near_misses[0].clone())
+                        .or_default()
+                        .push((cb.clone(), count));
+                    // Re-sort after adding
+                    if let Some(corr_list) = corrections.get_mut(&near_misses[0]) {
+                        corr_list.sort_by(|a, b| a.0.cmp(&b.0));
+                    }
+                }
+                discard.insert(cb.clone());
+            }
+        }
+    }
+
+    sorted_wl
+        .into_iter()
+        .filter(|bc| !discard.contains(bc))
+        .collect()
+}
+
+/// Semi-global edit distance: minimum edit distance between pattern `a` and any
+/// prefix of target `b`. Matches Python `regex.compile("(a){e<=N}").match(b)`
+/// semantics where `match()` anchors at the start but doesn't require consuming
+/// the entire target.
+fn prefix_edit_distance(a: &[u8], b: &[u8]) -> usize {
+    let m = a.len();
+    let n = b.len();
+
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0; n + 1];
+
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    // Minimum over all prefix lengths of b (including full b)
+    *prev.iter().min().unwrap_or(&usize::MAX)
 }
 
 /// Build error correction map: for each non-whitelist barcode, find if it maps
