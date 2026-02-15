@@ -2,7 +2,7 @@
 
 Implementation roadmap derived from the umi-tools compatibility test suite (`tests/tests.yaml` in the Python umi-tools repo). The test suite has **66 tests** total; we use it to track feature parity.
 
-## Current state: 14 / 66 tests passing
+## Current state: 23 / 66 tests passing
 
 | Phase | Tests | Status |
 |-------|-------|--------|
@@ -12,26 +12,9 @@ Implementation roadmap derived from the umi-tools compatibility test suite (`tes
 | Phase 3 | `extract_scrb_seq_suffix`, `extract_scrb_seq_prefiltered` | Done |
 | Phase 4 | `extract_indrop_fuzzy`, `extract_indrop_blacklist`, `extract_indrop_output_filtered` | Done |
 | Phase 5 | `extract_either_read` | Done |
+| Phase 6 | `whitelist_scrb_seq`, `whitelist_indrop`, `whitelist_indrop_set_cell`, `whitelist_indrop_3_errors`, `whitelist_indrop_density`, `whitelist_indrop_expect_cells_density`, `whitelist_indrop_filtered_out`, `whitelist_indrop_ed_above_threshold_discard`, `whitelist_indrop_ed_above_threshold_correct` | Done |
 
 ---
-
-## Phase 6: Whitelist subcommand (9 tests)
-
-New subcommand: `whitelist`. Identifies valid cell barcodes from FASTQ using knee-point detection.
-
-| Test | Key flags |
-|------|-----------|
-| `whitelist_scrb_seq` | `--bc-pattern=CCCCCCNNNNNNNNNN`, `--plot-prefix` |
-| `whitelist_indrop` | regex pattern, basic |
-| `whitelist_indrop_filtered_out` | `--filtered-out` |
-| `whitelist_indrop_density` | `--knee-method=density`, `--plot-prefix` |
-| `whitelist_indrop_set_cell` | `--set-cell-number=1000` |
-| `whitelist_indrop_expect_cells_density` | `--knee-method=density`, `--expect-cells=6000` |
-| `whitelist_indrop_3_errors` | `--error-correct-threshold=3` |
-| `whitelist_indrop_ed_above_threshold_discard` | `--ed-above-threshold=discard`, `--error-correct-threshold=3` |
-| `whitelist_indrop_ed_above_threshold_correct` | `--ed-above-threshold=correct`, `--error-correct-threshold=3` |
-
-Key features: knee-point methods (distance, density), cell number override, error correction thresholds, edit-distance above-threshold handling.
 
 ## Phase 7: BAM infrastructure + dedup (16 tests)
 
