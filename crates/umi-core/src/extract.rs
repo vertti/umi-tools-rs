@@ -67,7 +67,7 @@ pub fn extract_reads<R: std::io::Read + Send, W: Write>(
     })?;
 
     let mut stats = ExtractStats::default();
-    let mut writer = BufWriter::new(output);
+    let mut writer = BufWriter::with_capacity(64 * 1024, output);
     let mut reader = FastqReader::new(input);
 
     while let Some(result) = reader.next() {
@@ -235,8 +235,8 @@ where
     })?;
 
     let mut stats = ExtractStats::default();
-    let mut writer1 = BufWriter::new(output1);
-    let mut writer2 = BufWriter::new(output2);
+    let mut writer1 = BufWriter::with_capacity(64 * 1024, output1);
+    let mut writer2 = BufWriter::with_capacity(64 * 1024, output2);
     let mut reader1 = FastqReader::new(input1);
     let mut reader2 = FastqReader::new(input2);
 
@@ -457,7 +457,7 @@ where
     })?;
 
     let mut stats = ExtractStats::default();
-    let mut writer = BufWriter::new(output);
+    let mut writer = BufWriter::with_capacity(64 * 1024, output);
     let mut filt_writer1 = filtered_out1.map(BufWriter::new);
     let mut filt_writer2 = filtered_out2.map(BufWriter::new);
     let mut reader1 = FastqReader::new(input1);
@@ -592,8 +592,8 @@ where
     })?;
 
     let mut stats = ExtractStats::default();
-    let mut writer1 = BufWriter::new(output1);
-    let mut writer2 = BufWriter::new(output2);
+    let mut writer1 = BufWriter::with_capacity(64 * 1024, output1);
+    let mut writer2 = BufWriter::with_capacity(64 * 1024, output2);
     let mut reader1 = FastqReader::new(input1);
     let mut reader2 = FastqReader::new(input2);
 
