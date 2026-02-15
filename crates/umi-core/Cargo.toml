@@ -8,6 +8,6 @@ workspace = true
 
 [dependencies]
 needletail = "0.6"
-flate2 = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
 regex = "1"
 thiserror = "2"

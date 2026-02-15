@@ -290,7 +290,7 @@ fn open_output(path: Option<&str>) -> Result<Box<dyn Write>> {
             let file =
                 File::create(p).with_context(|| format!("failed to create output file: {p}"))?;
             if is_gzipped(p) {
-                Ok(Box::new(GzEncoder::new(file, Compression::default())))
+                Ok(Box::new(GzEncoder::new(file, Compression::new(3))))
             } else {
                 Ok(Box::new(file))
             }

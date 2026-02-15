@@ -21,4 +21,4 @@ workspace = true
 umi-core = { path = "crates/umi-core" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-flate2 = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
