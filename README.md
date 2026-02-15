@@ -2,7 +2,7 @@
 
 A fast drop-in replacement for [UMI-tools](https://github.com/CGATOxford/UMI-tools), written in Rust.
 
-**11-28x faster** than Python UMI-tools on real 10x Genomics data.
+**14-33x faster** than Python UMI-tools on real 10x Genomics data.
 
 ## Benchmarks
 
@@ -10,8 +10,8 @@ Measured with [hyperfine](https://github.com/sharkdp/hyperfine) on 10x Genomics 
 
 | Dataset | umi-tools-rs | UMI-tools (Python) | Speedup |
 |:--------|-------------:|-------------------:|--------:|
-| 100K reads (1.8 MB gz) | 34 ms | 951 ms | **28x** |
-| 912K reads (19 MB gz) | 290 ms | 3,212 ms | **11x** |
+| 100K reads (1.8 MB gz) | 26 ms | 853 ms | **33x** |
+| 912K reads (19 MB gz) | 207 ms | 2,964 ms | **14x** |
 
 Run benchmarks yourself: `mise run bench`
 
