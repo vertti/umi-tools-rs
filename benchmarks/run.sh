@@ -57,4 +57,38 @@ run_benchmark() {
 run_benchmark "100k" "$DATA_DIR/hgmm_100_R1_100k.fastq.gz"
 run_benchmark "full" "$DATA_DIR/hgmm_100_R1.fastq.gz"
 
+# --- Dedup benchmarks ---
+
+SCRIPT_DIR="$(dirname "$0")"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+UMI_TOOLS_TESTS_DIR="${UMI_TOOLS_TESTS_DIR:-$REPO_ROOT/../umi-tools/tests}"
+CHR19_BAM="$UMI_TOOLS_TESTS_DIR/chr19.bam"
+
+if [[ -f "$CHR19_BAM" ]]; then
+    run_dedup_benchmark() {
+        local label=$1
+        local method=$2
+
+        echo "=== Benchmark: dedup_${label} ==="
+        echo "Input: $CHR19_BAM ($(du -h "$CHR19_BAM" | cut -f1))"
+        echo ""
+
+        hyperfine \
+            --warmup 2 \
+            --min-runs 5 \
+            --export-markdown "benchmarks/results_dedup_${label}.md" \
+            --command-name "umi-tools-rs" \
+            "$RUST_BIN dedup --method=$method --out-sam --random-seed=123456789 --stdin=$CHR19_BAM > /dev/null" \
+            --command-name "umi_tools (python)" \
+            "$UMI_TOOLS dedup --method=$method --out-sam --random-seed=123456789 --stdin=$CHR19_BAM --stdout=/dev/null --log=/dev/null"
+
+        echo ""
+    }
+
+    run_dedup_benchmark "directional" "directional"
+else
+    echo "Skipping dedup benchmarks: $CHR19_BAM not found"
+    echo "Set UMI_TOOLS_TESTS_DIR or clone umi-tools next to this repo"
+fi
+
 echo "Results written to benchmarks/results_*.md"

@@ -2,16 +2,24 @@
 
 A fast drop-in replacement for [UMI-tools](https://github.com/CGATOxford/UMI-tools), written in Rust.
 
-**14-33x faster** than Python UMI-tools on real 10x Genomics data.
+**14-50x faster** than Python UMI-tools on real data.
 
 ## Benchmarks
 
-Measured with [hyperfine](https://github.com/sharkdp/hyperfine) on 10x Genomics hgmm_100 data (`extract`, pattern `CCCCCCCCCCCCCCCCNNNNNNNNNN`):
+Measured with [hyperfine](https://github.com/sharkdp/hyperfine).
+
+**Extract** (10x Genomics hgmm_100, pattern `CCCCCCCCCCCCCCCCNNNNNNNNNN`):
 
 | Dataset | umi-tools-rs | UMI-tools (Python) | Speedup |
 |:--------|-------------:|-------------------:|--------:|
 | 100K reads (1.8 MB gz) | 26 ms | 853 ms | **33x** |
 | 912K reads (19 MB gz) | 207 ms | 2,964 ms | **14x** |
+
+**Dedup** (chr19, 55K reads, directional method):
+
+| Dataset | umi-tools-rs | UMI-tools (Python) | Speedup |
+|:--------|-------------:|-------------------:|--------:|
+| 55K reads | 18 ms | 900 ms | **50x** |
 
 Run benchmarks yourself: `mise run bench`
 
