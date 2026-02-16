@@ -2,16 +2,24 @@
 
 A fast drop-in replacement for [UMI-tools](https://github.com/CGATOxford/UMI-tools), written in Rust.
 
-**14-33x faster** than Python UMI-tools on real 10x Genomics data.
+**14-50x faster** than Python UMI-tools on real data.
 
 ## Benchmarks
 
-Measured with [hyperfine](https://github.com/sharkdp/hyperfine) on 10x Genomics hgmm_100 data (`extract`, pattern `CCCCCCCCCCCCCCCCNNNNNNNNNN`):
+Measured with [hyperfine](https://github.com/sharkdp/hyperfine).
+
+**Extract** (10x Genomics hgmm_100, pattern `CCCCCCCCCCCCCCCCNNNNNNNNNN`):
 
 | Dataset | umi-tools-rs | UMI-tools (Python) | Speedup |
 |:--------|-------------:|-------------------:|--------:|
 | 100K reads (1.8 MB gz) | 26 ms | 853 ms | **33x** |
 | 912K reads (19 MB gz) | 207 ms | 2,964 ms | **14x** |
+
+**Dedup** (chr19, 55K reads, directional method):
+
+| Dataset | umi-tools-rs | UMI-tools (Python) | Speedup |
+|:--------|-------------:|-------------------:|--------:|
+| 55K reads | 18 ms | 900 ms | **50x** |
 
 Run benchmarks yourself: `mise run bench`
 
@@ -21,7 +29,7 @@ Run benchmarks yourself: `mise run bench`
 |:--------|:------------|:------:|
 | `extract` | Extract UMIs from FASTQ reads | Done |
 | `whitelist` | Build cell barcode whitelist | Done |
-| `dedup` | Deduplicate aligned BAM reads | Planned |
+| `dedup` | Deduplicate aligned BAM reads | Done |
 | `group` | Group PCR duplicates in BAM | Planned |
 | `count` | Count unique molecules per gene | Planned |
 | `count_tab` | Count from flatfile input | Planned |
@@ -58,6 +66,13 @@ umi-tools-rs whitelist --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNN \
 umi-tools-rs extract --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNN \
   --stdin=R1.fastq.gz --stdout=extracted.fastq.gz \
   --whitelist=whitelist.tsv --error-correct-cell
+
+# Deduplicate BAM reads
+umi-tools-rs dedup --stdin=aligned.bam --stdout=deduped.bam
+
+# Dedup with specific method and chromosome filter
+umi-tools-rs dedup --method=directional --chrom=chr19 \
+  --stdin=aligned.bam --stdout=deduped.bam
 ```
 
 Aims to be CLI-compatible with Python UMI-tools — same flags, same output format.

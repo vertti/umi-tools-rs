@@ -2,7 +2,7 @@
 
 Implementation roadmap derived from the umi-tools compatibility test suite (`tests/tests.yaml` in the Python umi-tools repo). The test suite has **66 tests** total; we use it to track feature parity.
 
-## Current state: 23 / 66 tests passing
+## Current state: 30 / 66 tests passing
 
 | Phase | Tests | Status |
 |-------|-------|--------|
@@ -20,19 +20,19 @@ Implementation roadmap derived from the umi-tools compatibility test suite (`tes
 
 New subcommand: `dedup`. Requires BAM I/O (rust-htslib or noodles).
 
-| Test | Key flags |
-|------|-----------|
-| `dedup_single_ignore` | `--ignore-umi` |
-| `dedup_single_chrom` | `--chrom=chr19` |
-| `dedup_single_unique` | `--method=unique` |
-| `dedup_single_perc` | `--method=percentile` |
-| `dedup_single_cluster` | `--method=cluster` |
-| `dedup_single_adj` | `--method=adjacency` |
-| `dedup_single_dir` | `--method=directional` |
-| `dedup_single_stats` | `--method=cluster`, `--output-stats` |
-| `dedup_single_dir_edit_dist` | `--method=directional`, `--edit-distance-threshold=2` |
-| `dedup_single_subset` | `--method=directional`, `--subset=0.1` |
-| `dedup_single_sep` | `--umi-separator=:` |
+| Test | Key flags | Status |
+|------|-----------|--------|
+| `dedup_single_ignore` | `--ignore-umi` | Done |
+| `dedup_single_chrom` | `--chrom=chr19` | Done |
+| `dedup_single_unique` | `--method=unique` | Done |
+| `dedup_single_perc` | `--method=percentile` | Done |
+| `dedup_single_cluster` | `--method=cluster` | Done |
+| `dedup_single_adj` | `--method=adjacency` | Done |
+| `dedup_single_dir` | `--method=directional` | Done |
+| `dedup_single_stats` | `--method=cluster`, `--output-stats` | |
+| `dedup_single_dir_edit_dist` | `--method=directional`, `--edit-distance-threshold=2` | |
+| `dedup_single_subset` | `--method=directional`, `--subset=0.1` | |
+| `dedup_single_sep` | `--umi-separator=:` | Done |
 | `dedup_single_tag` | `--umi-tag=RX`, `--extract-umi-method=tag` |
 | `dedup_single_tag_missing` | `--umi-tag=RX`, `--extract-umi-method=tag`, `--output-stats` |
 | `dedup_single_gene_tag` | `--per-gene`, `--gene-tag=XF`, `--skip-tags-regex` |
