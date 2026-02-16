@@ -265,6 +265,22 @@ enum Commands {
         #[arg(long = "umi-tag")]
         umi_tag: Option<String>,
 
+        /// Deduplicate per gene (requires --gene-tag)
+        #[arg(long = "per-gene")]
+        per_gene: bool,
+
+        /// BAM tag containing gene assignment
+        #[arg(long = "gene-tag")]
+        gene_tag: Option<String>,
+
+        /// Skip reads with gene tag matching this regex
+        #[arg(long = "skip-tags-regex")]
+        skip_tags_regex: Option<String>,
+
+        /// Output stats file prefix
+        #[arg(long = "output-stats")]
+        output_stats: Option<String>,
+
         /// Log file (accepted but ignored)
         #[arg(short = 'L', long = "log")]
         _log: Option<String>,
@@ -397,6 +413,10 @@ fn main() -> Result<()> {
             subset,
             extract_umi_method,
             umi_tag,
+            per_gene,
+            gene_tag,
+            skip_tags_regex,
+            output_stats,
             _log: _,
         } => run_dedup_cmd(
             input.as_deref(),
@@ -410,6 +430,10 @@ fn main() -> Result<()> {
             subset,
             &extract_umi_method,
             umi_tag.as_deref(),
+            per_gene,
+            gene_tag.as_deref(),
+            skip_tags_regex.as_deref(),
+            output_stats.as_deref(),
         ),
     }
 }
@@ -758,6 +782,10 @@ fn run_dedup_cmd(
     subset: Option<f32>,
     extract_umi_method: &str,
     umi_tag: Option<&str>,
+    per_gene: bool,
+    gene_tag: Option<&str>,
+    skip_tags_regex: Option<&str>,
+    output_stats: Option<&str>,
 ) -> Result<()> {
     let input = input_path.context("--stdin is required for dedup (BAM input path)")?;
 
@@ -783,6 +811,10 @@ fn run_dedup_cmd(
         subset,
         extract_umi_method: extract_umi_method.to_string(),
         umi_tag: umi_tag.map(String::from),
+        per_gene,
+        gene_tag: gene_tag.map(String::from),
+        skip_tags_regex: skip_tags_regex.map(String::from),
+        output_stats: output_stats.map(String::from),
     };
 
     let mut stdout = io::stdout().lock();

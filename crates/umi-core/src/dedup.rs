@@ -140,6 +140,10 @@ pub struct DedupConfig {
     pub subset: Option<f32>,
     pub extract_umi_method: String,
     pub umi_tag: Option<String>,
+    pub per_gene: bool,
+    pub gene_tag: Option<String>,
+    pub skip_tags_regex: Option<String>,
+    pub output_stats: Option<String>,
 }
 
 pub struct DedupStats {
@@ -584,6 +588,7 @@ pub(crate) fn median(values: &[u32]) -> f64 {
 /// # Errors
 ///
 /// Returns `DedupError` on BAM I/O failures or unknown chromosome filter.
+#[allow(clippy::too_many_lines)]
 pub fn run_dedup(
     config: &DedupConfig,
     input_path: &str,
@@ -632,6 +637,15 @@ pub fn run_dedup(
     let mut last_start: i64 = 0;
     let mut last_chrom: i32 = -1;
 
+    // Per-gene mode: gene tag value → sequential i64 ID used as "position".
+    let skip_regex = config
+        .skip_tags_regex
+        .as_ref()
+        .map(|s| regex::Regex::new(s).map_err(|e| DedupError::InvalidRegex(e.to_string())))
+        .transpose()?;
+    let mut gene_ids: HashMap<Vec<u8>, i64> = HashMap::new();
+    let mut next_gene_id: i64 = 0;
+
     for result in reader.records() {
         let record = result.map_err(|e| DedupError::BamRead(e.to_string()))?;
 
@@ -653,26 +667,6 @@ pub fn run_dedup(
             continue;
         }
 
-        let (start, pos) = get_read_position(&record);
-
-        // Flush buffer when moving far enough or changing chromosome.
-        // Matches Python: `if start > last_pos + 1000 or current_chr != last_chr`
-        if tid != last_chrom {
-            output_records.extend(buffer.drain_all(config.method, config.edit_distance_threshold));
-        } else if start > last_start + 1000 {
-            let threshold = start - 1000;
-            output_records.extend(buffer.drain_up_to(
-                threshold,
-                config.method,
-                config.edit_distance_threshold,
-            ));
-        }
-
-        last_start = start;
-        last_chrom = tid;
-
-        let key: GroupKey = (record.is_reverse(), false, 0, 0);
-
         let umi = if config.ignore_umi {
             Vec::new()
         } else if config.extract_umi_method == "tag" {
@@ -684,7 +678,46 @@ pub fn run_dedup(
             extract_umi_from_name(&record, config.umi_separator)
         };
 
-        buffer.add(record, pos, key, umi, &mut rng);
+        if config.per_gene {
+            // Per-gene mode: group by gene tag value instead of position.
+            let gene_tag_name = config.gene_tag.as_deref().unwrap_or("XF");
+            let Some(gene) = extract_umi_from_tag(&record, gene_tag_name) else {
+                continue;
+            };
+            if skip_regex
+                .as_ref()
+                .is_some_and(|re| re.is_match(std::str::from_utf8(&gene).unwrap_or("")))
+            {
+                continue;
+            }
+            let gene_id = *gene_ids.entry(gene).or_insert_with(|| {
+                let id = next_gene_id;
+                next_gene_id += 1;
+                id
+            });
+            buffer.add(record, gene_id, (false, false, 0, 0), umi, &mut rng);
+        } else {
+            let (start, pos) = get_read_position(&record);
+
+            // Flush buffer when moving far enough or changing chromosome.
+            if tid != last_chrom {
+                output_records
+                    .extend(buffer.drain_all(config.method, config.edit_distance_threshold));
+            } else if start > last_start + 1000 {
+                let threshold = start - 1000;
+                output_records.extend(buffer.drain_up_to(
+                    threshold,
+                    config.method,
+                    config.edit_distance_threshold,
+                ));
+            }
+
+            last_start = start;
+            last_chrom = tid;
+
+            let key: GroupKey = (record.is_reverse(), false, 0, 0);
+            buffer.add(record, pos, key, umi, &mut rng);
+        }
     }
 
     output_records.extend(buffer.drain_all(config.method, config.edit_distance_threshold));
@@ -731,6 +764,8 @@ pub enum DedupError {
     BamWrite(String),
     #[error("unknown chromosome: {0}")]
     UnknownChrom(String),
+    #[error("invalid regex: {0}")]
+    InvalidRegex(String),
 }
 
 #[cfg(test)]
