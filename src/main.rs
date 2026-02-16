@@ -613,6 +613,7 @@ fn run_dedup_cmd(
         random_seed,
         out_sam,
         chrom: chrom.map(String::from),
+        edit_distance_threshold: 1,
     };
 
     let mut stdout = io::stdout().lock();

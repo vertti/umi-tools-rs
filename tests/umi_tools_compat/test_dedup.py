@@ -12,6 +12,13 @@ from .conftest import _get_tests_dir, _load_tests_yaml
 
 ENABLED_TESTS = [
     "dedup_single_ignore",
+    "dedup_single_chrom",
+    "dedup_single_unique",
+    "dedup_single_perc",
+    "dedup_single_cluster",
+    "dedup_single_adj",
+    "dedup_single_dir",
+    "dedup_single_sep",
 ]
 
 # Flags the Rust binary doesn't support yet — stripped before invocation.

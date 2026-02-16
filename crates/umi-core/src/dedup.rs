@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 
 use rust_htslib::bam::{self, Read as BamRead, Record};
@@ -136,6 +136,7 @@ pub struct DedupConfig {
     pub random_seed: u64,
     pub out_sam: bool,
     pub chrom: Option<String>,
+    pub edit_distance_threshold: u32,
 }
 
 pub struct DedupStats {
@@ -179,6 +180,10 @@ struct UmiSlot {
     record: Record,
     mapq: u8,
     tie_count: u32,
+    count: u32,
+    /// Insertion order within the (pos, key) group — used for deterministic
+    /// tiebreaking to match Python dict insertion order.
+    insertion_order: u32,
 }
 
 /// Buffered read collector that mirrors Python `umi_tools`' `reads_dict`.
@@ -191,6 +196,8 @@ struct UmiSlot {
 /// `sorted(reads_dict[p].keys())`).
 struct ReadBuffer<R: TieBreakRng> {
     groups: BTreeMap<i64, BTreeMap<GroupKey, HashMap<Vec<u8>, UmiSlot>>>,
+    /// Per-(pos, key) insertion counters for deterministic ordering.
+    insertion_counters: BTreeMap<i64, BTreeMap<GroupKey, u32>>,
     rng: R,
 }
 
@@ -198,6 +205,7 @@ impl<R: TieBreakRng> ReadBuffer<R> {
     const fn new(rng: R) -> Self {
         Self {
             groups: BTreeMap::new(),
+            insertion_counters: BTreeMap::new(),
             rng,
         }
     }
@@ -207,6 +215,14 @@ impl<R: TieBreakRng> ReadBuffer<R> {
         let umi_map = self.groups.entry(pos).or_default().entry(key).or_default();
 
         let Some(slot) = umi_map.get_mut(&umi) else {
+            let counter = self
+                .insertion_counters
+                .entry(pos)
+                .or_default()
+                .entry(key)
+                .or_default();
+            let order = *counter;
+            *counter += 1;
             let mapq = record.mapq();
             umi_map.insert(
                 umi,
@@ -214,10 +230,14 @@ impl<R: TieBreakRng> ReadBuffer<R> {
                     record,
                     mapq,
                     tie_count: 0,
+                    count: 1,
+                    insertion_order: order,
                 },
             );
             return;
         };
+
+        slot.count += 1;
 
         let record_mapq = record.mapq();
         match slot.mapq.cmp(&record_mapq) {
@@ -236,27 +256,317 @@ impl<R: TieBreakRng> ReadBuffer<R> {
         }
     }
 
-    /// Drain all position groups with `pos <= threshold`, yielding records in
-    /// position-sorted, then key-sorted order.
-    fn drain_up_to(&mut self, threshold: i64) -> Vec<Record> {
+    /// Drain all position groups with `pos <= threshold`, applying UMI dedup selection.
+    fn drain_up_to(
+        &mut self,
+        threshold: i64,
+        method: DedupMethod,
+        edit_threshold: u32,
+    ) -> Vec<Record> {
         let rest = self.groups.split_off(&(threshold + 1));
         let drained = std::mem::replace(&mut self.groups, rest);
-        drained
-            .into_values()
-            .flat_map(BTreeMap::into_values)
-            .flat_map(HashMap::into_values)
-            .map(|slot| slot.record)
-            .collect()
+        // Clean up insertion counters for drained positions
+        let rest_counters = self.insertion_counters.split_off(&(threshold + 1));
+        let _ = std::mem::replace(&mut self.insertion_counters, rest_counters);
+        Self::apply_selection(drained, method, edit_threshold)
     }
 
-    /// Drain all remaining position groups.
-    fn drain_all(&mut self) -> Vec<Record> {
-        std::mem::take(&mut self.groups)
-            .into_values()
-            .flat_map(BTreeMap::into_values)
-            .flat_map(HashMap::into_values)
-            .map(|slot| slot.record)
-            .collect()
+    /// Drain all remaining position groups, applying UMI dedup selection.
+    fn drain_all(&mut self, method: DedupMethod, edit_threshold: u32) -> Vec<Record> {
+        let drained = std::mem::take(&mut self.groups);
+        self.insertion_counters.clear();
+        Self::apply_selection(drained, method, edit_threshold)
+    }
+
+    /// Apply method-specific UMI selection to drained position groups.
+    /// Emits records in the order returned by `select_umis`, preserving
+    /// the deterministic ordering from clustering (count-desc, lex tiebreak).
+    fn apply_selection(
+        groups: BTreeMap<i64, BTreeMap<GroupKey, HashMap<Vec<u8>, UmiSlot>>>,
+        method: DedupMethod,
+        edit_threshold: u32,
+    ) -> Vec<Record> {
+        let mut records = Vec::new();
+        for key_map in groups.into_values() {
+            for umi_map in key_map.into_values() {
+                let selected = select_umis(method, &umi_map, edit_threshold);
+                for umi in &selected {
+                    if let Some(slot) = umi_map.get(umi) {
+                        records.push(slot.record.clone());
+                    }
+                }
+            }
+        }
+        records
+    }
+}
+
+/// Hamming distance between two byte slices of equal length.
+/// Returns `u32::MAX` if lengths differ (matching Python's `np.inf` return).
+#[allow(clippy::cast_possible_truncation)]
+fn edit_distance(a: &[u8], b: &[u8]) -> u32 {
+    if a.len() != b.len() {
+        return u32::MAX;
+    }
+    // UMIs are 5-12bp; count always fits u32
+    a.iter().zip(b.iter()).filter(|(x, y)| x != y).count() as u32
+}
+
+/// Build undirected adjacency list (for cluster + adjacency methods).
+/// Edge between A and B iff `edit_distance(A, B) <= threshold`.
+fn build_adjacency_list(umis: &[&[u8]], threshold: u32) -> HashMap<Vec<u8>, Vec<Vec<u8>>> {
+    let mut adj: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+    for umi in umis {
+        adj.entry(umi.to_vec()).or_default();
+    }
+    for i in 0..umis.len() {
+        for j in (i + 1)..umis.len() {
+            if edit_distance(umis[i], umis[j]) <= threshold {
+                adj.get_mut(umis[i]).unwrap().push(umis[j].to_vec());
+                adj.get_mut(umis[j]).unwrap().push(umis[i].to_vec());
+            }
+        }
+    }
+    adj
+}
+
+/// Build directed adjacency list (for directional method).
+/// Edge A→B iff `edit_distance(A,B) <= threshold AND counts[A] >= 2*counts[B] - 1`.
+fn build_directional_adjacency_list(
+    umis: &[&[u8]],
+    counts: &HashMap<&[u8], u32>,
+    threshold: u32,
+) -> HashMap<Vec<u8>, Vec<Vec<u8>>> {
+    let mut adj: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+    for umi in umis {
+        adj.entry(umi.to_vec()).or_default();
+    }
+    for i in 0..umis.len() {
+        for j in (i + 1)..umis.len() {
+            if edit_distance(umis[i], umis[j]) <= threshold {
+                let ca = counts[umis[i]];
+                let cb = counts[umis[j]];
+                if ca >= (2 * cb).saturating_sub(1) {
+                    adj.get_mut(umis[i]).unwrap().push(umis[j].to_vec());
+                }
+                if cb >= (2 * ca).saturating_sub(1) {
+                    adj.get_mut(umis[j]).unwrap().push(umis[i].to_vec());
+                }
+            }
+        }
+    }
+    adj
+}
+
+/// BFS from `start`, following edges in `adj_list`. Returns the connected component.
+fn bfs(start: &[u8], adj_list: &HashMap<Vec<u8>, Vec<Vec<u8>>>) -> Vec<Vec<u8>> {
+    let mut searched: HashSet<Vec<u8>> = HashSet::new();
+    let mut queue: Vec<Vec<u8>> = Vec::new();
+    searched.insert(start.to_vec());
+    queue.push(start.to_vec());
+    while let Some(node) = queue.pop() {
+        if let Some(neighbors) = adj_list.get(&node) {
+            for next_node in neighbors {
+                if searched.insert(next_node.clone()) {
+                    queue.push(next_node.clone());
+                }
+            }
+        }
+    }
+    let mut result: Vec<Vec<u8>> = searched.into_iter().collect();
+    result.sort();
+    result
+}
+
+/// Find connected components by iterating UMIs in count-descending order,
+/// running BFS from each unvisited node. Matches Python `_get_connected_components_adjacency`.
+fn connected_components(
+    umis: &[&[u8]],
+    counts: &HashMap<&[u8], u32>,
+    orders: &HashMap<&[u8], u32>,
+    adj_list: &HashMap<Vec<u8>, Vec<Vec<u8>>>,
+) -> Vec<Vec<Vec<u8>>> {
+    // Sort UMIs by count descending, then insertion order ascending for ties
+    let mut sorted_umis: Vec<&[u8]> = umis.to_vec();
+    sorted_umis.sort_by(|a, b| {
+        counts[b]
+            .cmp(&counts[a])
+            .then_with(|| orders[a].cmp(&orders[b]))
+    });
+
+    let mut found: HashSet<Vec<u8>> = HashSet::new();
+    let mut components: Vec<Vec<Vec<u8>>> = Vec::new();
+    for umi in &sorted_umis {
+        if !found.contains(*umi) {
+            let component = bfs(umi, adj_list);
+            for node in &component {
+                found.insert(node.clone());
+            }
+            components.push(component);
+        }
+    }
+    components
+}
+
+/// Greedy min-set-cover: select fewest UMIs (by descending count) to "cover"
+/// all UMIs in the cluster via adjacency. Matches Python `_get_best_min_account`.
+fn min_set_cover(
+    cluster: &[Vec<u8>],
+    adj_list: &HashMap<Vec<u8>, Vec<Vec<u8>>>,
+    counts: &HashMap<&[u8], u32>,
+) -> Vec<Vec<u8>> {
+    if cluster.len() == 1 {
+        return cluster.to_vec();
+    }
+    let mut sorted_nodes: Vec<&Vec<u8>> = cluster.iter().collect();
+    // Sort by count desc, lex asc (BFS output is lex-sorted; Python's stable sort preserves that)
+    sorted_nodes.sort_by(|a, b| {
+        counts[b.as_slice()]
+            .cmp(&counts[a.as_slice()])
+            .then_with(|| a.cmp(b))
+    });
+    for i in 0..sorted_nodes.len() - 1 {
+        let selected: Vec<&[u8]> = sorted_nodes[..=i].iter().map(|v| v.as_slice()).collect();
+        // Compute covered nodes: selected nodes + their neighbors
+        let mut covered: HashSet<&[u8]> = HashSet::new();
+        for s in &selected {
+            covered.insert(s);
+            if let Some(neighbors) = adj_list.get(*s) {
+                for n in neighbors {
+                    covered.insert(n.as_slice());
+                }
+            }
+        }
+        // Check if all cluster nodes are covered
+        let remaining: usize = cluster
+            .iter()
+            .filter(|n| !covered.contains(n.as_slice()))
+            .count();
+        if remaining == 0 {
+            return selected.into_iter().map(<[u8]>::to_vec).collect();
+        }
+    }
+    // Fallback: all nodes (shouldn't reach here for valid inputs)
+    sorted_nodes.into_iter().cloned().collect()
+}
+
+/// Select UMIs to keep for one (pos, key) group. Returns UMIs whose records to emit.
+#[allow(clippy::too_many_lines)]
+fn select_umis(
+    method: DedupMethod,
+    umi_map: &HashMap<Vec<u8>, UmiSlot>,
+    edit_threshold: u32,
+) -> Vec<Vec<u8>> {
+    // Build count and insertion-order maps for sorting (matches Python dict insertion order)
+    let counts: HashMap<&[u8], u32> = umi_map
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.count))
+        .collect();
+    let orders: HashMap<&[u8], u32> = umi_map
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.insertion_order))
+        .collect();
+    // Sort key for within-component representative selection: count desc, lex asc.
+    // BFS produces lex-sorted components; Python's stable sort preserves that.
+    let lex_sort = |a: &[u8], b: &[u8]| -> std::cmp::Ordering {
+        counts[b].cmp(&counts[a]).then_with(|| a.cmp(b))
+    };
+
+    match method {
+        DedupMethod::Unique => {
+            // Python returns UMIs in dict insertion order (no count sorting)
+            let mut umis: Vec<Vec<u8>> = umi_map.keys().cloned().collect();
+            umis.sort_by(|a, b| orders[a.as_slice()].cmp(&orders[b.as_slice()]));
+            umis
+        }
+
+        DedupMethod::Percentile => {
+            if counts.len() <= 1 {
+                return umi_map.keys().cloned().collect();
+            }
+            let all_counts: Vec<u32> = counts.values().copied().collect();
+            let threshold = median(&all_counts) / 100.0;
+            // Python filters then preserves dict insertion order
+            let mut umis: Vec<Vec<u8>> = umi_map
+                .iter()
+                .filter(|(_, slot)| f64::from(slot.count) > threshold)
+                .map(|(umi, _)| umi.clone())
+                .collect();
+            umis.sort_by(|a, b| orders[a.as_slice()].cmp(&orders[b.as_slice()]));
+            umis
+        }
+
+        DedupMethod::Cluster => {
+            let umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
+            let adj_list = build_adjacency_list(&umis, edit_threshold);
+            let components = connected_components(&umis, &counts, &orders, &adj_list);
+            // Representative per component: highest count, lex tiebreak
+            components
+                .into_iter()
+                .map(|mut comp| {
+                    comp.sort_by(|a, b| lex_sort(a, b));
+                    comp.into_iter().next().unwrap()
+                })
+                .collect()
+        }
+
+        DedupMethod::Adjacency => {
+            let umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
+            let adj_list = build_adjacency_list(&umis, edit_threshold);
+            let components = connected_components(&umis, &counts, &orders, &adj_list);
+            let mut result = Vec::new();
+            for component in components {
+                if component.len() == 1 {
+                    result.push(component.into_iter().next().unwrap());
+                } else {
+                    let lead_umis = min_set_cover(&component, &adj_list, &counts);
+                    result.extend(lead_umis);
+                }
+            }
+            result
+        }
+
+        DedupMethod::Directional => {
+            let umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
+            let adj_list = build_directional_adjacency_list(&umis, &counts, edit_threshold);
+            let components = connected_components(&umis, &counts, &orders, &adj_list);
+            let mut observed: HashSet<Vec<u8>> = HashSet::new();
+            let mut result = Vec::new();
+            for component in components {
+                if component.len() == 1 {
+                    let umi = component.into_iter().next().unwrap();
+                    observed.insert(umi.clone());
+                    result.push(umi);
+                } else {
+                    // Sort by count desc, lex asc (BFS output is lex-sorted,
+                    // Python's stable sort preserves that for equal counts)
+                    let mut sorted_comp = component;
+                    sorted_comp.sort_by(|a, b| lex_sort(a, b));
+                    let mut group_lead = None;
+                    for node in sorted_comp {
+                        if observed.insert(node.clone()) && group_lead.is_none() {
+                            group_lead = Some(node);
+                        }
+                    }
+                    if let Some(lead) = group_lead {
+                        result.push(lead);
+                    }
+                }
+            }
+            result
+        }
+    }
+}
+
+/// Compute the median of a slice of u32 values, returned as f64.
+fn median(values: &[u32]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    if n.is_multiple_of(2) {
+        f64::midpoint(f64::from(sorted[n / 2 - 1]), f64::from(sorted[n / 2]))
+    } else {
+        f64::from(sorted[n / 2])
     }
 }
 
@@ -332,10 +642,14 @@ pub fn run_dedup(
         // Flush buffer when moving far enough or changing chromosome.
         // Matches Python: `if start > last_pos + 1000 or current_chr != last_chr`
         if tid != last_chrom {
-            output_records.extend(buffer.drain_all());
+            output_records.extend(buffer.drain_all(config.method, config.edit_distance_threshold));
         } else if start > last_start + 1000 {
             let threshold = start - 1000;
-            output_records.extend(buffer.drain_up_to(threshold));
+            output_records.extend(buffer.drain_up_to(
+                threshold,
+                config.method,
+                config.edit_distance_threshold,
+            ));
         }
 
         last_start = start;
@@ -352,7 +666,7 @@ pub fn run_dedup(
         buffer.add(record, pos, key, umi);
     }
 
-    output_records.extend(buffer.drain_all());
+    output_records.extend(buffer.drain_all(config.method, config.edit_distance_threshold));
 
     // Sort by coordinate (tid, pos) to match `pysam.sort()` / `samtools sort`.
     output_records.sort_by(|a, b| a.tid().cmp(&b.tid()).then_with(|| a.pos().cmp(&b.pos())));
