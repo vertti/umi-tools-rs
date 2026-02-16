@@ -13,6 +13,7 @@ use umi_core::extract::{
     ExtractConfig, QualityEncoding, extract_reads, extract_reads_either_read, extract_reads_paired,
     extract_reads_paired_r1_pattern,
 };
+use umi_core::group::{GroupConfig, run_group};
 use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
 use umi_core::whitelist::{EdAboveThreshold, KneeMethod, WhitelistConfig, run_whitelist};
 
@@ -163,6 +164,53 @@ enum Commands {
         subset_reads: usize,
     },
 
+    /// Group PCR duplicates in BAM by UMI and mapping position
+    Group {
+        /// Input BAM file
+        #[arg(short = 'I', long = "stdin")]
+        input: Option<String>,
+
+        /// Grouping method: unique, percentile, cluster, adjacency, directional
+        #[arg(long = "method", default_value = "directional")]
+        method: String,
+
+        /// Ignore UMI — group by position only
+        #[arg(long = "ignore-umi")]
+        ignore_umi: bool,
+
+        /// Output SAM instead of BAM (may be repeated)
+        #[arg(long = "out-sam", action = clap::ArgAction::Count)]
+        out_sam: u8,
+
+        /// Random seed for reproducible tie-breaking
+        #[arg(long = "random-seed", default_value = "0")]
+        random_seed: u64,
+
+        /// UMI separator in read name
+        #[arg(long = "umi-separator", default_value = "_")]
+        umi_separator: String,
+
+        /// Only process reads on this chromosome
+        #[arg(long = "chrom")]
+        chrom: Option<String>,
+
+        /// Output TSV file with group assignments
+        #[arg(long = "group-out")]
+        group_out: Option<String>,
+
+        /// Write tagged BAM/SAM to stdout
+        #[arg(long = "output-bam")]
+        output_bam: bool,
+
+        /// Skip coordinate sorting of output
+        #[arg(long = "no-sort-output")]
+        no_sort_output: bool,
+
+        /// Log file (accepted but ignored)
+        #[arg(short = 'L', long = "log")]
+        _log: Option<String>,
+    },
+
     /// Deduplicate BAM reads based on UMI and mapping position
     Dedup {
         /// Input BAM file
@@ -284,6 +332,30 @@ fn main() -> Result<()> {
             ed_above_threshold.as_deref(),
             filtered_out.as_deref(),
             subset_reads,
+        ),
+        Commands::Group {
+            input,
+            method,
+            ignore_umi,
+            out_sam,
+            random_seed,
+            umi_separator,
+            chrom,
+            group_out,
+            output_bam,
+            no_sort_output,
+            _log: _,
+        } => run_group_cmd(
+            input.as_deref(),
+            &method,
+            ignore_umi,
+            out_sam > 0,
+            random_seed,
+            &umi_separator,
+            chrom.as_deref(),
+            group_out.as_deref(),
+            output_bam,
+            no_sort_output,
         ),
         Commands::Dedup {
             input,
@@ -579,6 +651,55 @@ fn run_whitelist_cmd(
     eprintln!(
         "Reads input: {}, no barcode match: {}",
         stats.input_reads, stats.no_match,
+    );
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+fn run_group_cmd(
+    input_path: Option<&str>,
+    method: &str,
+    ignore_umi: bool,
+    out_sam: bool,
+    random_seed: u64,
+    umi_separator: &str,
+    chrom: Option<&str>,
+    group_out: Option<&str>,
+    output_bam: bool,
+    no_sort_output: bool,
+) -> Result<()> {
+    let input = input_path.context("--stdin is required for group (BAM input path)")?;
+
+    let dedup_method = match method {
+        "unique" => DedupMethod::Unique,
+        "percentile" => DedupMethod::Percentile,
+        "cluster" => DedupMethod::Cluster,
+        "adjacency" => DedupMethod::Adjacency,
+        "directional" => DedupMethod::Directional,
+        other => bail!("unknown method '{other}'"),
+    };
+
+    let sep_byte = umi_separator.as_bytes().first().copied().unwrap_or(b'_');
+
+    let config = GroupConfig {
+        method: dedup_method,
+        ignore_umi,
+        umi_separator: sep_byte,
+        random_seed,
+        out_sam,
+        output_bam,
+        no_sort_output,
+        chrom: chrom.map(String::from),
+        group_out: group_out.map(String::from),
+        edit_distance_threshold: 1,
+    };
+
+    let stats = run_group(&config, input).context("group failed")?;
+
+    eprintln!(
+        "Reads input: {}, output: {}",
+        stats.input_reads, stats.output_reads,
     );
 
     Ok(())

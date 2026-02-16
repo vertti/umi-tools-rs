@@ -2,7 +2,7 @@
 
 Implementation roadmap derived from the umi-tools compatibility test suite (`tests/tests.yaml` in the Python umi-tools repo). The test suite has **66 tests** total; we use it to track feature parity.
 
-## Current state: 30 / 66 tests passing
+## Current state: 35 / 66 tests passing
 
 | Phase | Tests | Status |
 |-------|-------|--------|
@@ -45,16 +45,16 @@ Key features: 5 dedup methods (unique, percentile, cluster, adjacency, direction
 
 New subcommand: `group`. Similar BAM infrastructure to dedup but outputs group assignments.
 
-| Test | Key flags |
-|------|-----------|
-| `group_gene_tag` | `--per-gene`, `--gene-tag=XF`, `--group-out`, `--output-bam` |
-| `group_unique` | `--method=unique`, `--group-out` |
-| `group_cluster` | `--method=cluster`, `--group-out` |
-| `group_adjacency` | `--method=adjacency`, `--group-out` |
-| `group_directional` | `--method=directional`, `--group-out` |
-| `group_directional_subset` | `--method=directional`, `--subset=0.1`, `--group-out` |
-| `group_directional_unmapped` | `--method=directional`, `--output-unmapped`, `--group-out` |
-| `group_unsorted` | `--method=directional`, `--no-sort-output` |
+| Test | Key flags | Status |
+|------|-----------|--------|
+| `group_gene_tag` | `--per-gene`, `--gene-tag=XF`, `--group-out`, `--output-bam` | |
+| `group_unique` | `--method=unique`, `--group-out` | Done |
+| `group_cluster` | `--method=cluster`, `--group-out` | Done |
+| `group_adjacency` | `--method=adjacency`, `--group-out` | Done |
+| `group_directional` | `--method=directional`, `--group-out` | Done |
+| `group_directional_subset` | `--method=directional`, `--subset=0.1`, `--group-out` | |
+| `group_directional_unmapped` | `--method=directional`, `--output-unmapped`, `--group-out` | |
+| `group_unsorted` | `--method=directional`, `--no-sort-output` | Done |
 | `group_paired_discard_chimeric` | `--paired`, `--chimeric-pairs=discard` |
 | `group_paired_output_chimeric` | `--paired`, `--chimeric-pairs=output` |
 | `group_paired_use_chimeric` | `--paired`, `--chimeric-pairs=use` |

@@ -8,7 +8,7 @@ use rust_htslib::bam::{self, Read as BamRead, Record};
 /// Currently implemented by `PythonRandom` (MT19937 matching `CPython`) to get
 /// identical output for compat tests. Can be swapped for any fast RNG once
 /// exact-match testing is no longer needed.
-trait TieBreakRng {
+pub(crate) trait TieBreakRng {
     /// Return a float in `[0, 1)`.
     fn random(&mut self) -> f64;
 }
@@ -17,7 +17,7 @@ trait TieBreakRng {
 ///
 /// Python `umi_tools` uses seeded `random.random()` for reservoir-sampling
 /// tie-breaks in read selection. We replicate the identical float sequence.
-struct PythonRandom {
+pub(crate) struct PythonRandom {
     mt: [u32; 624],
     index: usize,
 }
@@ -31,7 +31,7 @@ impl PythonRandom {
 
     /// Seed the same way `CPython` `random.seed(int)` does:
     /// `init_genrand(19_650_218)` then `init_by_array(&[seed])`.
-    fn new(seed: u32) -> Self {
+    pub(crate) fn new(seed: u32) -> Self {
         let mut rng = Self::init_genrand(19_650_218);
         rng.init_by_array(&[seed]);
         rng
@@ -146,7 +146,7 @@ pub struct DedupStats {
 }
 
 /// Length of a trailing/leading soft-clip, or 0 if the CIGAR op isn't `S`.
-fn soft_clip_len(op: Option<&rust_htslib::bam::record::Cigar>) -> i64 {
+pub(crate) fn soft_clip_len(op: Option<&rust_htslib::bam::record::Cigar>) -> i64 {
     match op {
         Some(c) if c.char() == 'S' => i64::from(c.len()),
         _ => 0,
@@ -159,7 +159,7 @@ fn soft_clip_len(op: Option<&rust_htslib::bam::record::Cigar>) -> i64 {
 /// - `pos`: 5′ coordinate accounting for soft-clipping (used for grouping)
 ///
 /// Matches Python `get_read_position()` with default `soft_clip_threshold=4`.
-fn get_read_position(record: &Record) -> (i64, i64) {
+pub(crate) fn get_read_position(record: &Record) -> (i64, i64) {
     let cigar = record.cigar();
     if record.is_reverse() {
         let start = record.pos();
@@ -173,17 +173,17 @@ fn get_read_position(record: &Record) -> (i64, i64) {
 
 /// Sub-key within a position group: `(is_reverse, is_spliced, tlen, read_length)`.
 /// With default options, this collapses to `(is_reverse, false, 0, 0)`.
-type GroupKey = (bool, bool, i64, usize);
+pub(crate) type GroupKey = (bool, bool, i64, usize);
 
 /// Holds per-UMI read selection state: best record + reservoir-sampling counter.
-struct UmiSlot {
-    record: Record,
-    mapq: u8,
-    tie_count: u32,
-    count: u32,
+pub(crate) struct UmiSlot {
+    pub(crate) record: Record,
+    pub(crate) mapq: u8,
+    pub(crate) tie_count: u32,
+    pub(crate) count: u32,
     /// Insertion order within the (pos, key) group — used for deterministic
     /// tiebreaking to match Python dict insertion order.
-    insertion_order: u32,
+    pub(crate) insertion_order: u32,
 }
 
 /// Buffered read collector that mirrors Python `umi_tools`' `reads_dict`.
@@ -304,7 +304,7 @@ impl<R: TieBreakRng> ReadBuffer<R> {
 /// Hamming distance between two byte slices of equal length.
 /// Returns `u32::MAX` if lengths differ (matching Python's `np.inf` return).
 #[allow(clippy::cast_possible_truncation)]
-fn edit_distance(a: &[u8], b: &[u8]) -> u32 {
+pub(crate) fn edit_distance(a: &[u8], b: &[u8]) -> u32 {
     if a.len() != b.len() {
         return u32::MAX;
     }
@@ -314,7 +314,10 @@ fn edit_distance(a: &[u8], b: &[u8]) -> u32 {
 
 /// Build undirected adjacency list (for cluster + adjacency methods).
 /// Edge between A and B iff `edit_distance(A, B) <= threshold`.
-fn build_adjacency_list(umis: &[&[u8]], threshold: u32) -> HashMap<Vec<u8>, Vec<Vec<u8>>> {
+pub(crate) fn build_adjacency_list(
+    umis: &[&[u8]],
+    threshold: u32,
+) -> HashMap<Vec<u8>, Vec<Vec<u8>>> {
     let mut adj: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
     for umi in umis {
         adj.entry(umi.to_vec()).or_default();
@@ -332,7 +335,7 @@ fn build_adjacency_list(umis: &[&[u8]], threshold: u32) -> HashMap<Vec<u8>, Vec<
 
 /// Build directed adjacency list (for directional method).
 /// Edge A→B iff `edit_distance(A,B) <= threshold AND counts[A] >= 2*counts[B] - 1`.
-fn build_directional_adjacency_list(
+pub(crate) fn build_directional_adjacency_list(
     umis: &[&[u8]],
     counts: &HashMap<&[u8], u32>,
     threshold: u32,
@@ -359,7 +362,7 @@ fn build_directional_adjacency_list(
 }
 
 /// BFS from `start`, following edges in `adj_list`. Returns the connected component.
-fn bfs(start: &[u8], adj_list: &HashMap<Vec<u8>, Vec<Vec<u8>>>) -> Vec<Vec<u8>> {
+pub(crate) fn bfs(start: &[u8], adj_list: &HashMap<Vec<u8>, Vec<Vec<u8>>>) -> Vec<Vec<u8>> {
     let mut searched: HashSet<Vec<u8>> = HashSet::new();
     let mut queue: Vec<Vec<u8>> = Vec::new();
     searched.insert(start.to_vec());
@@ -380,7 +383,7 @@ fn bfs(start: &[u8], adj_list: &HashMap<Vec<u8>, Vec<Vec<u8>>>) -> Vec<Vec<u8>> 
 
 /// Find connected components by iterating UMIs in count-descending order,
 /// running BFS from each unvisited node. Matches Python `_get_connected_components_adjacency`.
-fn connected_components(
+pub(crate) fn connected_components(
     umis: &[&[u8]],
     counts: &HashMap<&[u8], u32>,
     orders: &HashMap<&[u8], u32>,
@@ -410,7 +413,7 @@ fn connected_components(
 
 /// Greedy min-set-cover: select fewest UMIs (by descending count) to "cover"
 /// all UMIs in the cluster via adjacency. Matches Python `_get_best_min_account`.
-fn min_set_cover(
+pub(crate) fn min_set_cover(
     cluster: &[Vec<u8>],
     adj_list: &HashMap<Vec<u8>, Vec<Vec<u8>>>,
     counts: &HashMap<&[u8], u32>,
@@ -452,7 +455,7 @@ fn min_set_cover(
 
 /// Select UMIs to keep for one (pos, key) group. Returns UMIs whose records to emit.
 #[allow(clippy::too_many_lines)]
-fn select_umis(
+pub(crate) fn select_umis(
     method: DedupMethod,
     umi_map: &HashMap<Vec<u8>, UmiSlot>,
     edit_threshold: u32,
@@ -559,7 +562,7 @@ fn select_umis(
 }
 
 /// Compute the median of a slice of u32 values, returned as f64.
-fn median(values: &[u32]) -> f64 {
+pub(crate) fn median(values: &[u32]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
     let n = sorted.len();
@@ -686,7 +689,7 @@ pub fn run_dedup(
     Ok(stats)
 }
 
-fn extract_umi_from_name(record: &Record, separator: u8) -> Vec<u8> {
+pub(crate) fn extract_umi_from_name(record: &Record, separator: u8) -> Vec<u8> {
     let name = record.qname();
     name.iter()
         .rposition(|&b| b == separator)
