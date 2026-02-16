@@ -21,7 +21,7 @@ Run benchmarks yourself: `mise run bench`
 |:--------|:------------|:------:|
 | `extract` | Extract UMIs from FASTQ reads | Done |
 | `whitelist` | Build cell barcode whitelist | Done |
-| `dedup` | Deduplicate aligned BAM reads | Planned |
+| `dedup` | Deduplicate aligned BAM reads | Done |
 | `group` | Group PCR duplicates in BAM | Planned |
 | `count` | Count unique molecules per gene | Planned |
 | `count_tab` | Count from flatfile input | Planned |
@@ -58,6 +58,13 @@ umi-tools-rs whitelist --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNN \
 umi-tools-rs extract --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNN \
   --stdin=R1.fastq.gz --stdout=extracted.fastq.gz \
   --whitelist=whitelist.tsv --error-correct-cell
+
+# Deduplicate BAM reads
+umi-tools-rs dedup --stdin=aligned.bam --stdout=deduped.bam
+
+# Dedup with specific method and chromosome filter
+umi-tools-rs dedup --method=directional --chrom=chr19 \
+  --stdin=aligned.bam --stdout=deduped.bam
 ```
 
 Aims to be CLI-compatible with Python UMI-tools — same flags, same output format.
