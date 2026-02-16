@@ -281,6 +281,26 @@ enum Commands {
         #[arg(long = "output-stats")]
         output_stats: Option<String>,
 
+        /// Enable paired-end deduplication
+        #[arg(long = "paired")]
+        paired: bool,
+
+        /// Ignore template length when grouping reads (paired mode)
+        #[arg(long = "ignore-tlen")]
+        ignore_tlen: bool,
+
+        /// Filter UMIs against whitelist
+        #[arg(long = "filter-umi")]
+        filter_umi: bool,
+
+        /// UMI whitelist file (or read1 whitelist for paired UMIs)
+        #[arg(long = "umi-whitelist")]
+        umi_whitelist: Option<String>,
+
+        /// Read2 UMI whitelist file (paired UMI mode, Cartesian product with read1)
+        #[arg(long = "umi-whitelist-paired")]
+        umi_whitelist_paired: Option<String>,
+
         /// Log file (accepted but ignored)
         #[arg(short = 'L', long = "log")]
         _log: Option<String>,
@@ -417,6 +437,11 @@ fn main() -> Result<()> {
             gene_tag,
             skip_tags_regex,
             output_stats,
+            paired,
+            ignore_tlen,
+            filter_umi,
+            umi_whitelist,
+            umi_whitelist_paired,
             _log: _,
         } => run_dedup_cmd(
             input.as_deref(),
@@ -434,6 +459,11 @@ fn main() -> Result<()> {
             gene_tag.as_deref(),
             skip_tags_regex.as_deref(),
             output_stats.as_deref(),
+            paired,
+            ignore_tlen,
+            filter_umi,
+            umi_whitelist.as_deref(),
+            umi_whitelist_paired.as_deref(),
         ),
     }
 }
@@ -769,7 +799,7 @@ fn run_group_cmd(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn run_dedup_cmd(
     input_path: Option<&str>,
     method: &str,
@@ -786,6 +816,11 @@ fn run_dedup_cmd(
     gene_tag: Option<&str>,
     skip_tags_regex: Option<&str>,
     output_stats: Option<&str>,
+    paired: bool,
+    ignore_tlen: bool,
+    filter_umi: bool,
+    umi_whitelist_path: Option<&str>,
+    umi_whitelist_paired_path: Option<&str>,
 ) -> Result<()> {
     let input = input_path.context("--stdin is required for dedup (BAM input path)")?;
 
@@ -799,6 +834,14 @@ fn run_dedup_cmd(
     };
 
     let sep_byte = umi_separator.as_bytes().first().copied().unwrap_or(b'_');
+
+    let umi_whitelist = if filter_umi {
+        let wl_path =
+            umi_whitelist_path.context("--umi-whitelist is required when --filter-umi is set")?;
+        Some(load_umi_whitelist(wl_path, umi_whitelist_paired_path)?)
+    } else {
+        None
+    };
 
     let config = DedupConfig {
         method: dedup_method,
@@ -815,6 +858,9 @@ fn run_dedup_cmd(
         gene_tag: gene_tag.map(String::from),
         skip_tags_regex: skip_tags_regex.map(String::from),
         output_stats: output_stats.map(String::from),
+        paired,
+        ignore_tlen,
+        umi_whitelist,
     };
 
     let mut stdout = io::stdout().lock();
@@ -826,6 +872,42 @@ fn run_dedup_cmd(
     );
 
     Ok(())
+}
+
+fn load_umi_whitelist(path: &str, paired_path: Option<&str>) -> Result<HashSet<Vec<u8>>> {
+    let load_barcodes = |p: &str| -> Result<Vec<Vec<u8>>> {
+        let file = File::open(p).with_context(|| format!("failed to open UMI whitelist: {p}"))?;
+        let reader = io::BufReader::new(file);
+        let mut barcodes = Vec::new();
+        for line in reader.lines() {
+            let line = line.with_context(|| format!("failed to read UMI whitelist: {p}"))?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let barcode = trimmed.split('\t').next().unwrap();
+            barcodes.push(barcode.as_bytes().to_vec());
+        }
+        Ok(barcodes)
+    };
+
+    let barcodes1 = load_barcodes(path)?;
+
+    if let Some(p2) = paired_path {
+        // Paired mode: Cartesian product of both whitelist files
+        let barcodes2 = load_barcodes(p2)?;
+        let mut whitelist = HashSet::new();
+        for b1 in &barcodes1 {
+            for b2 in &barcodes2 {
+                let mut combined = b1.clone();
+                combined.extend_from_slice(b2);
+                whitelist.insert(combined);
+            }
+        }
+        Ok(whitelist)
+    } else {
+        Ok(barcodes1.into_iter().collect())
+    }
 }
 
 fn is_gzipped(path: &str) -> bool {
