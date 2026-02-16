@@ -36,15 +36,22 @@ Run benchmarks yourself: `mise run bench`
 
 ## Installation
 
+Download a prebuilt binary from [GitHub Releases](https://github.com/vertti/umi-tools-rs/releases/latest):
+
 ```sh
-cargo install --path .
+# Linux x86_64
+curl -fsSL https://github.com/vertti/umi-tools-rs/releases/latest/download/umi-tools-rs-x86_64-unknown-linux-gnu.tar.gz \
+  | tar xz -C /usr/local/bin
+
+# macOS Apple Silicon
+curl -fsSL https://github.com/vertti/umi-tools-rs/releases/latest/download/umi-tools-rs-aarch64-apple-darwin.tar.gz \
+  | tar xz -C /usr/local/bin
 ```
 
 Or build from source:
 
 ```sh
-cargo build --release
-# Binary at target/release/umi-tools-rs
+cargo install --path .
 ```
 
 ## Usage
