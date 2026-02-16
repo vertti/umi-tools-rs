@@ -196,6 +196,7 @@ pub enum DedupMethod {
     Directional,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct DedupConfig {
     pub method: DedupMethod,
     pub ignore_umi: bool,
@@ -211,6 +212,9 @@ pub struct DedupConfig {
     pub gene_tag: Option<String>,
     pub skip_tags_regex: Option<String>,
     pub output_stats: Option<String>,
+    pub paired: bool,
+    pub ignore_tlen: bool,
+    pub umi_whitelist: Option<HashSet<Vec<u8>>>,
 }
 
 pub struct DedupStats {
@@ -342,13 +346,14 @@ impl ReadBuffer {
         method: DedupMethod,
         edit_threshold: u32,
         stats_ctx: &mut Option<StatsContext>,
+        umi_whitelist: Option<&HashSet<Vec<u8>>>,
     ) -> Vec<Record> {
         let rest = self.groups.split_off(&(threshold + 1));
         let drained = std::mem::replace(&mut self.groups, rest);
         // Clean up insertion counters for drained positions
         let rest_counters = self.insertion_counters.split_off(&(threshold + 1));
         let _ = std::mem::replace(&mut self.insertion_counters, rest_counters);
-        Self::apply_selection(drained, method, edit_threshold, stats_ctx)
+        Self::apply_selection(drained, method, edit_threshold, stats_ctx, umi_whitelist)
     }
 
     /// Drain all remaining position groups, applying UMI dedup selection.
@@ -357,10 +362,11 @@ impl ReadBuffer {
         method: DedupMethod,
         edit_threshold: u32,
         stats_ctx: &mut Option<StatsContext>,
+        umi_whitelist: Option<&HashSet<Vec<u8>>>,
     ) -> Vec<Record> {
         let drained = std::mem::take(&mut self.groups);
         self.insertion_counters.clear();
-        Self::apply_selection(drained, method, edit_threshold, stats_ctx)
+        Self::apply_selection(drained, method, edit_threshold, stats_ctx, umi_whitelist)
     }
 
     /// Apply method-specific UMI selection to drained position groups.
@@ -369,6 +375,7 @@ impl ReadBuffer {
         method: DedupMethod,
         edit_threshold: u32,
         stats_ctx: &mut Option<StatsContext>,
+        umi_whitelist: Option<&HashSet<Vec<u8>>>,
     ) -> Vec<Record> {
         let mut records = Vec::new();
         for key_map in groups.into_values() {
@@ -380,6 +387,9 @@ impl ReadBuffer {
                     let mut selected_umis = Vec::new();
                     let mut cluster_counts = Vec::new();
                     for (umi, cluster_count) in &selected_with_counts {
+                        if umi_whitelist.is_some_and(|wl| !wl.contains(umi)) {
+                            continue;
+                        }
                         if let Some(slot) = umi_map.get(umi) {
                             bundle_records.push(slot.record.clone());
                             selected_umis.push(umi.clone());
@@ -400,6 +410,9 @@ impl ReadBuffer {
                 } else {
                     let selected = select_umis(method, &umi_map, edit_threshold);
                     for umi in &selected {
+                        if umi_whitelist.is_some_and(|wl| !wl.contains(umi)) {
+                            continue;
+                        }
                         if let Some(slot) = umi_map.get(umi) {
                             records.push(slot.record.clone());
                         }
@@ -1279,11 +1292,23 @@ pub fn run_dedup(
         })
         .transpose()?;
 
+    let wl_ref = config.umi_whitelist.as_ref();
+
     for result in reader.records() {
         let record = result.map_err(|e| DedupError::BamRead(e.to_string()))?;
 
         if record.is_unmapped() {
             continue;
+        }
+
+        // Paired mode: skip R2 reads and R1s with unmapped mates.
+        if config.paired {
+            if record.is_last_in_template() {
+                continue;
+            }
+            if record.is_mate_unmapped() {
+                continue;
+            }
         }
 
         let tid = record.tid();
@@ -1338,6 +1363,7 @@ pub fn run_dedup(
                     config.method,
                     config.edit_distance_threshold,
                     &mut stats_ctx,
+                    wl_ref,
                 ));
             } else if start > last_start + 1000 {
                 let threshold = start - 1000;
@@ -1346,13 +1372,19 @@ pub fn run_dedup(
                     config.method,
                     config.edit_distance_threshold,
                     &mut stats_ctx,
+                    wl_ref,
                 ));
             }
 
             last_start = start;
             last_chrom = tid;
 
-            let key: GroupKey = (record.is_reverse(), false, 0, 0);
+            let tlen = if config.paired && !config.ignore_tlen {
+                record.insert_size()
+            } else {
+                0
+            };
+            let key: GroupKey = (record.is_reverse(), false, tlen, 0);
             buffer.add(record, pos, key, umi, &mut rng);
         }
     }
@@ -1361,7 +1393,31 @@ pub fn run_dedup(
         config.method,
         config.edit_distance_threshold,
         &mut stats_ctx,
+        wl_ref,
     ));
+
+    // Paired mode: second pass to find R2 mates of surviving R1 reads.
+    if config.paired {
+        let mut mate_set: HashSet<(Vec<u8>, i32, i64)> = HashSet::new();
+        for r1 in &output_records {
+            mate_set.insert((r1.qname().to_vec(), r1.mtid(), r1.mpos()));
+        }
+        let mut reader2 =
+            bam::Reader::from_path(input_path).map_err(|e| DedupError::BamOpen(e.to_string()))?;
+        for result in reader2.records() {
+            let record = result.map_err(|e| DedupError::BamRead(e.to_string()))?;
+            if record.is_unmapped() || record.is_mate_unmapped() {
+                continue;
+            }
+            if !record.is_last_in_template() {
+                continue;
+            }
+            let key = (record.qname().to_vec(), record.tid(), record.pos());
+            if mate_set.remove(&key) {
+                output_records.push(record);
+            }
+        }
+    }
 
     // Sort by coordinate (tid, pos) to match `pysam.sort()` / `samtools sort`.
     output_records.sort_by(|a, b| a.tid().cmp(&b.tid()).then_with(|| a.pos().cmp(&b.pos())));
