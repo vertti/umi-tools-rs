@@ -206,6 +206,14 @@ enum Commands {
         #[arg(long = "no-sort-output")]
         no_sort_output: bool,
 
+        /// Random subset of reads to process (0.0-1.0)
+        #[arg(long = "subset")]
+        subset: Option<f32>,
+
+        /// Include unmapped reads in output
+        #[arg(long = "output-unmapped")]
+        output_unmapped: bool,
+
         /// Log file (accepted but ignored)
         #[arg(short = 'L', long = "log")]
         _log: Option<String>,
@@ -240,6 +248,22 @@ enum Commands {
         /// Only process reads on this chromosome
         #[arg(long = "chrom")]
         chrom: Option<String>,
+
+        /// Edit distance threshold for UMI clustering
+        #[arg(long = "edit-distance-threshold", default_value = "1")]
+        edit_distance_threshold: u32,
+
+        /// Random subset of reads to process (0.0-1.0)
+        #[arg(long = "subset")]
+        subset: Option<f32>,
+
+        /// UMI extraction method: `read_id` or `tag`
+        #[arg(long = "extract-umi-method", default_value = "read_id")]
+        extract_umi_method: String,
+
+        /// BAM tag to extract UMI from (when extract-umi-method=tag)
+        #[arg(long = "umi-tag")]
+        umi_tag: Option<String>,
 
         /// Log file (accepted but ignored)
         #[arg(short = 'L', long = "log")]
@@ -344,6 +368,8 @@ fn main() -> Result<()> {
             group_out,
             output_bam,
             no_sort_output,
+            subset,
+            output_unmapped,
             _log: _,
         } => run_group_cmd(
             input.as_deref(),
@@ -356,6 +382,8 @@ fn main() -> Result<()> {
             group_out.as_deref(),
             output_bam,
             no_sort_output,
+            subset,
+            output_unmapped,
         ),
         Commands::Dedup {
             input,
@@ -365,6 +393,10 @@ fn main() -> Result<()> {
             random_seed,
             umi_separator,
             chrom,
+            edit_distance_threshold,
+            subset,
+            extract_umi_method,
+            umi_tag,
             _log: _,
         } => run_dedup_cmd(
             input.as_deref(),
@@ -374,6 +406,10 @@ fn main() -> Result<()> {
             random_seed,
             &umi_separator,
             chrom.as_deref(),
+            edit_distance_threshold,
+            subset,
+            &extract_umi_method,
+            umi_tag.as_deref(),
         ),
     }
 }
@@ -668,6 +704,8 @@ fn run_group_cmd(
     group_out: Option<&str>,
     output_bam: bool,
     no_sort_output: bool,
+    subset: Option<f32>,
+    output_unmapped: bool,
 ) -> Result<()> {
     let input = input_path.context("--stdin is required for group (BAM input path)")?;
 
@@ -693,6 +731,8 @@ fn run_group_cmd(
         chrom: chrom.map(String::from),
         group_out: group_out.map(String::from),
         edit_distance_threshold: 1,
+        subset,
+        output_unmapped,
     };
 
     let stats = run_group(&config, input).context("group failed")?;
@@ -705,6 +745,7 @@ fn run_group_cmd(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_dedup_cmd(
     input_path: Option<&str>,
     method: &str,
@@ -713,6 +754,10 @@ fn run_dedup_cmd(
     random_seed: u64,
     umi_separator: &str,
     chrom: Option<&str>,
+    edit_distance_threshold: u32,
+    subset: Option<f32>,
+    extract_umi_method: &str,
+    umi_tag: Option<&str>,
 ) -> Result<()> {
     let input = input_path.context("--stdin is required for dedup (BAM input path)")?;
 
@@ -734,7 +779,10 @@ fn run_dedup_cmd(
         random_seed,
         out_sam,
         chrom: chrom.map(String::from),
-        edit_distance_threshold: 1,
+        edit_distance_threshold,
+        subset,
+        extract_umi_method: extract_umi_method.to_string(),
+        umi_tag: umi_tag.map(String::from),
     };
 
     let mut stdout = io::stdout().lock();

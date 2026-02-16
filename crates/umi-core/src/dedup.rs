@@ -137,6 +137,9 @@ pub struct DedupConfig {
     pub out_sam: bool,
     pub chrom: Option<String>,
     pub edit_distance_threshold: u32,
+    pub subset: Option<f32>,
+    pub extract_umi_method: String,
+    pub umi_tag: Option<String>,
 }
 
 pub struct DedupStats {
@@ -194,24 +197,29 @@ pub(crate) struct UmiSlot {
 /// When flushing, positions are emitted in sorted order and keys within
 /// each position are emitted in sorted order (matching Python's
 /// `sorted(reads_dict[p].keys())`).
-struct ReadBuffer<R: TieBreakRng> {
+struct ReadBuffer {
     groups: BTreeMap<i64, BTreeMap<GroupKey, HashMap<Vec<u8>, UmiSlot>>>,
     /// Per-(pos, key) insertion counters for deterministic ordering.
     insertion_counters: BTreeMap<i64, BTreeMap<GroupKey, u32>>,
-    rng: R,
 }
 
-impl<R: TieBreakRng> ReadBuffer<R> {
-    const fn new(rng: R) -> Self {
+impl ReadBuffer {
+    const fn new() -> Self {
         Self {
             groups: BTreeMap::new(),
             insertion_counters: BTreeMap::new(),
-            rng,
         }
     }
 
     /// Add a record to the buffer, performing reservoir-sampling read selection.
-    fn add(&mut self, record: Record, pos: i64, key: GroupKey, umi: Vec<u8>) {
+    fn add(
+        &mut self,
+        record: Record,
+        pos: i64,
+        key: GroupKey,
+        umi: Vec<u8>,
+        rng: &mut impl TieBreakRng,
+    ) {
         let umi_map = self.groups.entry(pos).or_default().entry(key).or_default();
 
         let Some(slot) = umi_map.get_mut(&umi) else {
@@ -249,7 +257,7 @@ impl<R: TieBreakRng> ReadBuffer<R> {
             }
             std::cmp::Ordering::Equal => {
                 slot.tie_count += 1;
-                if self.rng.random() < 1.0 / f64::from(slot.tie_count) {
+                if rng.random() < 1.0 / f64::from(slot.tie_count) {
                     slot.record = record;
                 }
             }
@@ -609,8 +617,8 @@ pub fn run_dedup(
         .transpose()?;
 
     #[allow(clippy::cast_possible_truncation)]
-    let rng = PythonRandom::new(config.random_seed as u32);
-    let mut buffer = ReadBuffer::new(rng);
+    let mut rng = PythonRandom::new(config.random_seed as u32);
+    let mut buffer = ReadBuffer::new();
     let mut stats = DedupStats {
         input_reads: 0,
         output_reads: 0,
@@ -640,6 +648,11 @@ pub fn run_dedup(
 
         stats.input_reads += 1;
 
+        // Subset check consumes one RNG call per mapped read (before buffer.add)
+        if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
+            continue;
+        }
+
         let (start, pos) = get_read_position(&record);
 
         // Flush buffer when moving far enough or changing chromosome.
@@ -662,11 +675,16 @@ pub fn run_dedup(
 
         let umi = if config.ignore_umi {
             Vec::new()
+        } else if config.extract_umi_method == "tag" {
+            match extract_umi_from_tag(&record, config.umi_tag.as_deref().unwrap_or("RX")) {
+                Some(u) => u,
+                None => continue,
+            }
         } else {
             extract_umi_from_name(&record, config.umi_separator)
         };
 
-        buffer.add(record, pos, key, umi);
+        buffer.add(record, pos, key, umi, &mut rng);
     }
 
     output_records.extend(buffer.drain_all(config.method, config.edit_distance_threshold));
@@ -687,6 +705,13 @@ pub fn run_dedup(
     drop(writer);
 
     Ok(stats)
+}
+
+pub(crate) fn extract_umi_from_tag(record: &Record, tag: &str) -> Option<Vec<u8>> {
+    match record.aux(tag.as_bytes()) {
+        Ok(rust_htslib::bam::record::Aux::String(s)) => Some(s.as_bytes().to_vec()),
+        _ => None,
+    }
 }
 
 pub(crate) fn extract_umi_from_name(record: &Record, separator: u8) -> Vec<u8> {

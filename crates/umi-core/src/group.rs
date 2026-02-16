@@ -5,8 +5,9 @@ use std::io::{BufWriter, Write};
 use rust_htslib::bam::{self, Read as BamRead, Record};
 
 use crate::dedup::{
-    DedupMethod, GroupKey, build_adjacency_list, build_directional_adjacency_list,
-    connected_components, extract_umi_from_name, get_read_position, median, min_set_cover,
+    DedupMethod, GroupKey, PythonRandom, TieBreakRng, build_adjacency_list,
+    build_directional_adjacency_list, connected_components, extract_umi_from_name,
+    get_read_position, median, min_set_cover,
 };
 
 #[allow(clippy::struct_excessive_bools)]
@@ -21,6 +22,8 @@ pub struct GroupConfig {
     pub chrom: Option<String>,
     pub group_out: Option<String>,
     pub edit_distance_threshold: u32,
+    pub subset: Option<f32>,
+    pub output_unmapped: bool,
 }
 
 pub struct GroupStats {
@@ -342,7 +345,11 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         output_reads: 0,
     };
 
+    #[allow(clippy::cast_possible_truncation)]
+    let mut rng = PythonRandom::new(config.random_seed as u32);
+
     let mut output_records: Vec<Record> = Vec::new();
+    let mut unmapped_records: Vec<Record> = Vec::new();
     let mut unique_id: u32 = 0;
 
     let mut last_start: i64 = 0;
@@ -352,6 +359,9 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         let record = result.map_err(|e| GroupError::BamRead(e.to_string()))?;
 
         if record.is_unmapped() {
+            if config.output_unmapped {
+                unmapped_records.push(record);
+            }
             continue;
         }
 
@@ -362,6 +372,11 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         }
 
         stats.input_reads += 1;
+
+        // Subset check consumes one RNG call per mapped read (before buffer.add)
+        if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
+            continue;
+        }
 
         let (start, pos) = get_read_position(&record);
 
@@ -418,6 +433,9 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
     if !config.no_sort_output {
         output_records.sort_by(|a, b| a.tid().cmp(&b.tid()).then_with(|| a.pos().cmp(&b.pos())));
     }
+
+    // Append unmapped reads after sorted mapped reads (no tags added)
+    output_records.extend(unmapped_records);
 
     stats.output_reads = output_records.len() as u64;
 
