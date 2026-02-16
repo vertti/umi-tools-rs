@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io;
+use std::fs::File;
+use std::io::{self, Write as IoWrite};
 
 use rust_htslib::bam::{self, Read as BamRead, Record};
 
@@ -117,6 +118,72 @@ impl TieBreakRng for PythonRandom {
         let a = self.next_u32() >> 5;
         let b = self.next_u32() >> 6;
         (f64::from(a) * 67_108_864.0 + f64::from(b)) * (1.0 / 9_007_199_254_740_992.0)
+    }
+}
+
+/// MT19937 PRNG matching `NumPy`'s `np.random.seed(int)` + `np.random.random()`.
+///
+/// `NumPy` seeds with `init_genrand(seed)` directly (unlike `CPython` which uses
+/// `init_by_array`). Output generation (`genrand_res53`) is identical.
+struct NumpyRandom {
+    mt: [u32; 624],
+    index: usize,
+}
+
+impl NumpyRandom {
+    const N: usize = 624;
+
+    fn new(seed: u32) -> Self {
+        PythonRandom::init_genrand(seed).into()
+    }
+
+    fn random(&mut self) -> f64 {
+        let a = self.next_u32() >> 5;
+        let b = self.next_u32() >> 6;
+        (f64::from(a) * 67_108_864.0 + f64::from(b)) * (1.0 / 9_007_199_254_740_992.0)
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        if self.index >= Self::N {
+            self.generate();
+        }
+        let mut y = self.mt[self.index];
+        self.index += 1;
+        y ^= y >> 11;
+        y ^= (y << 7) & 0x9d2c_5680;
+        y ^= (y << 15) & 0xefc6_0000;
+        y ^= y >> 18;
+        y
+    }
+
+    fn generate(&mut self) {
+        static MAG01: [u32; 2] = [0, PythonRandom::MATRIX_A];
+        for kk in 0..PythonRandom::N - PythonRandom::M {
+            let y = (self.mt[kk] & PythonRandom::UPPER_MASK)
+                | (self.mt[kk + 1] & PythonRandom::LOWER_MASK);
+            self.mt[kk] = self.mt[kk + PythonRandom::M] ^ (y >> 1) ^ MAG01[(y & 1) as usize];
+        }
+        for kk in PythonRandom::N - PythonRandom::M..PythonRandom::N - 1 {
+            let y = (self.mt[kk] & PythonRandom::UPPER_MASK)
+                | (self.mt[kk + 1] & PythonRandom::LOWER_MASK);
+            self.mt[kk] = self.mt[kk + PythonRandom::M - PythonRandom::N]
+                ^ (y >> 1)
+                ^ MAG01[(y & 1) as usize];
+        }
+        let y = (self.mt[PythonRandom::N - 1] & PythonRandom::UPPER_MASK)
+            | (self.mt[0] & PythonRandom::LOWER_MASK);
+        self.mt[PythonRandom::N - 1] =
+            self.mt[PythonRandom::M - 1] ^ (y >> 1) ^ MAG01[(y & 1) as usize];
+        self.index = 0;
+    }
+}
+
+impl From<PythonRandom> for NumpyRandom {
+    fn from(pr: PythonRandom) -> Self {
+        Self {
+            mt: pr.mt,
+            index: pr.index,
+        }
     }
 }
 
@@ -274,43 +341,81 @@ impl ReadBuffer {
         threshold: i64,
         method: DedupMethod,
         edit_threshold: u32,
+        stats_ctx: &mut Option<StatsContext>,
     ) -> Vec<Record> {
         let rest = self.groups.split_off(&(threshold + 1));
         let drained = std::mem::replace(&mut self.groups, rest);
         // Clean up insertion counters for drained positions
         let rest_counters = self.insertion_counters.split_off(&(threshold + 1));
         let _ = std::mem::replace(&mut self.insertion_counters, rest_counters);
-        Self::apply_selection(drained, method, edit_threshold)
+        Self::apply_selection(drained, method, edit_threshold, stats_ctx)
     }
 
     /// Drain all remaining position groups, applying UMI dedup selection.
-    fn drain_all(&mut self, method: DedupMethod, edit_threshold: u32) -> Vec<Record> {
+    fn drain_all(
+        &mut self,
+        method: DedupMethod,
+        edit_threshold: u32,
+        stats_ctx: &mut Option<StatsContext>,
+    ) -> Vec<Record> {
         let drained = std::mem::take(&mut self.groups);
         self.insertion_counters.clear();
-        Self::apply_selection(drained, method, edit_threshold)
+        Self::apply_selection(drained, method, edit_threshold, stats_ctx)
     }
 
     /// Apply method-specific UMI selection to drained position groups.
-    /// Emits records in the order returned by `select_umis`, preserving
-    /// the deterministic ordering from clustering (count-desc, lex tiebreak).
     fn apply_selection(
         groups: BTreeMap<i64, BTreeMap<GroupKey, HashMap<Vec<u8>, UmiSlot>>>,
         method: DedupMethod,
         edit_threshold: u32,
+        stats_ctx: &mut Option<StatsContext>,
     ) -> Vec<Record> {
         let mut records = Vec::new();
         for key_map in groups.into_values() {
             for umi_map in key_map.into_values() {
-                let selected = select_umis(method, &umi_map, edit_threshold);
-                for umi in &selected {
-                    if let Some(slot) = umi_map.get(umi) {
-                        records.push(slot.record.clone());
+                if stats_ctx.is_some() {
+                    let selected_with_counts =
+                        select_umis_with_cluster_counts(method, &umi_map, edit_threshold);
+                    let mut bundle_records = Vec::new();
+                    let mut selected_umis = Vec::new();
+                    let mut cluster_counts = Vec::new();
+                    for (umi, cluster_count) in &selected_with_counts {
+                        if let Some(slot) = umi_map.get(umi) {
+                            bundle_records.push(slot.record.clone());
+                            selected_umis.push(umi.clone());
+                            cluster_counts.push(*cluster_count);
+                        }
+                    }
+                    if let Some(ctx) = stats_ctx.as_mut() {
+                        ctx.collector.record_bundle(
+                            &umi_map,
+                            &selected_umis,
+                            &cluster_counts,
+                            &bundle_records,
+                            ctx.umi_separator,
+                            &mut ctx.read_gen,
+                        );
+                    }
+                    records.extend(bundle_records);
+                } else {
+                    let selected = select_umis(method, &umi_map, edit_threshold);
+                    for umi in &selected {
+                        if let Some(slot) = umi_map.get(umi) {
+                            records.push(slot.record.clone());
+                        }
                     }
                 }
             }
         }
         records
     }
+}
+
+/// Bundles the stats collector + read generator for passing through drain calls.
+struct StatsContext {
+    collector: StatsCollector,
+    read_gen: RandomReadGenerator,
+    umi_separator: u8,
 }
 
 /// Hamming distance between two byte slices of equal length.
@@ -585,6 +690,512 @@ pub(crate) fn median(values: &[u32]) -> f64 {
     }
 }
 
+/// Like `select_umis`, but also returns the total count for each cluster
+/// (sum of all UMI counts in the cluster, not just the representative).
+/// Returns `(selected_umi, cluster_total_count)` pairs.
+#[allow(clippy::too_many_lines)]
+fn select_umis_with_cluster_counts(
+    method: DedupMethod,
+    umi_map: &HashMap<Vec<u8>, UmiSlot>,
+    edit_threshold: u32,
+) -> Vec<(Vec<u8>, u32)> {
+    let counts: HashMap<&[u8], u32> = umi_map
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.count))
+        .collect();
+    let orders: HashMap<&[u8], u32> = umi_map
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.insertion_order))
+        .collect();
+    let lex_sort = |a: &[u8], b: &[u8]| -> std::cmp::Ordering {
+        counts[b].cmp(&counts[a]).then_with(|| a.cmp(b))
+    };
+
+    match method {
+        DedupMethod::Unique => {
+            let mut umis: Vec<Vec<u8>> = umi_map.keys().cloned().collect();
+            umis.sort_by(|a, b| orders[a.as_slice()].cmp(&orders[b.as_slice()]));
+            umis.into_iter()
+                .map(|u| {
+                    let c = counts[u.as_slice()];
+                    (u, c)
+                })
+                .collect()
+        }
+
+        DedupMethod::Percentile => {
+            if counts.len() <= 1 {
+                return umi_map.iter().map(|(u, s)| (u.clone(), s.count)).collect();
+            }
+            let all_counts: Vec<u32> = counts.values().copied().collect();
+            let threshold = median(&all_counts) / 100.0;
+            let mut umis: Vec<Vec<u8>> = umi_map
+                .iter()
+                .filter(|(_, slot)| f64::from(slot.count) > threshold)
+                .map(|(umi, _)| umi.clone())
+                .collect();
+            umis.sort_by(|a, b| orders[a.as_slice()].cmp(&orders[b.as_slice()]));
+            umis.into_iter()
+                .map(|u| {
+                    let c = counts[u.as_slice()];
+                    (u, c)
+                })
+                .collect()
+        }
+
+        DedupMethod::Cluster => {
+            let umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
+            let adj_list = build_adjacency_list(&umis, edit_threshold);
+            let components = connected_components(&umis, &counts, &orders, &adj_list);
+            components
+                .into_iter()
+                .map(|mut comp| {
+                    let cluster_count: u32 = comp.iter().map(|u| counts[u.as_slice()]).sum();
+                    comp.sort_by(|a, b| lex_sort(a, b));
+                    (comp.into_iter().next().unwrap(), cluster_count)
+                })
+                .collect()
+        }
+
+        DedupMethod::Adjacency => {
+            let umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
+            let adj_list = build_adjacency_list(&umis, edit_threshold);
+            let components = connected_components(&umis, &counts, &orders, &adj_list);
+            let mut result = Vec::new();
+            for component in components {
+                if component.len() == 1 {
+                    let c = counts[component[0].as_slice()];
+                    result.push((component.into_iter().next().unwrap(), c));
+                } else {
+                    let lead_umis = min_set_cover(&component, &adj_list, &counts);
+                    // Each lead UMI's cluster: itself + its unobserved neighbors
+                    let mut observed: HashSet<&[u8]> = HashSet::new();
+                    for lead in &lead_umis {
+                        let mut cluster_count = counts[lead.as_slice()];
+                        observed.insert(lead.as_slice());
+                        if let Some(neighbors) = adj_list.get(lead) {
+                            for n in neighbors {
+                                if observed.insert(n.as_slice()) {
+                                    cluster_count += counts[n.as_slice()];
+                                }
+                            }
+                        }
+                        result.push((lead.clone(), cluster_count));
+                    }
+                }
+            }
+            result
+        }
+
+        DedupMethod::Directional => {
+            let umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
+            let adj_list = build_directional_adjacency_list(&umis, &counts, edit_threshold);
+            let components = connected_components(&umis, &counts, &orders, &adj_list);
+            let mut observed: HashSet<Vec<u8>> = HashSet::new();
+            let mut result = Vec::new();
+            for component in components {
+                if component.len() == 1 {
+                    let umi = component.into_iter().next().unwrap();
+                    let c = counts[umi.as_slice()];
+                    observed.insert(umi.clone());
+                    result.push((umi, c));
+                } else {
+                    let mut sorted_comp = component;
+                    sorted_comp.sort_by(|a, b| lex_sort(a, b));
+                    let mut group_lead = None;
+                    let mut cluster_count: u32 = 0;
+                    for node in sorted_comp {
+                        if observed.insert(node.clone()) {
+                            cluster_count += counts[node.as_slice()];
+                            if group_lead.is_none() {
+                                group_lead = Some(node);
+                            }
+                        }
+                    }
+                    if let Some(lead) = group_lead {
+                        result.push((lead, cluster_count));
+                    }
+                }
+            }
+            result
+        }
+    }
+}
+
+/// Mean pairwise Hamming distance between UMIs. Returns -1.0 for single UMI.
+#[allow(clippy::cast_precision_loss)]
+fn get_average_umi_distance(umis: &[&[u8]]) -> f64 {
+    if umis.len() <= 1 {
+        return -1.0;
+    }
+    let mut total: u64 = 0;
+    let mut count: u64 = 0;
+    for i in 0..umis.len() {
+        for j in (i + 1)..umis.len() {
+            total += u64::from(edit_distance(umis[i], umis[j]));
+            count += 1;
+        }
+    }
+    total as f64 / count as f64
+}
+
+/// Pre-scans BAM to build UMI frequency distribution for null model sampling.
+struct RandomReadGenerator {
+    keys: Vec<Vec<u8>>,
+    cdf: Vec<f64>,
+    rng: NumpyRandom,
+    random_umis: Vec<Vec<u8>>,
+    random_ix: usize,
+    fill_size: usize,
+}
+
+impl RandomReadGenerator {
+    fn new(
+        bam_path: &str,
+        umi_separator: u8,
+        extract_method: &str,
+        umi_tag: Option<&str>,
+        chrom: Option<&str>,
+        seed: u32,
+    ) -> Result<Self, DedupError> {
+        let mut reader =
+            bam::Reader::from_path(bam_path).map_err(|e| DedupError::BamOpen(e.to_string()))?;
+
+        let chrom_tid: Option<i32> = chrom
+            .map(|c| {
+                let tid = reader
+                    .header()
+                    .tid(c.as_bytes())
+                    .ok_or_else(|| DedupError::UnknownChrom(c.to_string()))?;
+                #[allow(clippy::cast_possible_wrap)]
+                Ok(tid as i32)
+            })
+            .transpose()?;
+
+        // Count UMI frequencies, preserving insertion order (order of first appearance).
+        let mut umi_order: Vec<Vec<u8>> = Vec::new();
+        let mut umi_counts: HashMap<Vec<u8>, u64> = HashMap::new();
+
+        for result in reader.records() {
+            let record = result.map_err(|e| DedupError::BamRead(e.to_string()))?;
+            if record.is_unmapped() {
+                continue;
+            }
+            if record.is_last_in_template() {
+                continue;
+            }
+            if let Some(filter_tid) = chrom_tid
+                && record.tid() != filter_tid
+            {
+                continue;
+            }
+            let umi = if extract_method == "tag" {
+                match extract_umi_from_tag(&record, umi_tag.unwrap_or("RX")) {
+                    Some(u) => u,
+                    None => continue,
+                }
+            } else {
+                extract_umi_from_name(&record, umi_separator)
+            };
+            let entry = umi_counts.entry(umi.clone());
+            if matches!(entry, std::collections::hash_map::Entry::Vacant(_)) {
+                umi_order.push(umi);
+            }
+            *entry.or_insert(0) += 1;
+        }
+
+        // Build CDF from frequencies in insertion order.
+        #[allow(clippy::cast_precision_loss)]
+        let total: f64 = umi_counts.values().sum::<u64>() as f64;
+        let mut cdf = Vec::with_capacity(umi_order.len());
+        let mut cumsum = 0.0;
+        for key in &umi_order {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                cumsum += umi_counts[key] as f64 / total;
+            }
+            cdf.push(cumsum);
+        }
+
+        let mut rng = Self {
+            keys: umi_order,
+            cdf,
+            rng: NumpyRandom::new(seed),
+            random_umis: Vec::new(),
+            random_ix: 0,
+            fill_size: 100_000,
+        };
+        rng.refill();
+        Ok(rng)
+    }
+
+    fn refill(&mut self) {
+        self.random_umis.clear();
+        self.random_umis.reserve(self.fill_size);
+        for _ in 0..self.fill_size {
+            let r = self.rng.random();
+            let idx = self
+                .cdf
+                .partition_point(|&c| c <= r)
+                .min(self.keys.len() - 1);
+            self.random_umis.push(self.keys[idx].clone());
+        }
+        self.random_ix = 0;
+    }
+
+    fn get_umis(&mut self, n: usize) -> Vec<Vec<u8>> {
+        if n >= self.fill_size - self.random_ix {
+            if n > self.fill_size {
+                self.fill_size = n * 2;
+            }
+            self.refill();
+        }
+        let result = self.random_umis[self.random_ix..self.random_ix + n].to_vec();
+        self.random_ix += n;
+        result
+    }
+}
+
+/// Accumulates per-bundle stats during dedup for the 3 stats output files.
+struct StatsCollector {
+    // Per-UMI-per-position: (umi, count) tuples
+    pre_umi_counts: Vec<(Vec<u8>, u32)>,
+    post_umi_counts: Vec<(Vec<u8>, u32)>,
+    // Edit distance stats per bundle
+    pre_cluster_stats: Vec<f64>,
+    post_cluster_stats: Vec<f64>,
+    pre_cluster_stats_null: Vec<f64>,
+    post_cluster_stats_null: Vec<f64>,
+}
+
+impl StatsCollector {
+    const fn new() -> Self {
+        Self {
+            pre_umi_counts: Vec::new(),
+            post_umi_counts: Vec::new(),
+            pre_cluster_stats: Vec::new(),
+            post_cluster_stats: Vec::new(),
+            pre_cluster_stats_null: Vec::new(),
+            post_cluster_stats_null: Vec::new(),
+        }
+    }
+
+    fn record_bundle(
+        &mut self,
+        umi_map: &HashMap<Vec<u8>, UmiSlot>,
+        selected_umis: &[Vec<u8>],
+        cluster_counts: &[u32],
+        selected_records: &[Record],
+        umi_separator: u8,
+        read_gen: &mut RandomReadGenerator,
+    ) {
+        // Pre-dedup: all UMIs in the bundle
+        let pre_umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
+        for (umi, slot) in umi_map {
+            self.pre_umi_counts.push((umi.clone(), slot.count));
+        }
+        let avg_dist = get_average_umi_distance(&pre_umis);
+        self.pre_cluster_stats.push(avg_dist);
+
+        let cluster_size = pre_umis.len();
+        let random_umis = read_gen.get_umis(cluster_size);
+        let random_refs: Vec<&[u8]> = random_umis.iter().map(Vec::as_slice).collect();
+        let avg_null = get_average_umi_distance(&random_refs);
+        self.pre_cluster_stats_null.push(avg_null);
+
+        // Post-dedup: selected UMIs with cluster-aggregated counts
+        for (umi, &count) in selected_umis.iter().zip(cluster_counts) {
+            self.post_umi_counts.push((umi.clone(), count));
+        }
+
+        // Post-dedup edit distance from the actual output records' UMIs
+        let post_umis: Vec<Vec<u8>> = selected_records
+            .iter()
+            .map(|r| extract_umi_from_name(r, umi_separator))
+            .collect();
+        let post_refs: Vec<&[u8]> = post_umis.iter().map(Vec::as_slice).collect();
+        let avg_post = get_average_umi_distance(&post_refs);
+        self.post_cluster_stats.push(avg_post);
+
+        let post_size = post_umis.len();
+        let random_umis_post = read_gen.get_umis(post_size);
+        let random_post_refs: Vec<&[u8]> = random_umis_post.iter().map(Vec::as_slice).collect();
+        let avg_null_post = get_average_umi_distance(&random_post_refs);
+        self.post_cluster_stats_null.push(avg_null_post);
+    }
+
+    fn write_files(&self, prefix: &str, method_name: &str) -> Result<(), DedupError> {
+        self.write_per_umi_per_position(prefix)?;
+        self.write_per_umi(prefix)?;
+        self.write_edit_distance(prefix, method_name)?;
+        Ok(())
+    }
+
+    fn write_per_umi_per_position(&self, prefix: &str) -> Result<(), DedupError> {
+        let mut pre_counts: HashMap<u32, u32> = HashMap::new();
+        let mut post_counts: HashMap<u32, u32> = HashMap::new();
+        for (_, count) in &self.pre_umi_counts {
+            *pre_counts.entry(*count).or_default() += 1;
+        }
+        for (_, count) in &self.post_umi_counts {
+            *post_counts.entry(*count).or_default() += 1;
+        }
+
+        let mut all_counts: Vec<u32> = pre_counts
+            .keys()
+            .chain(post_counts.keys())
+            .copied()
+            .collect::<HashSet<u32>>()
+            .into_iter()
+            .collect();
+        all_counts.sort_unstable();
+
+        let path = format!("{prefix}_per_umi_per_position.tsv");
+        let mut f =
+            File::create(&path).map_err(|e| DedupError::StatsWrite(path.clone(), e.to_string()))?;
+        writeln!(f, "counts\tinstances_pre\tinstances_post")
+            .map_err(|e| DedupError::StatsWrite(path.clone(), e.to_string()))?;
+        for count in &all_counts {
+            let pre = pre_counts.get(count).unwrap_or(&0);
+            let post = post_counts.get(count).unwrap_or(&0);
+            writeln!(f, "{count}\t{pre}\t{post}")
+                .map_err(|e| DedupError::StatsWrite(path.clone(), e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn write_per_umi(&self, prefix: &str) -> Result<(), DedupError> {
+        // Aggregate per UMI: median_counts, times_observed, total_counts
+        let pre_agg = Self::aggregate_per_umi(&self.pre_umi_counts);
+        let post_agg = Self::aggregate_per_umi(&self.post_umi_counts);
+
+        // Sorted union of UMI keys
+        let mut all_umis: Vec<Vec<u8>> = pre_agg
+            .keys()
+            .chain(post_agg.keys())
+            .cloned()
+            .collect::<HashSet<Vec<u8>>>()
+            .into_iter()
+            .collect();
+        all_umis.sort();
+
+        let path = format!("{prefix}_per_umi.tsv");
+        let mut f =
+            File::create(&path).map_err(|e| DedupError::StatsWrite(path.clone(), e.to_string()))?;
+        writeln!(
+            f,
+            "UMI\tmedian_counts_pre\ttimes_observed_pre\ttotal_counts_pre\t\
+             median_counts_post\ttimes_observed_post\ttotal_counts_post"
+        )
+        .map_err(|e| DedupError::StatsWrite(path.clone(), e.to_string()))?;
+
+        for umi in &all_umis {
+            let (med_pre, obs_pre, tot_pre) = pre_agg.get(umi).unwrap_or(&(0, 0, 0));
+            let (med_post, obs_post, tot_post) = post_agg.get(umi).unwrap_or(&(0, 0, 0));
+            let umi_str = std::str::from_utf8(umi).unwrap_or("?");
+            writeln!(
+                f,
+                "{umi_str}\t{med_pre}\t{obs_pre}\t{tot_pre}\t{med_post}\t{obs_post}\t{tot_post}"
+            )
+            .map_err(|e| DedupError::StatsWrite(path.clone(), e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Returns map: umi → (`median_counts`, `times_observed`, `total_counts`)
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    fn aggregate_per_umi(umi_counts: &[(Vec<u8>, u32)]) -> HashMap<Vec<u8>, (i64, i64, i64)> {
+        let mut grouped: HashMap<Vec<u8>, Vec<u32>> = HashMap::new();
+        for (umi, count) in umi_counts {
+            grouped.entry(umi.clone()).or_default().push(*count);
+        }
+        grouped
+            .into_iter()
+            .map(|(umi, counts)| {
+                let times_observed = counts.len() as i64;
+                let total: i64 = counts.iter().map(|&c| i64::from(c)).sum();
+                let med = median(&counts);
+                // Python: .fillna(0).astype(int) truncates toward zero (same as floor for positive)
+                let median_int = med as i64;
+                (umi, (median_int, times_observed, total))
+            })
+            .collect()
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn write_edit_distance(&self, prefix: &str, method_name: &str) -> Result<(), DedupError> {
+        // Find max edit distance across all stats
+        let all_stats = self
+            .pre_cluster_stats
+            .iter()
+            .chain(&self.post_cluster_stats)
+            .chain(&self.pre_cluster_stats_null)
+            .chain(&self.post_cluster_stats_null);
+        let max_ed = all_stats.copied().fold(0.0_f64, f64::max) as i32;
+
+        // bins = range(-1, max_ed + 2)  →  [-1, 0, 1, ..., max_ed+1]
+        let bins: Vec<i32> = (-1..=max_ed + 1).collect();
+        let nbins = bins.len();
+
+        let digitize = |values: &[f64]| -> Vec<usize> {
+            // np.digitize(values, bins, right=True): returns i such that
+            // bins[i-1] < v <= bins[i]. Equivalent to searchsorted(side='left').
+            values
+                .iter()
+                .map(|&v| bins.partition_point(|&b| f64::from(b) < v).min(nbins))
+                .collect()
+        };
+
+        let bincount = |binned: &[usize], minlength: usize| -> Vec<u64> {
+            let mut counts = vec![0u64; minlength];
+            for &b in binned {
+                if b < counts.len() {
+                    counts[b] += 1;
+                }
+            }
+            counts
+        };
+
+        let minlength = (max_ed + 3) as usize;
+
+        let pre_binned = digitize(&self.pre_cluster_stats);
+        let post_binned = digitize(&self.post_cluster_stats);
+        let pre_null_binned = digitize(&self.pre_cluster_stats_null);
+        let post_null_binned = digitize(&self.post_cluster_stats_null);
+
+        let pre_counts = bincount(&pre_binned, minlength);
+        let post_counts = bincount(&post_binned, minlength);
+        let pre_null_counts = bincount(&pre_null_binned, minlength);
+        let post_null_counts = bincount(&post_null_binned, minlength);
+
+        let path = format!("{prefix}_edit_distance.tsv");
+        let mut f =
+            File::create(&path).map_err(|e| DedupError::StatsWrite(path.clone(), e.to_string()))?;
+        writeln!(
+            f,
+            "unique\tunique_null\t{method_name}\t{method_name}_null\tedit_distance"
+        )
+        .map_err(|e| DedupError::StatsWrite(path.clone(), e.to_string()))?;
+
+        for i in 0..minlength {
+            let ed_label = if i == 0 {
+                "Single_UMI".to_string()
+            } else if i < bins.len() {
+                bins[i].to_string()
+            } else {
+                (i - 1).to_string()
+            };
+            let pre = pre_counts.get(i).unwrap_or(&0);
+            let post = post_counts.get(i).unwrap_or(&0);
+            let pre_null = pre_null_counts.get(i).unwrap_or(&0);
+            let post_null = post_null_counts.get(i).unwrap_or(&0);
+            writeln!(f, "{pre}\t{pre_null}\t{post}\t{post_null}\t{ed_label}")
+                .map_err(|e| DedupError::StatsWrite(path.clone(), e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
 /// # Errors
 ///
 /// Returns `DedupError` on BAM I/O failures or unknown chromosome filter.
@@ -646,6 +1257,28 @@ pub fn run_dedup(
     let mut gene_ids: HashMap<Vec<u8>, i64> = HashMap::new();
     let mut next_gene_id: i64 = 0;
 
+    // Stats collection (optional, only when --output-stats is set)
+    #[allow(clippy::cast_possible_truncation)]
+    let mut stats_ctx: Option<StatsContext> = config
+        .output_stats
+        .as_ref()
+        .map(|_| {
+            let read_gen = RandomReadGenerator::new(
+                input_path,
+                config.umi_separator,
+                &config.extract_umi_method,
+                config.umi_tag.as_deref(),
+                config.chrom.as_deref(),
+                config.random_seed as u32,
+            )?;
+            Ok(StatsContext {
+                collector: StatsCollector::new(),
+                read_gen,
+                umi_separator: config.umi_separator,
+            })
+        })
+        .transpose()?;
+
     for result in reader.records() {
         let record = result.map_err(|e| DedupError::BamRead(e.to_string()))?;
 
@@ -701,14 +1334,18 @@ pub fn run_dedup(
 
             // Flush buffer when moving far enough or changing chromosome.
             if tid != last_chrom {
-                output_records
-                    .extend(buffer.drain_all(config.method, config.edit_distance_threshold));
+                output_records.extend(buffer.drain_all(
+                    config.method,
+                    config.edit_distance_threshold,
+                    &mut stats_ctx,
+                ));
             } else if start > last_start + 1000 {
                 let threshold = start - 1000;
                 output_records.extend(buffer.drain_up_to(
                     threshold,
                     config.method,
                     config.edit_distance_threshold,
+                    &mut stats_ctx,
                 ));
             }
 
@@ -720,7 +1357,11 @@ pub fn run_dedup(
         }
     }
 
-    output_records.extend(buffer.drain_all(config.method, config.edit_distance_threshold));
+    output_records.extend(buffer.drain_all(
+        config.method,
+        config.edit_distance_threshold,
+        &mut stats_ctx,
+    ));
 
     // Sort by coordinate (tid, pos) to match `pysam.sort()` / `samtools sort`.
     output_records.sort_by(|a, b| a.tid().cmp(&b.tid()).then_with(|| a.pos().cmp(&b.pos())));
@@ -736,6 +1377,18 @@ pub fn run_dedup(
     // The output arg is unused for now (Writer writes to stdout directly).
     let _ = output;
     drop(writer);
+
+    // Write stats files if requested
+    if let (Some(prefix), Some(ctx)) = (&config.output_stats, &stats_ctx) {
+        let method_name = match config.method {
+            DedupMethod::Unique => "unique",
+            DedupMethod::Percentile => "percentile",
+            DedupMethod::Cluster => "cluster",
+            DedupMethod::Adjacency => "adjacency",
+            DedupMethod::Directional => "directional",
+        };
+        ctx.collector.write_files(prefix, method_name)?;
+    }
 
     Ok(stats)
 }
@@ -766,6 +1419,8 @@ pub enum DedupError {
     UnknownChrom(String),
     #[error("invalid regex: {0}")]
     InvalidRegex(String),
+    #[error("failed to write stats file {0}: {1}")]
+    StatsWrite(String, String),
 }
 
 #[cfg(test)]
