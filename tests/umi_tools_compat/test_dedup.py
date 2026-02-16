@@ -19,6 +19,9 @@ ENABLED_TESTS = [
     "dedup_single_adj",
     "dedup_single_dir",
     "dedup_single_sep",
+    "dedup_single_dir_edit_dist",
+    "dedup_single_tag",
+    "dedup_single_subset",
 ]
 
 # Flags the Rust binary doesn't support yet — stripped before invocation.

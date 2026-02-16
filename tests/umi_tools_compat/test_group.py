@@ -16,6 +16,8 @@ ENABLED_TESTS = [
     "group_adjacency",
     "group_directional",
     "group_unsorted",
+    "group_directional_subset",
+    "group_directional_unmapped",
 ]
 
 # Flags the Rust binary doesn't support yet — stripped before invocation.

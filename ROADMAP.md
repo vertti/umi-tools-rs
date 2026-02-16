@@ -2,7 +2,7 @@
 
 Implementation roadmap derived from the umi-tools compatibility test suite (`tests/tests.yaml` in the Python umi-tools repo). The test suite has **66 tests** total; we use it to track feature parity.
 
-## Current state: 35 / 66 tests passing
+## Current state: 41 / 66 tests passing
 
 | Phase | Tests | Status |
 |-------|-------|--------|
@@ -30,10 +30,10 @@ New subcommand: `dedup`. Requires BAM I/O (rust-htslib or noodles).
 | `dedup_single_adj` | `--method=adjacency` | Done |
 | `dedup_single_dir` | `--method=directional` | Done |
 | `dedup_single_stats` | `--method=cluster`, `--output-stats` | |
-| `dedup_single_dir_edit_dist` | `--method=directional`, `--edit-distance-threshold=2` | |
-| `dedup_single_subset` | `--method=directional`, `--subset=0.1` | |
+| `dedup_single_dir_edit_dist` | `--method=directional`, `--edit-distance-threshold=2` | Done |
+| `dedup_single_subset` | `--method=directional`, `--subset=0.1` | Done |
 | `dedup_single_sep` | `--umi-separator=:` | Done |
-| `dedup_single_tag` | `--umi-tag=RX`, `--extract-umi-method=tag` |
+| `dedup_single_tag` | `--umi-tag=RX`, `--extract-umi-method=tag` | Done |
 | `dedup_single_tag_missing` | `--umi-tag=RX`, `--extract-umi-method=tag`, `--output-stats` |
 | `dedup_single_gene_tag` | `--per-gene`, `--gene-tag=XF`, `--skip-tags-regex` |
 | `dedup_paired_umi_whitelist` | `--paired`, `--filter-umi`, `--umi-whitelist`, `--umi-whitelist-paired` |
@@ -52,8 +52,8 @@ New subcommand: `group`. Similar BAM infrastructure to dedup but outputs group a
 | `group_cluster` | `--method=cluster`, `--group-out` | Done |
 | `group_adjacency` | `--method=adjacency`, `--group-out` | Done |
 | `group_directional` | `--method=directional`, `--group-out` | Done |
-| `group_directional_subset` | `--method=directional`, `--subset=0.1`, `--group-out` | |
-| `group_directional_unmapped` | `--method=directional`, `--output-unmapped`, `--group-out` | |
+| `group_directional_subset` | `--method=directional`, `--subset=0.1`, `--group-out` | Done |
+| `group_directional_unmapped` | `--method=directional`, `--output-unmapped`, `--group-out` | Done |
 | `group_unsorted` | `--method=directional`, `--no-sort-output` | Done |
 | `group_paired_discard_chimeric` | `--paired`, `--chimeric-pairs=discard` |
 | `group_paired_output_chimeric` | `--paired`, `--chimeric-pairs=output` |
