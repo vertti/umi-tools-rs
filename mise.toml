@@ -4,6 +4,7 @@ uv = "latest"
 "aqua:sharkdp/hyperfine" = "latest"
 hk = "latest"
 pkl = "latest"
+"cargo:cargo-release" = "latest"
 
 [tasks.fmt]
 run = "cargo fmt --all -- --check"
@@ -38,3 +39,7 @@ description = "Download benchmark data"
 run = "bash benchmarks/run.sh"
 depends = ["bench-setup"]
 description = "Run extract benchmarks"
+
+[tasks.release]
+run = "cargo release {{arg(name='level')}} --workspace --execute"
+description = "Release a new version (usage: mise run release -- patch|minor|major)"
