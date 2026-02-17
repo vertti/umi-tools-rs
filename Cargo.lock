@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "umi-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "needletail",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "umi-tools-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
