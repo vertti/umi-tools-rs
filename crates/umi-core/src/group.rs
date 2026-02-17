@@ -10,6 +10,20 @@ use crate::dedup::{
     extract_umi_from_tag, get_read_position, median, min_set_cover,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChimericPairs {
+    Discard,
+    Output,
+    Use,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum UnmappedHandling {
+    Discard,
+    Output,
+    Use,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub struct GroupConfig {
     pub method: DedupMethod,
@@ -23,11 +37,13 @@ pub struct GroupConfig {
     pub group_out: Option<String>,
     pub edit_distance_threshold: u32,
     pub subset: Option<f32>,
-    pub output_unmapped: bool,
     pub per_gene: bool,
     pub gene_tag: Option<String>,
     pub skip_tags_regex: Option<String>,
     pub per_contig: bool,
+    pub paired: bool,
+    pub chimeric_pairs: ChimericPairs,
+    pub unmapped_handling: UnmappedHandling,
 }
 
 pub struct GroupStats {
@@ -371,6 +387,9 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         .map(|s| regex::Regex::new(s).map_err(|e| GroupError::InvalidRegex(e.to_string())))
         .transpose()?;
 
+    let output_unmapped = config.unmapped_handling == UnmappedHandling::Output
+        || config.unmapped_handling == UnmappedHandling::Use;
+
     let mut buffer = GroupBuffer::new();
     let mut stats = GroupStats {
         input_reads: 0,
@@ -381,7 +400,6 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
     let mut rng = PythonRandom::new(config.random_seed as u32);
 
     let mut output_records: Vec<Record> = Vec::new();
-    let mut unmapped_records: Vec<Record> = Vec::new();
     let mut unique_id: u32 = 0;
 
     let mut last_start: i64 = 0;
@@ -395,9 +413,22 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
     for result in reader.records() {
         let record = result.map_err(|e| GroupError::BamRead(e.to_string()))?;
 
+        // R2 reads are passthrough (no grouping, no tags).
+        if record.is_last_in_template() {
+            if record.is_unmapped() {
+                if output_unmapped {
+                    output_records.push(record);
+                }
+            } else {
+                output_records.push(record);
+            }
+            continue;
+        }
+
+        // Handle unmapped reads (R1 in paired mode, or any read in single-end)
         if record.is_unmapped() {
-            if config.output_unmapped {
-                unmapped_records.push(record);
+            if output_unmapped {
+                output_records.push(record);
             }
             continue;
         }
@@ -413,6 +444,34 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         // Subset check consumes one RNG call per mapped read (before buffer.add)
         if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
             continue;
+        }
+
+        // Paired-mode filtering for R1 reads
+        if config.paired {
+            let is_chimeric =
+                !record.is_mate_unmapped() && record.tid() != record.mtid() && record.mtid() >= 0;
+
+            if is_chimeric {
+                match config.chimeric_pairs {
+                    ChimericPairs::Discard => continue,
+                    ChimericPairs::Output => {
+                        output_records.push(record);
+                        continue;
+                    }
+                    ChimericPairs::Use => {} // fall through to grouping with TLEN=0
+                }
+            }
+
+            if record.is_mate_unmapped() {
+                match config.unmapped_handling {
+                    UnmappedHandling::Discard => continue,
+                    UnmappedHandling::Output => {
+                        output_records.push(record);
+                        continue;
+                    }
+                    UnmappedHandling::Use => {} // fall through to grouping with TLEN=0
+                }
+            }
         }
 
         if config.per_gene {
@@ -494,7 +553,16 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             last_start = start;
             last_chrom = tid;
 
-            let key: GroupKey = (record.is_reverse(), false, 0, 0);
+            // For paired non-chimeric reads, include signed TLEN in the group key.
+            // Python sorts GroupKeys as tuples: (is_reverse, is_spliced, tlen, r_length).
+            // We place signed tlen in position 2 (i64) to match Python's sorted() ordering.
+            let tlen =
+                if config.paired && !record.is_mate_unmapped() && record.tid() == record.mtid() {
+                    record.insert_size()
+                } else {
+                    0
+                };
+            let key: GroupKey = (record.is_reverse(), false, tlen, 0);
 
             let umi = if config.ignore_umi {
                 Vec::new()
@@ -521,13 +589,15 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         w.flush().map_err(|e| GroupError::TsvWrite(e.to_string()))?;
     }
 
-    // Sort by coordinate unless --no-sort-output
+    // Sort by coordinate unless --no-sort-output.
+    // Unmapped reads are placed after all mapped reads (matching Python).
     if !config.no_sort_output {
-        output_records.sort_by(|a, b| a.tid().cmp(&b.tid()).then_with(|| a.pos().cmp(&b.pos())));
+        let (mut mapped, unmapped): (Vec<_>, Vec<_>) =
+            output_records.into_iter().partition(|r| !r.is_unmapped());
+        mapped.sort_by(|a, b| a.tid().cmp(&b.tid()).then_with(|| a.pos().cmp(&b.pos())));
+        mapped.extend(unmapped);
+        output_records = mapped;
     }
-
-    // Append unmapped reads after sorted mapped reads (no tags added)
-    output_records.extend(unmapped_records);
 
     stats.output_reads = output_records.len() as u64;
 

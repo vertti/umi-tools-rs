@@ -20,6 +20,12 @@ ENABLED_TESTS = [
     "group_directional_unmapped",
     "group_gene_tag",
     "group_contig_no_gene_tag",
+    "group_paired_discard_chimeric",
+    "group_paired_output_chimeric",
+    "group_paired_use_chimeric",
+    "group_paired_discard_unmapped",
+    "group_paired_output_unmapped",
+    "group_paired_use_unmapped",
 ]
 
 # Flags the Rust binary doesn't support yet — stripped before invocation.

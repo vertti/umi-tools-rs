@@ -13,7 +13,7 @@ use umi_core::extract::{
     ExtractConfig, QualityEncoding, extract_reads, extract_reads_either_read, extract_reads_paired,
     extract_reads_paired_r1_pattern,
 };
-use umi_core::group::{GroupConfig, run_group};
+use umi_core::group::{ChimericPairs, GroupConfig, UnmappedHandling, run_group};
 use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
 use umi_core::whitelist::{EdAboveThreshold, KneeMethod, WhitelistConfig, run_whitelist};
 
@@ -210,9 +210,21 @@ enum Commands {
         #[arg(long = "subset")]
         subset: Option<f32>,
 
-        /// Include unmapped reads in output
+        /// Include unmapped reads in output (alias for --unmapped=output)
         #[arg(long = "output-unmapped")]
         output_unmapped: bool,
+
+        /// Enable paired-end grouping
+        #[arg(long = "paired")]
+        paired: bool,
+
+        /// How to handle chimeric read pairs: discard, output, use
+        #[arg(long = "chimeric-pairs")]
+        chimeric_pairs: Option<String>,
+
+        /// How to handle unmapped reads: discard, output, use
+        #[arg(long = "unmapped", default_value = "discard")]
+        unmapped: String,
 
         /// Deduplicate per gene (requires --gene-tag or --per-contig)
         #[arg(long = "per-gene")]
@@ -422,6 +434,9 @@ fn main() -> Result<()> {
             no_sort_output,
             subset,
             output_unmapped,
+            paired,
+            chimeric_pairs,
+            unmapped,
             per_gene,
             gene_tag,
             skip_tags_regex,
@@ -440,6 +455,9 @@ fn main() -> Result<()> {
             no_sort_output,
             subset,
             output_unmapped,
+            paired,
+            chimeric_pairs.as_deref(),
+            &unmapped,
             per_gene,
             gene_tag.as_deref(),
             skip_tags_regex.as_deref(),
@@ -784,6 +802,9 @@ fn run_group_cmd(
     no_sort_output: bool,
     subset: Option<f32>,
     output_unmapped: bool,
+    paired: bool,
+    chimeric_pairs: Option<&str>,
+    unmapped: &str,
     per_gene: bool,
     gene_tag: Option<&str>,
     skip_tags_regex: Option<&str>,
@@ -802,6 +823,27 @@ fn run_group_cmd(
 
     let sep_byte = umi_separator.as_bytes().first().copied().unwrap_or(b'_');
 
+    let chimeric = match chimeric_pairs {
+        Some("discard") => ChimericPairs::Discard,
+        Some("output") => ChimericPairs::Output,
+        Some("use") | None => ChimericPairs::Use,
+        Some(other) => {
+            bail!("unknown --chimeric-pairs '{other}'; expected 'discard', 'output', or 'use'")
+        }
+    };
+
+    // --output-unmapped is an alias for --unmapped=output
+    let unmapped_handling = if output_unmapped {
+        UnmappedHandling::Output
+    } else {
+        match unmapped {
+            "discard" => UnmappedHandling::Discard,
+            "output" => UnmappedHandling::Output,
+            "use" => UnmappedHandling::Use,
+            other => bail!("unknown --unmapped '{other}'; expected 'discard', 'output', or 'use'"),
+        }
+    };
+
     let config = GroupConfig {
         method: dedup_method,
         ignore_umi,
@@ -814,11 +856,13 @@ fn run_group_cmd(
         group_out: group_out.map(String::from),
         edit_distance_threshold: 1,
         subset,
-        output_unmapped,
         per_gene,
         gene_tag: gene_tag.map(String::from),
         skip_tags_regex: skip_tags_regex.map(String::from),
         per_contig,
+        paired,
+        chimeric_pairs: chimeric,
+        unmapped_handling,
     };
 
     let stats = run_group(&config, input).context("group failed")?;
