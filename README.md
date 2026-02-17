@@ -30,7 +30,7 @@ Run benchmarks yourself: `mise run bench`
 | `extract` | Extract UMIs from FASTQ reads | Done |
 | `whitelist` | Build cell barcode whitelist | Done |
 | `dedup` | Deduplicate aligned BAM reads | Done |
-| `group` | Group PCR duplicates in BAM | Basic single-end |
+| `group` | Group PCR duplicates in BAM | Done |
 | `count` | Count unique molecules per gene | Planned |
 | `count_tab` | Count from flatfile input | Planned |
 
