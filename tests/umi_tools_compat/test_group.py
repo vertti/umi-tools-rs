@@ -18,6 +18,8 @@ ENABLED_TESTS = [
     "group_unsorted",
     "group_directional_subset",
     "group_directional_unmapped",
+    "group_gene_tag",
+    "group_contig_no_gene_tag",
 ]
 
 # Flags the Rust binary doesn't support yet — stripped before invocation.

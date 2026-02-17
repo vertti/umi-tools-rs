@@ -214,6 +214,22 @@ enum Commands {
         #[arg(long = "output-unmapped")]
         output_unmapped: bool,
 
+        /// Deduplicate per gene (requires --gene-tag or --per-contig)
+        #[arg(long = "per-gene")]
+        per_gene: bool,
+
+        /// BAM tag containing gene assignment (default: XF)
+        #[arg(long = "gene-tag")]
+        gene_tag: Option<String>,
+
+        /// Skip reads with gene tag matching this regex
+        #[arg(long = "skip-tags-regex")]
+        skip_tags_regex: Option<String>,
+
+        /// Use contig name as gene (requires --per-gene)
+        #[arg(long = "per-contig")]
+        per_contig: bool,
+
         /// Log file (accepted but ignored)
         #[arg(short = 'L', long = "log")]
         _log: Option<String>,
@@ -406,6 +422,10 @@ fn main() -> Result<()> {
             no_sort_output,
             subset,
             output_unmapped,
+            per_gene,
+            gene_tag,
+            skip_tags_regex,
+            per_contig,
             _log: _,
         } => run_group_cmd(
             input.as_deref(),
@@ -420,6 +440,10 @@ fn main() -> Result<()> {
             no_sort_output,
             subset,
             output_unmapped,
+            per_gene,
+            gene_tag.as_deref(),
+            skip_tags_regex.as_deref(),
+            per_contig,
         ),
         Commands::Dedup {
             input,
@@ -760,6 +784,10 @@ fn run_group_cmd(
     no_sort_output: bool,
     subset: Option<f32>,
     output_unmapped: bool,
+    per_gene: bool,
+    gene_tag: Option<&str>,
+    skip_tags_regex: Option<&str>,
+    per_contig: bool,
 ) -> Result<()> {
     let input = input_path.context("--stdin is required for group (BAM input path)")?;
 
@@ -787,6 +815,10 @@ fn run_group_cmd(
         edit_distance_threshold: 1,
         subset,
         output_unmapped,
+        per_gene,
+        gene_tag: gene_tag.map(String::from),
+        skip_tags_regex: skip_tags_regex.map(String::from),
+        per_contig,
     };
 
     let stats = run_group(&config, input).context("group failed")?;
