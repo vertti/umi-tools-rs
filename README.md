@@ -1,38 +1,21 @@
 # umi-tools-rs
 
-A fast drop-in replacement for [UMI-tools](https://github.com/CGATOxford/UMI-tools), written in Rust.
+A drop-in replacement for [UMI-tools](https://github.com/CGATOxford/UMI-tools), written in Rust. Same flags, same output — just faster.
 
-**14-50x faster** than Python UMI-tools on real data.
+## Performance
 
-## Benchmarks
+Measured with [hyperfine](https://github.com/sharkdp/hyperfine) against UMI-tools 1.1.6:
 
-Measured with [hyperfine](https://github.com/sharkdp/hyperfine).
-
-**Extract** (10x Genomics hgmm_100, pattern `CCCCCCCCCCCCCCCCNNNNNNNNNN`):
-
-| Dataset | umi-tools-rs | UMI-tools (Python) | Speedup |
-|:--------|-------------:|-------------------:|--------:|
-| 100K reads (1.8 MB gz) | 26 ms | 853 ms | **33x** |
-| 912K reads (19 MB gz) | 207 ms | 2,964 ms | **14x** |
-
-**Dedup** (chr19, 55K reads, directional method):
-
-| Dataset | umi-tools-rs | UMI-tools (Python) | Speedup |
-|:--------|-------------:|-------------------:|--------:|
-| 55K reads | 18 ms | 900 ms | **50x** |
+| Command | Speedup |
+|:--------|--------:|
+| `extract` | **14-36x** |
+| `whitelist` | **32x** |
+| `dedup` | **50x** |
+| `group` | **17x** |
+| `count` | **80x** |
+| `count_tab` | **91x** |
 
 Run benchmarks yourself: `mise run bench`
-
-## Feature support
-
-| Command | Description | Status |
-|:--------|:------------|:------:|
-| `extract` | Extract UMIs from FASTQ reads | Done |
-| `whitelist` | Build cell barcode whitelist | Done |
-| `dedup` | Deduplicate aligned BAM reads | Done |
-| `group` | Group PCR duplicates in BAM | Done |
-| `count` | Count unique molecules per gene | Planned |
-| `count_tab` | Count from flatfile input | Planned |
 
 ## Installation
 
@@ -56,11 +39,10 @@ cargo install --path .
 
 ## Usage
 
-```sh
-# Extract UMIs (single-end)
-umi-tools-rs extract --bc-pattern=NNNNNNNN --stdin=reads.fastq.gz --stdout=extracted.fastq.gz
+Replace `umi_tools` with `umi-tools-rs` in your existing commands:
 
-# Extract UMIs (paired-end)
+```sh
+# Extract UMIs
 umi-tools-rs extract --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNN \
   --stdin=R1.fastq.gz --read2-in=R2.fastq.gz \
   --stdout=R1_extracted.fastq.gz --read2-out=R2_extracted.fastq.gz
@@ -69,17 +51,9 @@ umi-tools-rs extract --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNN \
 umi-tools-rs whitelist --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNN \
   --stdin=R1.fastq.gz --stdout=whitelist.tsv
 
-# Extract with cell barcode filtering
-umi-tools-rs extract --bc-pattern=CCCCCCCCCCCCCCCCNNNNNNNNNN \
-  --stdin=R1.fastq.gz --stdout=extracted.fastq.gz \
-  --whitelist=whitelist.tsv --error-correct-cell
-
 # Deduplicate BAM reads
-umi-tools-rs dedup --stdin=aligned.bam --stdout=deduped.bam
+umi-tools-rs dedup --method=directional --stdin=aligned.bam --stdout=deduped.bam
 
-# Dedup with specific method and chromosome filter
-umi-tools-rs dedup --method=directional --chrom=chr19 \
-  --stdin=aligned.bam --stdout=deduped.bam
+# Count unique molecules per gene
+umi-tools-rs count --gene-tag=XF --per-cell --stdin=aligned.bam > counts.tsv
 ```
-
-Aims to be CLI-compatible with Python UMI-tools — same flags, same output format.
