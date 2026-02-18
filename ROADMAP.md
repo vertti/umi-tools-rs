@@ -2,7 +2,7 @@
 
 Implementation roadmap derived from the umi-tools compatibility test suite (`tests/tests.yaml` in the Python umi-tools repo). The test suite has **66 tests** total; we use it to track feature parity.
 
-## Current state: 41 / 66 tests passing
+## Current state: 59 / 66 tests passing
 
 | Phase | Tests | Status |
 |-------|-------|--------|
@@ -69,13 +69,13 @@ Key features: group TSV output, output-bam with BX/UG tags, chimeric/unmapped pa
 
 New subcommands: `count`, `count_tab`.
 
-| Test | Key flags |
-|------|-----------|
-| `count_single_gene_tag` | `count`, `--gene-tag=XF`, `--skip-tags-regex`, `--extract-umi-method=umis` |
-| `count_single_cells_gene_tag` | `count`, `--per-cell` |
-| `count_single_cells_wide_gene_tag` | `count`, `--per-cell`, `--wide-format-cell-counts` |
-| `count_tab_single` | `count_tab` (TSV input) |
-| `count_tab_single_per_cell` | `count_tab`, `--per-cell` |
+| Test | Key flags | Status |
+|------|-----------|--------|
+| `count_single_gene_tag` | `count`, `--gene-tag=XF`, `--skip-tags-regex`, `--extract-umi-method=umis` | Done |
+| `count_single_cells_gene_tag` | `count`, `--per-cell` | Done |
+| `count_single_cells_wide_gene_tag` | `count`, `--per-cell`, `--wide-format-cell-counts` | Done |
+| `count_tab_single` | `count_tab` (TSV input) | Done |
+| `count_tab_single_per_cell` | `count_tab`, `--per-cell` | Done |
 
 Key features: gene-level UMI counting from BAM, per-cell counts, wide-format output, tab-delimited input mode.
 

@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
+use umi_core::count::{CountConfig, CountTabConfig, run_count, run_count_tab};
 use umi_core::dedup::{DedupConfig, DedupMethod, run_dedup};
 use umi_core::extract::{
     ExtractConfig, QualityEncoding, extract_reads, extract_reads_either_read, extract_reads_paired,
@@ -333,6 +334,85 @@ enum Commands {
         #[arg(short = 'L', long = "log")]
         _log: Option<String>,
     },
+
+    /// Count UMI-deduplicated reads per gene from BAM
+    Count {
+        /// Input BAM file
+        #[arg(short = 'I', long = "stdin")]
+        input: Option<String>,
+
+        /// Output file (default: stdout)
+        #[arg(short = 'S', long = "stdout")]
+        output: Option<String>,
+
+        /// Dedup method: unique, percentile, cluster, adjacency, directional
+        #[arg(long = "method", default_value = "directional")]
+        method: String,
+
+        /// BAM tag containing gene assignment
+        #[arg(long = "gene-tag", default_value = "XF")]
+        gene_tag: String,
+
+        /// Skip reads with gene tag matching this regex
+        #[arg(long = "skip-tags-regex")]
+        skip_tags_regex: Option<String>,
+
+        /// UMI extraction method: umis, `read_id`, tag
+        #[arg(long = "extract-umi-method", default_value = "read_id")]
+        extract_umi_method: String,
+
+        /// Count per cell barcode
+        #[arg(long = "per-cell")]
+        per_cell: bool,
+
+        /// Output wide-format cell counts (requires --per-cell)
+        #[arg(long = "wide-format-cell-counts")]
+        wide_format: bool,
+
+        /// Edit distance threshold for UMI clustering
+        #[arg(long = "edit-distance-threshold", default_value = "1")]
+        edit_distance_threshold: u32,
+
+        /// Random seed (accepted but unused)
+        #[arg(long = "random-seed", default_value = "0")]
+        _random_seed: u64,
+
+        /// Log file (accepted but ignored)
+        #[arg(short = 'L', long = "log")]
+        _log: Option<String>,
+    },
+
+    /// Count UMI-deduplicated reads per gene from tab-delimited input
+    #[command(name = "count_tab")]
+    CountTab {
+        /// Input TSV file (default: stdin)
+        #[arg(short = 'I', long = "stdin")]
+        input: Option<String>,
+
+        /// Output file (default: stdout)
+        #[arg(short = 'S', long = "stdout")]
+        output: Option<String>,
+
+        /// Count per cell barcode
+        #[arg(long = "per-cell")]
+        per_cell: bool,
+
+        /// Barcode separator in read name
+        #[arg(long = "barcode-separator", default_value = "_")]
+        separator: String,
+
+        /// Dedup method: unique, percentile, cluster, adjacency, directional
+        #[arg(long = "method", default_value = "directional")]
+        method: String,
+
+        /// Edit distance threshold for UMI clustering
+        #[arg(long = "edit-distance-threshold", default_value = "1")]
+        edit_distance_threshold: u32,
+
+        /// Log file (accepted but ignored)
+        #[arg(short = 'L', long = "log")]
+        _log: Option<String>,
+    },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -506,6 +586,44 @@ fn main() -> Result<()> {
             filter_umi,
             umi_whitelist.as_deref(),
             umi_whitelist_paired.as_deref(),
+        ),
+        Commands::Count {
+            input,
+            output,
+            method,
+            gene_tag,
+            skip_tags_regex,
+            extract_umi_method: _,
+            per_cell,
+            wide_format,
+            edit_distance_threshold,
+            _random_seed: _,
+            _log: _,
+        } => run_count_cmd(
+            input.as_deref(),
+            output.as_deref(),
+            &method,
+            &gene_tag,
+            skip_tags_regex.as_deref(),
+            per_cell,
+            wide_format,
+            edit_distance_threshold,
+        ),
+        Commands::CountTab {
+            input,
+            output,
+            per_cell,
+            separator,
+            method,
+            edit_distance_threshold,
+            _log: _,
+        } => run_count_tab_cmd(
+            input.as_deref(),
+            output.as_deref(),
+            per_cell,
+            &separator,
+            &method,
+            edit_distance_threshold,
         ),
     }
 }
@@ -984,6 +1102,87 @@ fn load_umi_whitelist(path: &str, paired_path: Option<&str>) -> Result<HashSet<V
     } else {
         Ok(barcodes1.into_iter().collect())
     }
+}
+
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+fn run_count_cmd(
+    input_path: Option<&str>,
+    output_path: Option<&str>,
+    method: &str,
+    gene_tag: &str,
+    skip_tags_regex: Option<&str>,
+    per_cell: bool,
+    wide_format: bool,
+    edit_distance_threshold: u32,
+) -> Result<()> {
+    let input = input_path.context("--stdin is required for count (BAM input path)")?;
+
+    let dedup_method = match method {
+        "unique" => DedupMethod::Unique,
+        "percentile" => DedupMethod::Percentile,
+        "cluster" => DedupMethod::Cluster,
+        "adjacency" => DedupMethod::Adjacency,
+        "directional" => DedupMethod::Directional,
+        other => bail!("unknown method '{other}'"),
+    };
+
+    let config = CountConfig {
+        method: dedup_method,
+        gene_tag: gene_tag.to_string(),
+        skip_tags_regex: skip_tags_regex.map(String::from),
+        per_cell,
+        wide_format,
+        edit_distance_threshold,
+    };
+
+    let mut output = open_output(output_path)?;
+    let stats = run_count(&config, input, &mut output).context("count failed")?;
+
+    eprintln!(
+        "Reads input: {}, counted: {}",
+        stats.input_reads, stats.counted_reads,
+    );
+
+    Ok(())
+}
+
+fn run_count_tab_cmd(
+    input_path: Option<&str>,
+    output_path: Option<&str>,
+    per_cell: bool,
+    separator: &str,
+    method: &str,
+    edit_distance_threshold: u32,
+) -> Result<()> {
+    let dedup_method = match method {
+        "unique" => DedupMethod::Unique,
+        "percentile" => DedupMethod::Percentile,
+        "cluster" => DedupMethod::Cluster,
+        "adjacency" => DedupMethod::Adjacency,
+        "directional" => DedupMethod::Directional,
+        other => bail!("unknown method '{other}'"),
+    };
+
+    let sep_byte = separator.as_bytes().first().copied().unwrap_or(b'_');
+
+    let config = CountTabConfig {
+        method: dedup_method,
+        per_cell,
+        separator: sep_byte,
+        edit_distance_threshold,
+    };
+
+    let input = open_input(input_path)?;
+    let mut reader = io::BufReader::new(input);
+    let mut output = open_output(output_path)?;
+    let stats = run_count_tab(&config, &mut reader, &mut output).context("count_tab failed")?;
+
+    eprintln!(
+        "Reads input: {}, counted: {}",
+        stats.input_reads, stats.counted_reads,
+    );
+
+    Ok(())
 }
 
 fn is_gzipped(path: &str) -> bool {

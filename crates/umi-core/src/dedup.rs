@@ -691,6 +691,107 @@ pub(crate) fn select_umis(
     }
 }
 
+/// Count deduplicated UMI groups from raw count/order maps.
+///
+/// Same logic as `select_umis` but takes `HashMap<Vec<u8>, u32>` instead of
+/// `UmiSlot`, and returns only the count of surviving UMI groups.
+#[allow(clippy::implicit_hasher, clippy::missing_panics_doc)]
+#[must_use]
+pub fn count_umis(
+    method: DedupMethod,
+    counts: &HashMap<Vec<u8>, u32>,
+    orders: &HashMap<Vec<u8>, u32>,
+    edit_threshold: u32,
+) -> usize {
+    let count_refs: HashMap<&[u8], u32> = counts.iter().map(|(k, v)| (k.as_slice(), *v)).collect();
+    let order_refs: HashMap<&[u8], u32> = orders.iter().map(|(k, v)| (k.as_slice(), *v)).collect();
+    let lex_sort = |a: &[u8], b: &[u8]| -> std::cmp::Ordering {
+        count_refs[b].cmp(&count_refs[a]).then_with(|| a.cmp(b))
+    };
+
+    match method {
+        DedupMethod::Unique => counts.len(),
+
+        DedupMethod::Percentile => {
+            if counts.len() <= 1 {
+                return counts.len();
+            }
+            let all_counts: Vec<u32> = counts.values().copied().collect();
+            let threshold = median(&all_counts) / 100.0;
+            counts
+                .values()
+                .filter(|&&c| f64::from(c) > threshold)
+                .count()
+        }
+
+        DedupMethod::Cluster => {
+            let umis: Vec<&[u8]> = counts.keys().map(Vec::as_slice).collect();
+            let adj_list = build_adjacency_list(&umis, edit_threshold);
+            let components = connected_components(&umis, &count_refs, &order_refs, &adj_list);
+            components.len()
+        }
+
+        DedupMethod::Adjacency => {
+            let umis: Vec<&[u8]> = counts.keys().map(Vec::as_slice).collect();
+            let adj_list = build_adjacency_list(&umis, edit_threshold);
+            let components = connected_components(&umis, &count_refs, &order_refs, &adj_list);
+            let mut total = 0;
+            for component in components {
+                if component.len() == 1 {
+                    total += 1;
+                } else {
+                    total += min_set_cover(&component, &adj_list, &count_refs).len();
+                }
+            }
+            total
+        }
+
+        DedupMethod::Directional => {
+            let umis: Vec<&[u8]> = counts.keys().map(Vec::as_slice).collect();
+            let adj_list = build_directional_adjacency_list(&umis, &count_refs, edit_threshold);
+            let components = connected_components(&umis, &count_refs, &order_refs, &adj_list);
+            let mut observed: HashSet<Vec<u8>> = HashSet::new();
+            let mut total = 0;
+            for component in components {
+                if component.len() == 1 {
+                    let umi = component.into_iter().next().unwrap();
+                    observed.insert(umi);
+                    total += 1;
+                } else {
+                    let mut sorted_comp = component;
+                    sorted_comp.sort_by(|a, b| lex_sort(a, b));
+                    let mut found_lead = false;
+                    for node in sorted_comp {
+                        if observed.insert(node) && !found_lead {
+                            found_lead = true;
+                            total += 1;
+                        }
+                    }
+                }
+            }
+            total
+        }
+    }
+}
+
+/// Extract UMI and optional cell barcode from a read name using the `umis` method.
+///
+/// Splits `qname` by `:` and looks for `UMI_<seq>` and `CELL_<barcode>` prefixed
+/// fields. Returns `(umi, Option<cell>)`.
+#[must_use]
+pub fn extract_umi_umis(qname: &[u8]) -> (Vec<u8>, Option<Vec<u8>>) {
+    let mut umi = None;
+    let mut cell = None;
+    for part in qname.split(|&b| b == b':') {
+        if part.starts_with(b"UMI_") {
+            umi = Some(part[4..].to_vec());
+        } else if part.starts_with(b"CELL_") {
+            cell = Some(part[5..].to_vec());
+        }
+    }
+    (umi.unwrap_or_default(), cell)
+}
+
 /// Compute the median of a slice of u32 values, returned as f64.
 pub(crate) fn median(values: &[u32]) -> f64 {
     let mut sorted = values.to_vec();

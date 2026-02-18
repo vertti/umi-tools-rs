@@ -1,3 +1,4 @@
+pub mod count;
 pub mod dedup;
 pub mod error;
 pub mod extract;
