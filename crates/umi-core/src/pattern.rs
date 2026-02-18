@@ -253,26 +253,16 @@ impl RegexPattern {
         umi_spans.sort_by_key(|&(name, _, _)| name);
         cell_spans.sort_by_key(|&(name, _, _)| name);
 
-        // Build position sets
-        let mut umi_positions = Vec::new();
+        // Build extracted-position bitmask (O(n) lookup instead of O(n*m) Vec::contains)
+        let mut extracted = vec![false; sequence.len()];
         for &(_, start, end) in &umi_spans {
-            for i in start..end {
-                umi_positions.push(i);
-            }
+            extracted[start..end].fill(true);
         }
-
-        let mut cell_positions = Vec::new();
         for &(_, start, end) in &cell_spans {
-            for i in start..end {
-                cell_positions.push(i);
-            }
+            extracted[start..end].fill(true);
         }
-
-        let mut discard_positions = Vec::new();
         for &(start, end) in &discard_spans {
-            for i in start..end {
-                discard_positions.push(i);
-            }
+            extracted[start..end].fill(true);
         }
 
         // Build UMI and cell by concatenating group values in sorted name order
@@ -292,15 +282,11 @@ impl RegexPattern {
         let mut trimmed_sequence = Vec::new();
         let mut trimmed_quality = Vec::new();
 
-        for i in 0..sequence.len() {
-            if umi_positions.contains(&i)
-                || cell_positions.contains(&i)
-                || discard_positions.contains(&i)
-            {
-                continue;
+        for (i, &is_extracted) in extracted.iter().enumerate() {
+            if !is_extracted {
+                trimmed_sequence.push(sequence[i]);
+                trimmed_quality.push(quality[i]);
             }
-            trimmed_sequence.push(sequence[i]);
-            trimmed_quality.push(quality[i]);
         }
 
         Ok(ExtractionResult {
