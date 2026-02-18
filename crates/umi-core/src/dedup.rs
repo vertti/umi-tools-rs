@@ -704,7 +704,7 @@ pub(crate) fn select_umis(
 ///
 /// Same logic as `select_umis` but takes `HashMap<Vec<u8>, u32>` instead of
 /// `UmiSlot`, and returns only the count of surviving UMI groups.
-#[allow(clippy::implicit_hasher, clippy::missing_panics_doc)]
+#[allow(clippy::implicit_hasher)]
 #[must_use]
 pub fn count_umis(
     method: DedupMethod,
