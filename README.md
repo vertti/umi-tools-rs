@@ -12,12 +12,12 @@ Measured with [hyperfine](https://github.com/sharkdp/hyperfine) against UMI-tool
 
 | Command | Speedup |
 |:--------|--------:|
-| `extract` | **14-36x** |
-| `whitelist` | **32x** |
+| `extract` | **14-43x** |
+| `whitelist` | **31x** |
 | `dedup` | **50x** |
 | `group` | **17x** |
-| `count` | **80x** |
-| `count_tab` | **91x** |
+| `count` | **66x** |
+| `count_tab` | **103x** |
 
 Run benchmarks yourself: `mise run bench`
 
