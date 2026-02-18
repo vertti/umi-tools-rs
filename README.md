@@ -1,5 +1,9 @@
 # umi-tools-rs
 
+[![CI](https://github.com/vertti/umi-tools-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/vertti/umi-tools-rs/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Crates.io](https://img.shields.io/crates/v/umi-tools-rs)](https://crates.io/crates/umi-tools-rs)
+
 A drop-in replacement for [UMI-tools](https://github.com/CGATOxford/UMI-tools), written in Rust. Same flags, same output — just faster.
 
 ## Performance
@@ -19,11 +23,23 @@ Run benchmarks yourself: `mise run bench`
 
 ## Installation
 
-Download a prebuilt binary from [GitHub Releases](https://github.com/vertti/umi-tools-rs/releases/latest):
+### From crates.io
+
+```sh
+cargo install umi-tools-rs
+```
+
+### Prebuilt binaries
+
+Download from [GitHub Releases](https://github.com/vertti/umi-tools-rs/releases/latest):
 
 ```sh
 # Linux x86_64
 curl -fsSL https://github.com/vertti/umi-tools-rs/releases/latest/download/umi-tools-rs-x86_64-unknown-linux-gnu.tar.gz \
+  | tar xz -C /usr/local/bin
+
+# Linux aarch64
+curl -fsSL https://github.com/vertti/umi-tools-rs/releases/latest/download/umi-tools-rs-aarch64-unknown-linux-gnu.tar.gz \
   | tar xz -C /usr/local/bin
 
 # macOS Apple Silicon
@@ -31,7 +47,7 @@ curl -fsSL https://github.com/vertti/umi-tools-rs/releases/latest/download/umi-t
   | tar xz -C /usr/local/bin
 ```
 
-Or build from source:
+### From source
 
 ```sh
 cargo install --path .
