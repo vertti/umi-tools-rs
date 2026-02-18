@@ -342,9 +342,9 @@ fn preprocess_fuzzy(pattern_str: &str) -> Result<String, ExtractError> {
                 )));
             }
             let max_subs: usize = std::str::from_utf8(&bytes[num_start..num_end])
-                .unwrap()
+                .expect("ASCII digits validated above")
                 .parse()
-                .unwrap();
+                .expect("ASCII digits validated above");
 
             if result.is_empty() {
                 return Err(ExtractError::InvalidPattern(format!(

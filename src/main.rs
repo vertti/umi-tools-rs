@@ -1090,6 +1090,15 @@ fn load_umi_whitelist(path: &str, paired_path: Option<&str>) -> Result<HashSet<V
     if let Some(p2) = paired_path {
         // Paired mode: Cartesian product of both whitelist files
         let barcodes2 = load_barcodes(p2)?;
+        let product_size = barcodes1.len().saturating_mul(barcodes2.len());
+        if product_size > 10_000_000 {
+            bail!(
+                "Cartesian product of UMI whitelists would produce {product_size} entries \
+                 ({} x {}); refusing to proceed (limit: 10,000,000)",
+                barcodes1.len(),
+                barcodes2.len()
+            );
+        }
         let mut whitelist = HashSet::new();
         for b1 in &barcodes1 {
             for b2 in &barcodes2 {

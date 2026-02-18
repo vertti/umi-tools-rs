@@ -243,7 +243,7 @@ fn process_drained(
     tsv_writer: &mut Option<BufWriter<File>>,
     header_view: &bam::HeaderView,
     gene_labels: &HashMap<i64, String>,
-) -> Vec<Record> {
+) -> Result<Vec<Record>, GroupError> {
     let mut output_records = Vec::new();
 
     // In per-gene mode, Python sorts genes alphabetically; replicate that order.
@@ -282,7 +282,7 @@ fn process_drained(
                             let umi_str = std::str::from_utf8(umi).unwrap_or("");
                             let (_, read_pos) = get_read_position(&record);
 
-                            let _ = writeln!(
+                            writeln!(
                                 w,
                                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                                 read_name,
@@ -294,7 +294,8 @@ fn process_drained(
                                 top_umi_str,
                                 group_count,
                                 *unique_id,
-                            );
+                            )
+                            .map_err(|e| GroupError::TsvWrite(e.to_string()))?;
                         }
 
                         let mut tagged = record;
@@ -318,7 +319,7 @@ fn process_drained(
         }
     }
 
-    output_records
+    Ok(output_records)
 }
 
 /// # Errors
@@ -506,7 +507,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     &mut tsv_writer,
                     &header_view,
                     &gene_labels,
-                ));
+                )?);
             }
             last_chrom = tid;
 
@@ -530,7 +531,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     &mut tsv_writer,
                     &header_view,
                     &gene_labels,
-                ));
+                )?);
             } else if start > last_start + 1000 {
                 let threshold = start - 1000;
                 output_records.extend(process_drained(
@@ -541,7 +542,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     &mut tsv_writer,
                     &header_view,
                     &gene_labels,
-                ));
+                )?);
             }
 
             last_start = start;
@@ -576,7 +577,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         &mut tsv_writer,
         &header_view,
         &gene_labels,
-    ));
+    )?);
 
     // Flush TSV
     if let Some(w) = tsv_writer.as_mut() {
