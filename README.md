@@ -38,10 +38,6 @@ Download from [GitHub Releases](https://github.com/vertti/umi-tools-rs/releases/
 curl -fsSL https://github.com/vertti/umi-tools-rs/releases/latest/download/umi-tools-rs-x86_64-unknown-linux-gnu.tar.gz \
   | tar xz -C /usr/local/bin
 
-# Linux aarch64
-curl -fsSL https://github.com/vertti/umi-tools-rs/releases/latest/download/umi-tools-rs-aarch64-unknown-linux-gnu.tar.gz \
-  | tar xz -C /usr/local/bin
-
 # macOS Apple Silicon
 curl -fsSL https://github.com/vertti/umi-tools-rs/releases/latest/download/umi-tools-rs-aarch64-apple-darwin.tar.gz \
   | tar xz -C /usr/local/bin
