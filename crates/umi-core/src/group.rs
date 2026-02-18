@@ -167,7 +167,7 @@ fn assign_groups(
                 .into_iter()
                 .map(|mut comp| {
                     comp.sort_by(|a, b| lex_sort(a, b));
-                    comp
+                    comp.into_iter().map(<[u8]>::to_vec).collect()
                 })
                 .collect()
         }
@@ -181,19 +181,18 @@ fn assign_groups(
             let mut groups = Vec::new();
             for component in components {
                 if component.len() == 1 {
-                    groups.push(component);
+                    groups.push(component.into_iter().map(<[u8]>::to_vec).collect());
                 } else {
                     let lead_umis = min_set_cover(&component, &adj_list, &counts);
-                    let mut observed: HashSet<Vec<u8>> = lead_umis.iter().cloned().collect();
-                    for lead in &lead_umis {
-                        let connected: HashSet<&Vec<u8>> = adj_list
+                    let mut observed: HashSet<&[u8]> = lead_umis.iter().copied().collect();
+                    for &lead in &lead_umis {
+                        let connected: HashSet<&[u8]> = adj_list
                             .get(lead)
-                            .map_or_else(HashSet::new, |ns| ns.iter().collect());
-                        let mut group = vec![lead.clone()];
+                            .map_or_else(HashSet::new, |ns| ns.iter().copied().collect());
+                        let mut group = vec![lead.to_vec()];
                         for node in connected {
-                            if !observed.contains(node) {
-                                group.push(node.clone());
-                                observed.insert(node.clone());
+                            if observed.insert(node) {
+                                group.push(node.to_vec());
                             }
                         }
                         groups.push(group);
@@ -210,25 +209,20 @@ fn assign_groups(
             // Directed BFS can produce overlapping components. Filter already-
             // observed UMIs so each UMI is assigned to exactly one group,
             // matching Python's _group_directional logic.
-            let mut observed: HashSet<Vec<u8>> = HashSet::new();
+            let mut observed: HashSet<&[u8]> = HashSet::new();
             let mut groups = Vec::new();
             for mut comp in components {
                 comp.sort_by(|a, b| lex_sort(a, b));
                 if comp.len() == 1 {
-                    observed.insert(comp[0].clone());
-                    groups.push(comp);
+                    observed.insert(comp[0]);
+                    groups.push(comp.into_iter().map(<[u8]>::to_vec).collect());
                 } else {
-                    let filtered: Vec<Vec<u8>> = comp
-                        .into_iter()
-                        .filter(|node| {
-                            if observed.contains(node) {
-                                false
-                            } else {
-                                observed.insert(node.clone());
-                                true
-                            }
-                        })
-                        .collect();
+                    let mut filtered: Vec<Vec<u8>> = Vec::new();
+                    for node in comp {
+                        if observed.insert(node) {
+                            filtered.push(node.to_vec());
+                        }
+                    }
                     if !filtered.is_empty() {
                         groups.push(filtered);
                     }
