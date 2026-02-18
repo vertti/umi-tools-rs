@@ -2,6 +2,9 @@
 name = "umi-core"
 version = "0.0.0-dev"
 edition = "2024"
+description = "Core library for umi-tools-rs — UMI extraction, deduplication, grouping, and counting"
+license = "MIT"
+repository = "https://github.com/vertti/umi-tools-rs"
 
 [lints]
 workspace = true

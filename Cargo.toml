@@ -13,12 +13,18 @@ nursery = { level = "warn", priority = -1 }
 name = "umi-tools-rs"
 version = "0.0.0-dev"
 edition = "2024"
+description = "A fast drop-in replacement for UMI-tools, written in Rust"
+license = "MIT"
+repository = "https://github.com/vertti/umi-tools-rs"
+homepage = "https://github.com/vertti/umi-tools-rs"
+keywords = ["bioinformatics", "umi", "scRNA-seq", "genomics", "dedup"]
+categories = ["command-line-utilities", "science"]
 
 [lints]
 workspace = true
 
 [dependencies]
-umi-core = { path = "crates/umi-core" }
+umi-core = { path = "crates/umi-core", version = "0.0.0-dev" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
