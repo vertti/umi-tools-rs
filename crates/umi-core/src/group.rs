@@ -167,7 +167,7 @@ fn assign_groups(
                 .into_iter()
                 .map(|mut comp| {
                     comp.sort_by(|a, b| lex_sort(a, b));
-                    comp
+                    comp.into_iter().map(<[u8]>::to_vec).collect()
                 })
                 .collect()
         }
@@ -181,19 +181,18 @@ fn assign_groups(
             let mut groups = Vec::new();
             for component in components {
                 if component.len() == 1 {
-                    groups.push(component);
+                    groups.push(component.into_iter().map(<[u8]>::to_vec).collect());
                 } else {
                     let lead_umis = min_set_cover(&component, &adj_list, &counts);
-                    let mut observed: HashSet<Vec<u8>> = lead_umis.iter().cloned().collect();
-                    for lead in &lead_umis {
-                        let connected: HashSet<&Vec<u8>> = adj_list
+                    let mut observed: HashSet<&[u8]> = lead_umis.iter().copied().collect();
+                    for &lead in &lead_umis {
+                        let connected: HashSet<&[u8]> = adj_list
                             .get(lead)
-                            .map_or_else(HashSet::new, |ns| ns.iter().collect());
-                        let mut group = vec![lead.clone()];
+                            .map_or_else(HashSet::new, |ns| ns.iter().copied().collect());
+                        let mut group = vec![lead.to_vec()];
                         for node in connected {
-                            if !observed.contains(node) {
-                                group.push(node.clone());
-                                observed.insert(node.clone());
+                            if observed.insert(node) {
+                                group.push(node.to_vec());
                             }
                         }
                         groups.push(group);
@@ -210,25 +209,20 @@ fn assign_groups(
             // Directed BFS can produce overlapping components. Filter already-
             // observed UMIs so each UMI is assigned to exactly one group,
             // matching Python's _group_directional logic.
-            let mut observed: HashSet<Vec<u8>> = HashSet::new();
+            let mut observed: HashSet<&[u8]> = HashSet::new();
             let mut groups = Vec::new();
             for mut comp in components {
                 comp.sort_by(|a, b| lex_sort(a, b));
                 if comp.len() == 1 {
-                    observed.insert(comp[0].clone());
-                    groups.push(comp);
+                    observed.insert(comp[0]);
+                    groups.push(comp.into_iter().map(<[u8]>::to_vec).collect());
                 } else {
-                    let filtered: Vec<Vec<u8>> = comp
-                        .into_iter()
-                        .filter(|node| {
-                            if observed.contains(node) {
-                                false
-                            } else {
-                                observed.insert(node.clone());
-                                true
-                            }
-                        })
-                        .collect();
+                    let mut filtered: Vec<Vec<u8>> = Vec::new();
+                    for node in comp {
+                        if observed.insert(node) {
+                            filtered.push(node.to_vec());
+                        }
+                    }
                     if !filtered.is_empty() {
                         groups.push(filtered);
                     }
@@ -249,7 +243,7 @@ fn process_drained(
     tsv_writer: &mut Option<BufWriter<File>>,
     header_view: &bam::HeaderView,
     gene_labels: &HashMap<i64, String>,
-) -> Vec<Record> {
+) -> Result<Vec<Record>, GroupError> {
     let mut output_records = Vec::new();
 
     // In per-gene mode, Python sorts genes alphabetically; replicate that order.
@@ -288,7 +282,7 @@ fn process_drained(
                             let umi_str = std::str::from_utf8(umi).unwrap_or("");
                             let (_, read_pos) = get_read_position(&record);
 
-                            let _ = writeln!(
+                            writeln!(
                                 w,
                                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                                 read_name,
@@ -300,7 +294,8 @@ fn process_drained(
                                 top_umi_str,
                                 group_count,
                                 *unique_id,
-                            );
+                            )
+                            .map_err(|e| GroupError::TsvWrite(e.to_string()))?;
                         }
 
                         let mut tagged = record;
@@ -324,7 +319,7 @@ fn process_drained(
         }
     }
 
-    output_records
+    Ok(output_records)
 }
 
 /// # Errors
@@ -512,7 +507,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     &mut tsv_writer,
                     &header_view,
                     &gene_labels,
-                ));
+                )?);
             }
             last_chrom = tid;
 
@@ -536,7 +531,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     &mut tsv_writer,
                     &header_view,
                     &gene_labels,
-                ));
+                )?);
             } else if start > last_start + 1000 {
                 let threshold = start - 1000;
                 output_records.extend(process_drained(
@@ -547,7 +542,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     &mut tsv_writer,
                     &header_view,
                     &gene_labels,
-                ));
+                )?);
             }
 
             last_start = start;
@@ -582,7 +577,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         &mut tsv_writer,
         &header_view,
         &gene_labels,
-    ));
+    )?);
 
     // Flush TSV
     if let Some(w) = tsv_writer.as_mut() {

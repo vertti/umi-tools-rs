@@ -383,7 +383,7 @@ impl ReadBuffer {
                 if stats_ctx.is_some() {
                     let selected_with_counts =
                         select_umis_with_cluster_counts(method, &umi_map, edit_threshold);
-                    let mut bundle_records = Vec::new();
+                    let mut bundle_records: Vec<&Record> = Vec::new();
                     let mut selected_umis = Vec::new();
                     let mut cluster_counts = Vec::new();
                     for (umi, cluster_count) in &selected_with_counts {
@@ -391,7 +391,7 @@ impl ReadBuffer {
                             continue;
                         }
                         if let Some(slot) = umi_map.get(umi) {
-                            bundle_records.push(slot.record.clone());
+                            bundle_records.push(&slot.record);
                             selected_umis.push(umi.clone());
                             cluster_counts.push(*cluster_count);
                         }
@@ -406,7 +406,9 @@ impl ReadBuffer {
                             &mut ctx.read_gen,
                         );
                     }
-                    records.extend(bundle_records);
+                    for r in bundle_records {
+                        records.push(r.clone());
+                    }
                 } else {
                     let selected = select_umis(method, &umi_map, edit_threshold);
                     for umi in &selected {
@@ -444,19 +446,23 @@ pub(crate) fn edit_distance(a: &[u8], b: &[u8]) -> u32 {
 
 /// Build undirected adjacency list (for cluster + adjacency methods).
 /// Edge between A and B iff `edit_distance(A, B) <= threshold`.
-pub(crate) fn build_adjacency_list(
-    umis: &[&[u8]],
+pub(crate) fn build_adjacency_list<'a>(
+    umis: &[&'a [u8]],
     threshold: u32,
-) -> HashMap<Vec<u8>, Vec<Vec<u8>>> {
-    let mut adj: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+) -> HashMap<&'a [u8], Vec<&'a [u8]>> {
+    let mut adj: HashMap<&'a [u8], Vec<&'a [u8]>> = HashMap::new();
     for umi in umis {
-        adj.entry(umi.to_vec()).or_default();
+        adj.entry(umi).or_default();
     }
     for i in 0..umis.len() {
         for j in (i + 1)..umis.len() {
             if edit_distance(umis[i], umis[j]) <= threshold {
-                adj.get_mut(umis[i]).unwrap().push(umis[j].to_vec());
-                adj.get_mut(umis[j]).unwrap().push(umis[i].to_vec());
+                adj.get_mut(umis[i])
+                    .expect("UMI pre-inserted")
+                    .push(umis[j]);
+                adj.get_mut(umis[j])
+                    .expect("UMI pre-inserted")
+                    .push(umis[i]);
             }
         }
     }
@@ -465,14 +471,14 @@ pub(crate) fn build_adjacency_list(
 
 /// Build directed adjacency list (for directional method).
 /// Edge A→B iff `edit_distance(A,B) <= threshold AND counts[A] >= 2*counts[B] - 1`.
-pub(crate) fn build_directional_adjacency_list(
-    umis: &[&[u8]],
+pub(crate) fn build_directional_adjacency_list<'a>(
+    umis: &[&'a [u8]],
     counts: &HashMap<&[u8], u32>,
     threshold: u32,
-) -> HashMap<Vec<u8>, Vec<Vec<u8>>> {
-    let mut adj: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+) -> HashMap<&'a [u8], Vec<&'a [u8]>> {
+    let mut adj: HashMap<&'a [u8], Vec<&'a [u8]>> = HashMap::new();
     for umi in umis {
-        adj.entry(umi.to_vec()).or_default();
+        adj.entry(umi).or_default();
     }
     for i in 0..umis.len() {
         for j in (i + 1)..umis.len() {
@@ -480,10 +486,14 @@ pub(crate) fn build_directional_adjacency_list(
                 let ca = counts[umis[i]];
                 let cb = counts[umis[j]];
                 if ca >= (2 * cb).saturating_sub(1) {
-                    adj.get_mut(umis[i]).unwrap().push(umis[j].to_vec());
+                    adj.get_mut(umis[i])
+                        .expect("UMI pre-inserted")
+                        .push(umis[j]);
                 }
                 if cb >= (2 * ca).saturating_sub(1) {
-                    adj.get_mut(umis[j]).unwrap().push(umis[i].to_vec());
+                    adj.get_mut(umis[j])
+                        .expect("UMI pre-inserted")
+                        .push(umis[i]);
                 }
             }
         }
@@ -492,33 +502,36 @@ pub(crate) fn build_directional_adjacency_list(
 }
 
 /// BFS from `start`, following edges in `adj_list`. Returns the connected component.
-pub(crate) fn bfs(start: &[u8], adj_list: &HashMap<Vec<u8>, Vec<Vec<u8>>>) -> Vec<Vec<u8>> {
-    let mut searched: HashSet<Vec<u8>> = HashSet::new();
-    let mut queue: Vec<Vec<u8>> = Vec::new();
-    searched.insert(start.to_vec());
-    queue.push(start.to_vec());
+pub(crate) fn bfs<'a>(
+    start: &'a [u8],
+    adj_list: &HashMap<&'a [u8], Vec<&'a [u8]>>,
+) -> Vec<&'a [u8]> {
+    let mut searched: HashSet<&'a [u8]> = HashSet::new();
+    let mut queue: Vec<&'a [u8]> = Vec::new();
+    searched.insert(start);
+    queue.push(start);
     while let Some(node) = queue.pop() {
-        if let Some(neighbors) = adj_list.get(&node) {
-            for next_node in neighbors {
-                if searched.insert(next_node.clone()) {
-                    queue.push(next_node.clone());
+        if let Some(neighbors) = adj_list.get(node) {
+            for &next_node in neighbors {
+                if searched.insert(next_node) {
+                    queue.push(next_node);
                 }
             }
         }
     }
-    let mut result: Vec<Vec<u8>> = searched.into_iter().collect();
+    let mut result: Vec<&'a [u8]> = searched.into_iter().collect();
     result.sort();
     result
 }
 
 /// Find connected components by iterating UMIs in count-descending order,
 /// running BFS from each unvisited node. Matches Python `_get_connected_components_adjacency`.
-pub(crate) fn connected_components(
-    umis: &[&[u8]],
+pub(crate) fn connected_components<'a>(
+    umis: &[&'a [u8]],
     counts: &HashMap<&[u8], u32>,
     orders: &HashMap<&[u8], u32>,
-    adj_list: &HashMap<Vec<u8>, Vec<Vec<u8>>>,
-) -> Vec<Vec<Vec<u8>>> {
+    adj_list: &HashMap<&'a [u8], Vec<&'a [u8]>>,
+) -> Vec<Vec<&'a [u8]>> {
     // Sort UMIs by count descending, then insertion order ascending for ties
     let mut sorted_umis: Vec<&[u8]> = umis.to_vec();
     sorted_umis.sort_by(|a, b| {
@@ -527,13 +540,13 @@ pub(crate) fn connected_components(
             .then_with(|| orders[a].cmp(&orders[b]))
     });
 
-    let mut found: HashSet<Vec<u8>> = HashSet::new();
-    let mut components: Vec<Vec<Vec<u8>>> = Vec::new();
+    let mut found: HashSet<&[u8]> = HashSet::new();
+    let mut components: Vec<Vec<&'a [u8]>> = Vec::new();
     for umi in &sorted_umis {
         if !found.contains(*umi) {
             let component = bfs(umi, adj_list);
-            for node in &component {
-                found.insert(node.clone());
+            for &node in &component {
+                found.insert(node);
             }
             components.push(component);
         }
@@ -543,44 +556,37 @@ pub(crate) fn connected_components(
 
 /// Greedy min-set-cover: select fewest UMIs (by descending count) to "cover"
 /// all UMIs in the cluster via adjacency. Matches Python `_get_best_min_account`.
-pub(crate) fn min_set_cover(
-    cluster: &[Vec<u8>],
-    adj_list: &HashMap<Vec<u8>, Vec<Vec<u8>>>,
+pub(crate) fn min_set_cover<'a>(
+    cluster: &[&'a [u8]],
+    adj_list: &HashMap<&'a [u8], Vec<&'a [u8]>>,
     counts: &HashMap<&[u8], u32>,
-) -> Vec<Vec<u8>> {
+) -> Vec<&'a [u8]> {
     if cluster.len() == 1 {
         return cluster.to_vec();
     }
-    let mut sorted_nodes: Vec<&Vec<u8>> = cluster.iter().collect();
+    let mut sorted_nodes: Vec<&'a [u8]> = cluster.to_vec();
     // Sort by count desc, lex asc (BFS output is lex-sorted; Python's stable sort preserves that)
-    sorted_nodes.sort_by(|a, b| {
-        counts[b.as_slice()]
-            .cmp(&counts[a.as_slice()])
-            .then_with(|| a.cmp(b))
-    });
+    sorted_nodes.sort_by(|a, b| counts[*b].cmp(&counts[*a]).then_with(|| a.cmp(b)));
     for i in 0..sorted_nodes.len() - 1 {
-        let selected: Vec<&[u8]> = sorted_nodes[..=i].iter().map(|v| v.as_slice()).collect();
+        let selected = &sorted_nodes[..=i];
         // Compute covered nodes: selected nodes + their neighbors
         let mut covered: HashSet<&[u8]> = HashSet::new();
-        for s in &selected {
+        for &s in selected {
             covered.insert(s);
-            if let Some(neighbors) = adj_list.get(*s) {
-                for n in neighbors {
-                    covered.insert(n.as_slice());
+            if let Some(neighbors) = adj_list.get(s) {
+                for &n in neighbors {
+                    covered.insert(n);
                 }
             }
         }
         // Check if all cluster nodes are covered
-        let remaining: usize = cluster
-            .iter()
-            .filter(|n| !covered.contains(n.as_slice()))
-            .count();
+        let remaining: usize = cluster.iter().filter(|n| !covered.contains(*n)).count();
         if remaining == 0 {
-            return selected.into_iter().map(<[u8]>::to_vec).collect();
+            return selected.to_vec();
         }
     }
     // Fallback: all nodes (shouldn't reach here for valid inputs)
-    sorted_nodes.into_iter().cloned().collect()
+    sorted_nodes
 }
 
 /// Select UMIs to keep for one (pos, key) group. Returns UMIs whose records to emit.
@@ -638,7 +644,10 @@ pub(crate) fn select_umis(
                 .into_iter()
                 .map(|mut comp| {
                     comp.sort_by(|a, b| lex_sort(a, b));
-                    comp.into_iter().next().unwrap()
+                    comp.into_iter()
+                        .next()
+                        .expect("component is non-empty")
+                        .to_vec()
                 })
                 .collect()
         }
@@ -650,10 +659,10 @@ pub(crate) fn select_umis(
             let mut result = Vec::new();
             for component in components {
                 if component.len() == 1 {
-                    result.push(component.into_iter().next().unwrap());
+                    result.push(component[0].to_vec());
                 } else {
                     let lead_umis = min_set_cover(&component, &adj_list, &counts);
-                    result.extend(lead_umis);
+                    result.extend(lead_umis.into_iter().map(<[u8]>::to_vec));
                 }
             }
             result
@@ -663,13 +672,13 @@ pub(crate) fn select_umis(
             let umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
             let adj_list = build_directional_adjacency_list(&umis, &counts, edit_threshold);
             let components = connected_components(&umis, &counts, &orders, &adj_list);
-            let mut observed: HashSet<Vec<u8>> = HashSet::new();
+            let mut observed: HashSet<&[u8]> = HashSet::new();
             let mut result = Vec::new();
             for component in components {
                 if component.len() == 1 {
-                    let umi = component.into_iter().next().unwrap();
-                    observed.insert(umi.clone());
-                    result.push(umi);
+                    let umi = component[0];
+                    observed.insert(umi);
+                    result.push(umi.to_vec());
                 } else {
                     // Sort by count desc, lex asc (BFS output is lex-sorted,
                     // Python's stable sort preserves that for equal counts)
@@ -677,12 +686,12 @@ pub(crate) fn select_umis(
                     sorted_comp.sort_by(|a, b| lex_sort(a, b));
                     let mut group_lead = None;
                     for node in sorted_comp {
-                        if observed.insert(node.clone()) && group_lead.is_none() {
+                        if observed.insert(node) && group_lead.is_none() {
                             group_lead = Some(node);
                         }
                     }
                     if let Some(lead) = group_lead {
-                        result.push(lead);
+                        result.push(lead.to_vec());
                     }
                 }
             }
@@ -695,7 +704,7 @@ pub(crate) fn select_umis(
 ///
 /// Same logic as `select_umis` but takes `HashMap<Vec<u8>, u32>` instead of
 /// `UmiSlot`, and returns only the count of surviving UMI groups.
-#[allow(clippy::implicit_hasher, clippy::missing_panics_doc)]
+#[allow(clippy::implicit_hasher)]
 #[must_use]
 pub fn count_umis(
     method: DedupMethod,
@@ -750,11 +759,11 @@ pub fn count_umis(
             let umis: Vec<&[u8]> = counts.keys().map(Vec::as_slice).collect();
             let adj_list = build_directional_adjacency_list(&umis, &count_refs, edit_threshold);
             let components = connected_components(&umis, &count_refs, &order_refs, &adj_list);
-            let mut observed: HashSet<Vec<u8>> = HashSet::new();
+            let mut observed: HashSet<&[u8]> = HashSet::new();
             let mut total = 0;
             for component in components {
                 if component.len() == 1 {
-                    let umi = component.into_iter().next().unwrap();
+                    let umi = component[0];
                     observed.insert(umi);
                     total += 1;
                 } else {
@@ -864,9 +873,15 @@ fn select_umis_with_cluster_counts(
             components
                 .into_iter()
                 .map(|mut comp| {
-                    let cluster_count: u32 = comp.iter().map(|u| counts[u.as_slice()]).sum();
+                    let cluster_count: u32 = comp.iter().map(|u| counts[*u]).sum();
                     comp.sort_by(|a, b| lex_sort(a, b));
-                    (comp.into_iter().next().unwrap(), cluster_count)
+                    (
+                        comp.into_iter()
+                            .next()
+                            .expect("component is non-empty")
+                            .to_vec(),
+                        cluster_count,
+                    )
                 })
                 .collect()
         }
@@ -878,23 +893,23 @@ fn select_umis_with_cluster_counts(
             let mut result = Vec::new();
             for component in components {
                 if component.len() == 1 {
-                    let c = counts[component[0].as_slice()];
-                    result.push((component.into_iter().next().unwrap(), c));
+                    let c = counts[component[0]];
+                    result.push((component[0].to_vec(), c));
                 } else {
                     let lead_umis = min_set_cover(&component, &adj_list, &counts);
                     // Each lead UMI's cluster: itself + its unobserved neighbors
                     let mut observed: HashSet<&[u8]> = HashSet::new();
-                    for lead in &lead_umis {
-                        let mut cluster_count = counts[lead.as_slice()];
-                        observed.insert(lead.as_slice());
+                    for &lead in &lead_umis {
+                        let mut cluster_count = counts[lead];
+                        observed.insert(lead);
                         if let Some(neighbors) = adj_list.get(lead) {
-                            for n in neighbors {
-                                if observed.insert(n.as_slice()) {
-                                    cluster_count += counts[n.as_slice()];
+                            for &n in neighbors {
+                                if observed.insert(n) {
+                                    cluster_count += counts[n];
                                 }
                             }
                         }
-                        result.push((lead.clone(), cluster_count));
+                        result.push((lead.to_vec(), cluster_count));
                     }
                 }
             }
@@ -905,29 +920,29 @@ fn select_umis_with_cluster_counts(
             let umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
             let adj_list = build_directional_adjacency_list(&umis, &counts, edit_threshold);
             let components = connected_components(&umis, &counts, &orders, &adj_list);
-            let mut observed: HashSet<Vec<u8>> = HashSet::new();
+            let mut observed: HashSet<&[u8]> = HashSet::new();
             let mut result = Vec::new();
             for component in components {
                 if component.len() == 1 {
-                    let umi = component.into_iter().next().unwrap();
-                    let c = counts[umi.as_slice()];
-                    observed.insert(umi.clone());
-                    result.push((umi, c));
+                    let umi = component[0];
+                    let c = counts[umi];
+                    observed.insert(umi);
+                    result.push((umi.to_vec(), c));
                 } else {
                     let mut sorted_comp = component;
                     sorted_comp.sort_by(|a, b| lex_sort(a, b));
                     let mut group_lead = None;
                     let mut cluster_count: u32 = 0;
                     for node in sorted_comp {
-                        if observed.insert(node.clone()) {
-                            cluster_count += counts[node.as_slice()];
+                        if observed.insert(node) {
+                            cluster_count += counts[node];
                             if group_lead.is_none() {
                                 group_lead = Some(node);
                             }
                         }
                     }
                     if let Some(lead) = group_lead {
-                        result.push((lead, cluster_count));
+                        result.push((lead.to_vec(), cluster_count));
                     }
                 }
             }
@@ -1099,7 +1114,7 @@ impl StatsCollector {
         umi_map: &HashMap<Vec<u8>, UmiSlot>,
         selected_umis: &[Vec<u8>],
         cluster_counts: &[u32],
-        selected_records: &[Record],
+        selected_records: &[&Record],
         umi_separator: u8,
         read_gen: &mut RandomReadGenerator,
     ) {

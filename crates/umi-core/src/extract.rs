@@ -6,6 +6,14 @@ use needletail::parser::{FastqReader, FastxReader, SequenceRecord};
 use crate::error::ExtractError;
 use crate::pattern::{BarcodePattern, ExtractionResult};
 
+/// Returns `true` if any base in `umi_quality` falls below the threshold after
+/// subtracting the encoding offset.
+fn fails_quality_filter(umi_quality: &[u8], threshold: u8, offset: u8) -> bool {
+    umi_quality
+        .iter()
+        .any(|&q| q.saturating_sub(offset) < threshold)
+}
+
 /// Quality score encoding scheme.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum QualityEncoding {
@@ -76,16 +84,15 @@ pub fn extract_reads<R: std::io::Read + Send, W: Write>(
 
         match process_record(&record, pattern, config.umi_separator) {
             Ok(processed) => {
-                if let Some(threshold) = config.quality_filter_threshold {
-                    let offset = config.quality_encoding.offset();
-                    if processed
-                        .umi_quality
-                        .iter()
-                        .any(|&q| q.saturating_sub(offset) < threshold)
-                    {
-                        stats.quality_filtered += 1;
-                        continue;
-                    }
+                if let Some(threshold) = config.quality_filter_threshold
+                    && fails_quality_filter(
+                        &processed.umi_quality,
+                        threshold,
+                        config.quality_encoding.offset(),
+                    )
+                {
+                    stats.quality_filtered += 1;
+                    continue;
                 }
                 write_fastq_record(&mut writer, &processed.id, &processed.seq, &processed.qual)?;
                 stats.output_reads += 1;
@@ -268,16 +275,15 @@ where
                     Err(e) => return Err(e),
                 };
 
-                if let Some(threshold) = config.quality_filter_threshold {
-                    let offset = config.quality_encoding.offset();
-                    if extraction
-                        .umi_quality
-                        .iter()
-                        .any(|&q| q.saturating_sub(offset) < threshold)
-                    {
-                        stats.quality_filtered += 1;
-                        continue;
-                    }
+                if let Some(threshold) = config.quality_filter_threshold
+                    && fails_quality_filter(
+                        &extraction.umi_quality,
+                        threshold,
+                        config.quality_encoding.offset(),
+                    )
+                {
+                    stats.quality_filtered += 1;
+                    continue;
                 }
 
                 let r1_id = build_read_name(
@@ -355,16 +361,15 @@ fn process_r1_pattern_pair<W: Write>(
         Err(e) => return Err(e),
     };
 
-    if let Some(threshold) = config.quality_filter_threshold {
-        let offset = config.quality_encoding.offset();
-        if extraction
-            .umi_quality
-            .iter()
-            .any(|&q| q.saturating_sub(offset) < threshold)
-        {
-            stats.quality_filtered += 1;
-            return Ok(false);
-        }
+    if let Some(threshold) = config.quality_filter_threshold
+        && fails_quality_filter(
+            &extraction.umi_quality,
+            threshold,
+            config.quality_encoding.offset(),
+        )
+    {
+        stats.quality_filtered += 1;
+        return Ok(false);
     }
 
     if let Some(ref blacklist) = config.blacklist
@@ -624,16 +629,15 @@ where
                         stats.both_matched += 1;
                     }
                     (Some(extraction), None) => {
-                        if let Some(threshold) = config.quality_filter_threshold {
-                            let offset = config.quality_encoding.offset();
-                            if extraction
-                                .umi_quality
-                                .iter()
-                                .any(|&q| q.saturating_sub(offset) < threshold)
-                            {
-                                stats.quality_filtered += 1;
-                                continue;
-                            }
+                        if let Some(threshold) = config.quality_filter_threshold
+                            && fails_quality_filter(
+                                &extraction.umi_quality,
+                                threshold,
+                                config.quality_encoding.offset(),
+                            )
+                        {
+                            stats.quality_filtered += 1;
+                            continue;
                         }
 
                         // Both headers built from read1 (matches Python umi-tools behavior)
@@ -658,16 +662,15 @@ where
                         stats.output_reads += 1;
                     }
                     (None, Some(extraction)) => {
-                        if let Some(threshold) = config.quality_filter_threshold {
-                            let offset = config.quality_encoding.offset();
-                            if extraction
-                                .umi_quality
-                                .iter()
-                                .any(|&q| q.saturating_sub(offset) < threshold)
-                            {
-                                stats.quality_filtered += 1;
-                                continue;
-                            }
+                        if let Some(threshold) = config.quality_filter_threshold
+                            && fails_quality_filter(
+                                &extraction.umi_quality,
+                                threshold,
+                                config.quality_encoding.offset(),
+                            )
+                        {
+                            stats.quality_filtered += 1;
+                            continue;
                         }
 
                         // Both headers built from read1 (matches Python umi-tools behavior)
