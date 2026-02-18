@@ -38,4 +38,4 @@ description = "Download benchmark data"
 [tasks.bench]
 run = "bash benchmarks/run.sh"
 depends = ["bench-setup"]
-description = "Run extract benchmarks"
+description = "Run benchmarks (vs Python umi_tools)"
