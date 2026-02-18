@@ -383,7 +383,7 @@ impl ReadBuffer {
                 if stats_ctx.is_some() {
                     let selected_with_counts =
                         select_umis_with_cluster_counts(method, &umi_map, edit_threshold);
-                    let mut bundle_records = Vec::new();
+                    let mut bundle_records: Vec<&Record> = Vec::new();
                     let mut selected_umis = Vec::new();
                     let mut cluster_counts = Vec::new();
                     for (umi, cluster_count) in &selected_with_counts {
@@ -391,7 +391,7 @@ impl ReadBuffer {
                             continue;
                         }
                         if let Some(slot) = umi_map.get(umi) {
-                            bundle_records.push(slot.record.clone());
+                            bundle_records.push(&slot.record);
                             selected_umis.push(umi.clone());
                             cluster_counts.push(*cluster_count);
                         }
@@ -406,7 +406,9 @@ impl ReadBuffer {
                             &mut ctx.read_gen,
                         );
                     }
-                    records.extend(bundle_records);
+                    for r in bundle_records {
+                        records.push(r.clone());
+                    }
                 } else {
                     let selected = select_umis(method, &umi_map, edit_threshold);
                     for umi in &selected {
@@ -1112,7 +1114,7 @@ impl StatsCollector {
         umi_map: &HashMap<Vec<u8>, UmiSlot>,
         selected_umis: &[Vec<u8>],
         cluster_counts: &[u32],
-        selected_records: &[Record],
+        selected_records: &[&Record],
         umi_separator: u8,
         read_gen: &mut RandomReadGenerator,
     ) {
