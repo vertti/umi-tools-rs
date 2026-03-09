@@ -15,7 +15,7 @@ jobs:
             runner: macos-latest
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
@@ -24,7 +24,7 @@ jobs:
       - name: Package
         run: tar -czf umi-tools-rs-${{ matrix.target }}.tar.gz -C target/release umi-tools-rs
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: umi-tools-rs-${{ matrix.target }}
           path: umi-tools-rs-${{ matrix.target }}.tar.gz
@@ -35,7 +35,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
@@ -48,7 +48,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set version from tag
         run: |
