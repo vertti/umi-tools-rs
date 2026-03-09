@@ -1,0 +1,25 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "mode": "full",
+  "extends": [
+    "config:recommended"
+  ],
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "matchManagers": ["cargo"],
+      "groupName": "rust dependencies",
+      "groupSlug": "rust-deps"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions",
+      "groupSlug": "gh-actions"
+    },
+    {
+      "matchManagers": ["pip_requirements", "pep621"],
+      "groupName": "python dependencies",
+      "groupSlug": "python-deps"
+    }
+  ]
+}
