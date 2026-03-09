@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "1.93", profile = "default" }
+rust = { version = "1.94.0", profile = "default" }
 uv = "latest"
 "aqua:sharkdp/hyperfine" = "latest"
 hk = "latest"
