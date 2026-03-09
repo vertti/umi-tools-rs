@@ -8,18 +8,35 @@
   "packageRules": [
     {
       "matchManagers": ["cargo"],
-      "groupName": "rust dependencies",
-      "groupSlug": "rust-deps"
+      "matchUpdateTypes": ["patch", "minor"],
+      "groupName": "rust dependencies (minor)",
+      "groupSlug": "rust-deps-minor",
+      "automerge": true
+    },
+    {
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "rust dependencies (major)",
+      "groupSlug": "rust-deps-major"
     },
     {
       "matchManagers": ["github-actions"],
       "groupName": "github actions",
-      "groupSlug": "gh-actions"
+      "groupSlug": "gh-actions",
+      "automerge": true
     },
     {
       "matchManagers": ["pip_requirements", "pep621"],
-      "groupName": "python dependencies",
-      "groupSlug": "python-deps"
+      "matchUpdateTypes": ["patch", "minor"],
+      "groupName": "python dependencies (minor)",
+      "groupSlug": "python-deps-minor",
+      "automerge": true
+    },
+    {
+      "matchManagers": ["pip_requirements", "pep621"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "python dependencies (major)",
+      "groupSlug": "python-deps-major"
     }
   ]
 }
