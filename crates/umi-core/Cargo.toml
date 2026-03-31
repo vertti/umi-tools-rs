@@ -10,7 +10,7 @@ repository = "https://github.com/vertti/umi-tools-rs"
 workspace = true
 
 [dependencies]
-needletail = "0.6"
+needletail = "0.7"
 flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
 regex = "1"
 rust-htslib = { version = "1", default-features = false }
