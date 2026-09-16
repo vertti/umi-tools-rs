@@ -20,7 +20,12 @@ use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
 use umi_core::whitelist::{EdAboveThreshold, KneeMethod, WhitelistConfig, run_whitelist};
 
 #[derive(Parser)]
-#[command(name = "umi-tools-rs", version, about = "Fast UMI tools in Rust")]
+#[command(
+    name = "umi-tools-rs",
+    version,
+    about = "Fast UMI tools in Rust",
+    infer_long_args = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -1273,4 +1278,50 @@ fn is_gzipped(path: &str) -> bool {
     Path::new(path)
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("umi-tools-rs").chain(args.iter().copied()))
+            .expect("arguments should parse")
+    }
+
+    #[test]
+    fn long_flags_accept_unambiguous_prefixes() {
+        let cli = parse(&["dedup", "--stdin=in.bam", "--reference-file=ref.fa"]);
+        let Commands::Dedup(args) = cli.command else {
+            panic!("expected dedup");
+        };
+        assert_eq!(
+            args.input_format.reference_filename.as_deref(),
+            Some("ref.fa")
+        );
+    }
+
+    #[test]
+    fn exact_flag_wins_over_longer_flag_with_same_prefix() {
+        let cli = parse(&["extract", "--bc-pattern=NNN", "--filtered-out=a.fq"]);
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected extract");
+        };
+        assert_eq!(args.filtered_out.as_deref(), Some("a.fq"));
+        assert!(args.filtered_out2.is_none());
+    }
+
+    #[test]
+    fn ambiguous_prefix_is_rejected() {
+        assert!(Cli::try_parse_from(["umi-tools-rs", "dedup", "--std=x"]).is_err());
+    }
+
+    #[test]
+    fn out_sam_may_be_repeated() {
+        let cli = parse(&["dedup", "--stdin=in.bam", "--out-sam", "--out-sam"]);
+        let Commands::Dedup(args) = cli.command else {
+            panic!("expected dedup");
+        };
+        assert!(args.output_format.out_sam);
+    }
 }
