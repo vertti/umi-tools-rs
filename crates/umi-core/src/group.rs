@@ -4,6 +4,7 @@ use std::io::{BufWriter, Write};
 
 use rust_htslib::bam::{self, Read as BamRead, Record};
 
+use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
 use crate::dedup::{
     DedupMethod, GroupKey, PythonRandom, TieBreakRng, build_adjacency_list,
     build_directional_adjacency_list, connected_components, extract_umi_from_name,
@@ -30,7 +31,9 @@ pub struct GroupConfig {
     pub ignore_umi: bool,
     pub umi_separator: u8,
     pub random_seed: u64,
-    pub out_sam: bool,
+    pub output_path: Option<String>,
+    pub output_format: AlignmentFormat,
+    pub reference: Option<String>,
     pub output_bam: bool,
     pub no_sort_output: bool,
     pub chrom: Option<String>,
@@ -331,19 +334,30 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         return Err(GroupError::PerContigRequiresPerGene);
     }
 
-    let mut reader =
-        bam::Reader::from_path(input_path).map_err(|e| GroupError::BamOpen(e.to_string()))?;
-    let header = bam::Header::from_template(reader.header());
+    let mut reader = alignment_io::open_reader(input_path, config.reference.as_deref())
+        .map_err(|e| GroupError::BamOpen(e.to_string()))?;
     let header_view = reader.header().clone();
 
-    let format = if config.out_sam {
-        bam::Format::Sam
+    let mut writer = if config.output_bam {
+        let header = if config.no_sort_output {
+            bam::Header::from_template(&header_view)
+        } else {
+            alignment_io::coordinate_sorted_header(&header_view)
+        };
+        Some(
+            alignment_io::open_writer(
+                &header,
+                AlignmentOutput {
+                    path: config.output_path.as_deref(),
+                    format: config.output_format,
+                    reference: config.reference.as_deref(),
+                },
+            )
+            .map_err(|e| GroupError::BamWrite(e.to_string()))?,
+        )
     } else {
-        bam::Format::Bam
+        None
     };
-
-    let mut writer = bam::Writer::from_stdout(&header, format)
-        .map_err(|e| GroupError::BamWrite(e.to_string()))?;
 
     // Optional chromosome filter
     let chrom_filter: Option<i32> = config
@@ -596,7 +610,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
 
     stats.output_reads = output_records.len() as u64;
 
-    if config.output_bam {
+    if let Some(writer) = writer.as_mut() {
         for r in &output_records {
             writer
                 .write(r)

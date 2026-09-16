@@ -207,9 +207,15 @@ struct GroupArgs {
     #[arg(long = "ignore-umi")]
     ignore_umi: bool,
 
-    /// Output SAM instead of BAM (may be repeated)
-    #[arg(long = "out-sam", action = clap::ArgAction::Count)]
-    out_sam: u8,
+    /// Output file for the tagged alignments (default: stdout; requires --output-bam)
+    #[arg(short = 'S', long = "stdout")]
+    output: Option<String>,
+
+    #[command(flatten)]
+    input_format: InputFormatArgs,
+
+    #[command(flatten)]
+    output_format: OutputFormatArgs,
 
     /// Random seed for reproducible tie-breaking
     #[arg(long = "random-seed", default_value = "0")]
@@ -239,7 +245,7 @@ struct GroupArgs {
     #[arg(long = "subset")]
     subset: Option<f32>,
 
-    /// Include unmapped reads in output (alias for --unmapped=output)
+    /// Include unmapped reads in output (alias for --unmapped-reads=output)
     #[arg(long = "output-unmapped")]
     output_unmapped: bool,
 
@@ -252,7 +258,7 @@ struct GroupArgs {
     chimeric_pairs: Option<String>,
 
     /// How to handle unmapped reads: discard, output, use
-    #[arg(long = "unmapped", default_value = "discard")]
+    #[arg(long = "unmapped-reads", default_value = "discard")]
     unmapped: String,
 
     /// Deduplicate per gene (requires --gene-tag or --per-contig)
@@ -578,7 +584,9 @@ fn main() -> Result<()> {
             input,
             method,
             ignore_umi,
-            out_sam,
+            output,
+            input_format,
+            output_format,
             random_seed,
             umi_separator,
             chrom,
@@ -599,7 +607,9 @@ fn main() -> Result<()> {
             input.as_deref(),
             &method,
             ignore_umi,
-            out_sam > 0,
+            output.as_deref(),
+            &input_format,
+            &output_format,
             random_seed,
             &umi_separator,
             chrom.as_deref(),
@@ -988,7 +998,9 @@ fn run_group_cmd(
     input_path: Option<&str>,
     method: &str,
     ignore_umi: bool,
-    out_sam: bool,
+    output_path: Option<&str>,
+    input_format: &InputFormatArgs,
+    output_format: &OutputFormatArgs,
     random_seed: u64,
     umi_separator: &str,
     chrom: Option<&str>,
@@ -1006,6 +1018,9 @@ fn run_group_cmd(
     per_contig: bool,
 ) -> Result<()> {
     let input = input_path.context("--stdin is required for group (BAM input path)")?;
+    if output_path.is_some() && !output_bam {
+        bail!("--stdout requires --output-bam");
+    }
 
     let dedup_method = match method {
         "unique" => DedupMethod::Unique,
@@ -1027,7 +1042,6 @@ fn run_group_cmd(
         }
     };
 
-    // --output-unmapped is an alias for --unmapped=output
     let unmapped_handling = if output_unmapped {
         UnmappedHandling::Output
     } else {
@@ -1035,7 +1049,9 @@ fn run_group_cmd(
             "discard" => UnmappedHandling::Discard,
             "output" => UnmappedHandling::Output,
             "use" => UnmappedHandling::Use,
-            other => bail!("unknown --unmapped '{other}'; expected 'discard', 'output', or 'use'"),
+            other => {
+                bail!("unknown --unmapped-reads '{other}'; expected 'discard', 'output', or 'use'")
+            }
         }
     };
 
@@ -1044,7 +1060,9 @@ fn run_group_cmd(
         ignore_umi,
         umi_separator: sep_byte,
         random_seed,
-        out_sam,
+        output_path: output_path.map(String::from),
+        output_format: output_format.resolve(output_path)?,
+        reference: input_format.reference_filename.clone(),
         output_bam,
         no_sort_output,
         chrom: chrom.map(String::from),
@@ -1309,6 +1327,15 @@ mod tests {
         };
         assert_eq!(args.filtered_out.as_deref(), Some("a.fq"));
         assert!(args.filtered_out2.is_none());
+    }
+
+    #[test]
+    fn unmapped_prefix_selects_unmapped_reads() {
+        let cli = parse(&["group", "--stdin=in.bam", "--unmapped=use"]);
+        let Commands::Group(args) = cli.command else {
+            panic!("expected group");
+        };
+        assert_eq!(args.unmapped, "use");
     }
 
     #[test]
