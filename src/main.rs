@@ -28,391 +28,412 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Extract UMI from FASTQ reads
-    Extract {
-        /// Barcode pattern for read1 (e.g. NNNXXXXNN). N=UMI, C=cell, X=discard.
-        #[arg(long = "bc-pattern")]
-        bc_pattern: Option<String>,
-
-        /// Barcode pattern for read2 (paired-end mode)
-        #[arg(long = "bc-pattern2")]
-        bc_pattern2: Option<String>,
-
-        /// Extraction method: "string" for fixed-position, "regex" for named capture groups
-        #[arg(long = "extract-method", default_value = "string")]
-        extract_method: String,
-
-        /// Input FASTQ file (default: stdin). Gzip detected by .gz extension.
-        #[arg(short = 'I', long = "stdin")]
-        input: Option<String>,
-
-        /// Output FASTQ file (default: stdout). Gzip if .gz extension.
-        #[arg(short = 'S', long = "stdout")]
-        output: Option<String>,
-
-        /// Read2 input FASTQ file (paired-end mode)
-        #[arg(long = "read2-in")]
-        read2_in: Option<String>,
-
-        /// Read2 output FASTQ file (paired-end mode)
-        #[arg(long = "read2-out")]
-        read2_out: Option<String>,
-
-        /// Write read2 to stdout (paired-end mode, pattern on read1)
-        #[arg(long = "read2-stdout")]
-        read2_stdout: bool,
-
-        /// Whitelist file of accepted cell barcodes (one per line)
-        #[arg(long = "whitelist")]
-        whitelist: Option<String>,
-
-        /// Extract from 3' end instead of 5'
-        #[arg(long = "3prime")]
-        prime3: bool,
-
-        /// UMI separator character in read name
-        #[arg(long = "umi-separator", default_value = "_")]
-        umi_separator: String,
-
-        /// Minimum per-base quality score for UMI bases (reads below are discarded)
-        #[arg(long = "quality-filter-threshold")]
-        quality_filter_threshold: Option<u8>,
-
-        /// Quality encoding scheme: phred33, phred64, solexa
-        #[arg(long = "quality-encoding", default_value = "phred33")]
-        quality_encoding: String,
-
-        /// Strip /1 and /2 suffixes from read names before appending UMI
-        #[arg(long = "ignore-read-pair-suffixes")]
-        ignore_read_pair_suffixes: bool,
-
-        /// Reconcile read pairs when read1 is a pre-filtered subset of read2
-        #[arg(long = "reconcile-pairs")]
-        reconcile_pairs: bool,
-
-        /// Error-correct cell barcodes using whitelist correction map
-        #[arg(long = "error-correct-cell")]
-        error_correct_cell: bool,
-
-        /// Blacklist file of rejected cell barcodes (one per line)
-        #[arg(long = "blacklist")]
-        blacklist: Option<String>,
-
-        /// Output file for filtered read1 (reads that fail any filter)
-        #[arg(long = "filtered-out")]
-        filtered_out: Option<String>,
-
-        /// Output file for filtered read2 (reads that fail any filter)
-        #[arg(long = "filtered-out2")]
-        filtered_out2: Option<String>,
-
-        /// Either-read mode: try pattern on both reads, use whichever matches
-        #[arg(long = "either-read")]
-        either_read: bool,
-    },
+    Extract(ExtractArgs),
 
     /// Build a whitelist of valid cell barcodes from FASTQ
-    Whitelist {
-        /// Barcode pattern (e.g. CCCCCCNNNNNNNNNN). N=UMI, C=cell, X=discard.
-        #[arg(long = "bc-pattern")]
-        bc_pattern: String,
-
-        /// Extraction method: "string" for fixed-position, "regex" for named capture groups
-        #[arg(long = "extract-method", default_value = "string")]
-        extract_method: String,
-
-        /// Input FASTQ file (default: stdin). Gzip detected by .gz extension.
-        #[arg(short = 'I', long = "stdin")]
-        input: Option<String>,
-
-        /// Output TSV file (default: stdout).
-        #[arg(short = 'S', long = "stdout")]
-        output: Option<String>,
-
-        /// Extract from 3' end instead of 5'
-        #[arg(long = "3prime")]
-        prime3: bool,
-
-        /// Knee detection method: "distance" or "density"
-        #[arg(long = "knee-method", default_value = "distance")]
-        knee_method: String,
-
-        /// Force whitelist to include this many cells
-        #[arg(long = "set-cell-number")]
-        set_cell_number: Option<usize>,
-
-        /// Expected number of cells (hint for density method)
-        #[arg(long = "expect-cells")]
-        expect_cells: Option<usize>,
-
-        /// Maximum Hamming distance for error correction (default: 1)
-        #[arg(long = "error-correct-threshold", default_value = "1")]
-        error_correct_threshold: usize,
-
-        /// Handle whitelist barcodes within edit distance of higher-count whitelist barcode
-        #[arg(long = "ed-above-threshold")]
-        ed_above_threshold: Option<String>,
-
-        /// Plot prefix (accepted but ignored)
-        #[arg(long = "plot-prefix")]
-        _plot_prefix: Option<String>,
-
-        /// Output file for reads that failed barcode extraction
-        #[arg(long = "filtered-out")]
-        filtered_out: Option<String>,
-
-        /// Max reads to process (default: `100_000_000`)
-        #[arg(long = "subset-reads", default_value = "100000000")]
-        subset_reads: usize,
-    },
+    Whitelist(WhitelistArgs),
 
     /// Group PCR duplicates in BAM by UMI and mapping position
-    Group {
-        /// Input BAM file
-        #[arg(short = 'I', long = "stdin")]
-        input: Option<String>,
-
-        /// Grouping method: unique, percentile, cluster, adjacency, directional
-        #[arg(long = "method", default_value = "directional")]
-        method: String,
-
-        /// Ignore UMI — group by position only
-        #[arg(long = "ignore-umi")]
-        ignore_umi: bool,
-
-        /// Output SAM instead of BAM (may be repeated)
-        #[arg(long = "out-sam", action = clap::ArgAction::Count)]
-        out_sam: u8,
-
-        /// Random seed for reproducible tie-breaking
-        #[arg(long = "random-seed", default_value = "0")]
-        random_seed: u64,
-
-        /// UMI separator in read name
-        #[arg(long = "umi-separator", default_value = "_")]
-        umi_separator: String,
-
-        /// Only process reads on this chromosome
-        #[arg(long = "chrom")]
-        chrom: Option<String>,
-
-        /// Output TSV file with group assignments
-        #[arg(long = "group-out")]
-        group_out: Option<String>,
-
-        /// Write tagged BAM/SAM to stdout
-        #[arg(long = "output-bam")]
-        output_bam: bool,
-
-        /// Skip coordinate sorting of output
-        #[arg(long = "no-sort-output")]
-        no_sort_output: bool,
-
-        /// Random subset of reads to process (0.0-1.0)
-        #[arg(long = "subset")]
-        subset: Option<f32>,
-
-        /// Include unmapped reads in output (alias for --unmapped=output)
-        #[arg(long = "output-unmapped")]
-        output_unmapped: bool,
-
-        /// Enable paired-end grouping
-        #[arg(long = "paired")]
-        paired: bool,
-
-        /// How to handle chimeric read pairs: discard, output, use
-        #[arg(long = "chimeric-pairs")]
-        chimeric_pairs: Option<String>,
-
-        /// How to handle unmapped reads: discard, output, use
-        #[arg(long = "unmapped", default_value = "discard")]
-        unmapped: String,
-
-        /// Deduplicate per gene (requires --gene-tag or --per-contig)
-        #[arg(long = "per-gene")]
-        per_gene: bool,
-
-        /// BAM tag containing gene assignment (default: XF)
-        #[arg(long = "gene-tag")]
-        gene_tag: Option<String>,
-
-        /// Skip reads with gene tag matching this regex
-        #[arg(long = "skip-tags-regex")]
-        skip_tags_regex: Option<String>,
-
-        /// Use contig name as gene (requires --per-gene)
-        #[arg(long = "per-contig")]
-        per_contig: bool,
-
-        /// Log file (accepted but ignored)
-        #[arg(short = 'L', long = "log")]
-        _log: Option<String>,
-    },
+    Group(GroupArgs),
 
     /// Deduplicate BAM reads based on UMI and mapping position
-    Dedup {
-        /// Input BAM file
-        #[arg(short = 'I', long = "stdin")]
-        input: Option<String>,
-
-        /// Dedup method: unique, percentile, cluster, adjacency, directional
-        #[arg(long = "method", default_value = "directional")]
-        method: String,
-
-        /// Ignore UMI — deduplicate by position only
-        #[arg(long = "ignore-umi")]
-        ignore_umi: bool,
-
-        /// Output SAM instead of BAM
-        #[arg(long = "out-sam")]
-        out_sam: bool,
-
-        /// Random seed for reproducible tie-breaking
-        #[arg(long = "random-seed", default_value = "0")]
-        random_seed: u64,
-
-        /// UMI separator in read name
-        #[arg(long = "umi-separator", default_value = "_")]
-        umi_separator: String,
-
-        /// Only process reads on this chromosome
-        #[arg(long = "chrom")]
-        chrom: Option<String>,
-
-        /// Edit distance threshold for UMI clustering
-        #[arg(long = "edit-distance-threshold", default_value = "1")]
-        edit_distance_threshold: u32,
-
-        /// Random subset of reads to process (0.0-1.0)
-        #[arg(long = "subset")]
-        subset: Option<f32>,
-
-        /// UMI extraction method: `read_id` or `tag`
-        #[arg(long = "extract-umi-method", default_value = "read_id")]
-        extract_umi_method: String,
-
-        /// BAM tag to extract UMI from (when extract-umi-method=tag)
-        #[arg(long = "umi-tag")]
-        umi_tag: Option<String>,
-
-        /// Deduplicate per gene (requires --gene-tag)
-        #[arg(long = "per-gene")]
-        per_gene: bool,
-
-        /// BAM tag containing gene assignment
-        #[arg(long = "gene-tag")]
-        gene_tag: Option<String>,
-
-        /// Skip reads with gene tag matching this regex
-        #[arg(long = "skip-tags-regex")]
-        skip_tags_regex: Option<String>,
-
-        /// Output stats file prefix
-        #[arg(long = "output-stats")]
-        output_stats: Option<String>,
-
-        /// Enable paired-end deduplication
-        #[arg(long = "paired")]
-        paired: bool,
-
-        /// Ignore template length when grouping reads (paired mode)
-        #[arg(long = "ignore-tlen")]
-        ignore_tlen: bool,
-
-        /// Filter UMIs against whitelist
-        #[arg(long = "filter-umi")]
-        filter_umi: bool,
-
-        /// UMI whitelist file (or read1 whitelist for paired UMIs)
-        #[arg(long = "umi-whitelist")]
-        umi_whitelist: Option<String>,
-
-        /// Read2 UMI whitelist file (paired UMI mode, Cartesian product with read1)
-        #[arg(long = "umi-whitelist-paired")]
-        umi_whitelist_paired: Option<String>,
-
-        /// Log file (accepted but ignored)
-        #[arg(short = 'L', long = "log")]
-        _log: Option<String>,
-    },
+    Dedup(DedupArgs),
 
     /// Count UMI-deduplicated reads per gene from BAM
-    Count {
-        /// Input BAM file
-        #[arg(short = 'I', long = "stdin")]
-        input: Option<String>,
-
-        /// Output file (default: stdout)
-        #[arg(short = 'S', long = "stdout")]
-        output: Option<String>,
-
-        /// Dedup method: unique, percentile, cluster, adjacency, directional
-        #[arg(long = "method", default_value = "directional")]
-        method: String,
-
-        /// BAM tag containing gene assignment
-        #[arg(long = "gene-tag", default_value = "XF")]
-        gene_tag: String,
-
-        /// Skip reads with gene tag matching this regex
-        #[arg(long = "skip-tags-regex")]
-        skip_tags_regex: Option<String>,
-
-        /// UMI extraction method: umis, `read_id`, tag
-        #[arg(long = "extract-umi-method", default_value = "read_id")]
-        extract_umi_method: String,
-
-        /// Count per cell barcode
-        #[arg(long = "per-cell")]
-        per_cell: bool,
-
-        /// Output wide-format cell counts (requires --per-cell)
-        #[arg(long = "wide-format-cell-counts")]
-        wide_format: bool,
-
-        /// Edit distance threshold for UMI clustering
-        #[arg(long = "edit-distance-threshold", default_value = "1")]
-        edit_distance_threshold: u32,
-
-        /// Random seed (accepted but unused)
-        #[arg(long = "random-seed", default_value = "0")]
-        _random_seed: u64,
-
-        /// Log file (accepted but ignored)
-        #[arg(short = 'L', long = "log")]
-        _log: Option<String>,
-    },
+    Count(CountArgs),
 
     /// Count UMI-deduplicated reads per gene from tab-delimited input
     #[command(name = "count_tab")]
-    CountTab {
-        /// Input TSV file (default: stdin)
-        #[arg(short = 'I', long = "stdin")]
-        input: Option<String>,
+    CountTab(CountTabArgs),
+}
 
-        /// Output file (default: stdout)
-        #[arg(short = 'S', long = "stdout")]
-        output: Option<String>,
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+struct ExtractArgs {
+    /// Barcode pattern for read1 (e.g. NNNXXXXNN). N=UMI, C=cell, X=discard.
+    #[arg(long = "bc-pattern")]
+    bc_pattern: Option<String>,
 
-        /// Count per cell barcode
-        #[arg(long = "per-cell")]
-        per_cell: bool,
+    /// Barcode pattern for read2 (paired-end mode)
+    #[arg(long = "bc-pattern2")]
+    bc_pattern2: Option<String>,
 
-        /// Barcode separator in read name
-        #[arg(long = "barcode-separator", default_value = "_")]
-        separator: String,
+    /// Extraction method: "string" for fixed-position, "regex" for named capture groups
+    #[arg(long = "extract-method", default_value = "string")]
+    extract_method: String,
 
-        /// Dedup method: unique, percentile, cluster, adjacency, directional
-        #[arg(long = "method", default_value = "directional")]
-        method: String,
+    /// Input FASTQ file (default: stdin). Gzip detected by .gz extension.
+    #[arg(short = 'I', long = "stdin")]
+    input: Option<String>,
 
-        /// Edit distance threshold for UMI clustering
-        #[arg(long = "edit-distance-threshold", default_value = "1")]
-        edit_distance_threshold: u32,
+    /// Output FASTQ file (default: stdout). Gzip if .gz extension.
+    #[arg(short = 'S', long = "stdout")]
+    output: Option<String>,
 
-        /// Log file (accepted but ignored)
-        #[arg(short = 'L', long = "log")]
-        _log: Option<String>,
-    },
+    /// Read2 input FASTQ file (paired-end mode)
+    #[arg(long = "read2-in")]
+    read2_in: Option<String>,
+
+    /// Read2 output FASTQ file (paired-end mode)
+    #[arg(long = "read2-out")]
+    read2_out: Option<String>,
+
+    /// Write read2 to stdout (paired-end mode, pattern on read1)
+    #[arg(long = "read2-stdout")]
+    read2_stdout: bool,
+
+    /// Whitelist file of accepted cell barcodes (one per line)
+    #[arg(long = "whitelist")]
+    whitelist: Option<String>,
+
+    /// Extract from 3' end instead of 5'
+    #[arg(long = "3prime")]
+    prime3: bool,
+
+    /// UMI separator character in read name
+    #[arg(long = "umi-separator", default_value = "_")]
+    umi_separator: String,
+
+    /// Minimum per-base quality score for UMI bases (reads below are discarded)
+    #[arg(long = "quality-filter-threshold")]
+    quality_filter_threshold: Option<u8>,
+
+    /// Quality encoding scheme: phred33, phred64, solexa
+    #[arg(long = "quality-encoding", default_value = "phred33")]
+    quality_encoding: String,
+
+    /// Strip /1 and /2 suffixes from read names before appending UMI
+    #[arg(long = "ignore-read-pair-suffixes")]
+    ignore_read_pair_suffixes: bool,
+
+    /// Reconcile read pairs when read1 is a pre-filtered subset of read2
+    #[arg(long = "reconcile-pairs")]
+    reconcile_pairs: bool,
+
+    /// Error-correct cell barcodes using whitelist correction map
+    #[arg(long = "error-correct-cell")]
+    error_correct_cell: bool,
+
+    /// Blacklist file of rejected cell barcodes (one per line)
+    #[arg(long = "blacklist")]
+    blacklist: Option<String>,
+
+    /// Output file for filtered read1 (reads that fail any filter)
+    #[arg(long = "filtered-out")]
+    filtered_out: Option<String>,
+
+    /// Output file for filtered read2 (reads that fail any filter)
+    #[arg(long = "filtered-out2")]
+    filtered_out2: Option<String>,
+
+    /// Either-read mode: try pattern on both reads, use whichever matches
+    #[arg(long = "either-read")]
+    either_read: bool,
+}
+
+#[derive(clap::Args)]
+struct WhitelistArgs {
+    /// Barcode pattern (e.g. CCCCCCNNNNNNNNNN). N=UMI, C=cell, X=discard.
+    #[arg(long = "bc-pattern")]
+    bc_pattern: String,
+
+    /// Extraction method: "string" for fixed-position, "regex" for named capture groups
+    #[arg(long = "extract-method", default_value = "string")]
+    extract_method: String,
+
+    /// Input FASTQ file (default: stdin). Gzip detected by .gz extension.
+    #[arg(short = 'I', long = "stdin")]
+    input: Option<String>,
+
+    /// Output TSV file (default: stdout).
+    #[arg(short = 'S', long = "stdout")]
+    output: Option<String>,
+
+    /// Extract from 3' end instead of 5'
+    #[arg(long = "3prime")]
+    prime3: bool,
+
+    /// Knee detection method: "distance" or "density"
+    #[arg(long = "knee-method", default_value = "distance")]
+    knee_method: String,
+
+    /// Force whitelist to include this many cells
+    #[arg(long = "set-cell-number")]
+    set_cell_number: Option<usize>,
+
+    /// Expected number of cells (hint for density method)
+    #[arg(long = "expect-cells")]
+    expect_cells: Option<usize>,
+
+    /// Maximum Hamming distance for error correction (default: 1)
+    #[arg(long = "error-correct-threshold", default_value = "1")]
+    error_correct_threshold: usize,
+
+    /// Handle whitelist barcodes within edit distance of higher-count whitelist barcode
+    #[arg(long = "ed-above-threshold")]
+    ed_above_threshold: Option<String>,
+
+    /// Plot prefix (accepted but ignored)
+    #[arg(long = "plot-prefix")]
+    _plot_prefix: Option<String>,
+
+    /// Output file for reads that failed barcode extraction
+    #[arg(long = "filtered-out")]
+    filtered_out: Option<String>,
+
+    /// Max reads to process (default: `100_000_000`)
+    #[arg(long = "subset-reads", default_value = "100000000")]
+    subset_reads: usize,
+}
+
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+struct GroupArgs {
+    /// Input BAM file
+    #[arg(short = 'I', long = "stdin")]
+    input: Option<String>,
+
+    /// Grouping method: unique, percentile, cluster, adjacency, directional
+    #[arg(long = "method", default_value = "directional")]
+    method: String,
+
+    /// Ignore UMI — group by position only
+    #[arg(long = "ignore-umi")]
+    ignore_umi: bool,
+
+    /// Output SAM instead of BAM (may be repeated)
+    #[arg(long = "out-sam", action = clap::ArgAction::Count)]
+    out_sam: u8,
+
+    /// Random seed for reproducible tie-breaking
+    #[arg(long = "random-seed", default_value = "0")]
+    random_seed: u64,
+
+    /// UMI separator in read name
+    #[arg(long = "umi-separator", default_value = "_")]
+    umi_separator: String,
+
+    /// Only process reads on this chromosome
+    #[arg(long = "chrom")]
+    chrom: Option<String>,
+
+    /// Output TSV file with group assignments
+    #[arg(long = "group-out")]
+    group_out: Option<String>,
+
+    /// Write tagged BAM/SAM to stdout
+    #[arg(long = "output-bam")]
+    output_bam: bool,
+
+    /// Skip coordinate sorting of output
+    #[arg(long = "no-sort-output")]
+    no_sort_output: bool,
+
+    /// Random subset of reads to process (0.0-1.0)
+    #[arg(long = "subset")]
+    subset: Option<f32>,
+
+    /// Include unmapped reads in output (alias for --unmapped=output)
+    #[arg(long = "output-unmapped")]
+    output_unmapped: bool,
+
+    /// Enable paired-end grouping
+    #[arg(long = "paired")]
+    paired: bool,
+
+    /// How to handle chimeric read pairs: discard, output, use
+    #[arg(long = "chimeric-pairs")]
+    chimeric_pairs: Option<String>,
+
+    /// How to handle unmapped reads: discard, output, use
+    #[arg(long = "unmapped", default_value = "discard")]
+    unmapped: String,
+
+    /// Deduplicate per gene (requires --gene-tag or --per-contig)
+    #[arg(long = "per-gene")]
+    per_gene: bool,
+
+    /// BAM tag containing gene assignment (default: XF)
+    #[arg(long = "gene-tag")]
+    gene_tag: Option<String>,
+
+    /// Skip reads with gene tag matching this regex
+    #[arg(long = "skip-tags-regex")]
+    skip_tags_regex: Option<String>,
+
+    /// Use contig name as gene (requires --per-gene)
+    #[arg(long = "per-contig")]
+    per_contig: bool,
+
+    /// Log file (accepted but ignored)
+    #[arg(short = 'L', long = "log")]
+    _log: Option<String>,
+}
+
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+struct DedupArgs {
+    /// Input BAM file
+    #[arg(short = 'I', long = "stdin")]
+    input: Option<String>,
+
+    /// Dedup method: unique, percentile, cluster, adjacency, directional
+    #[arg(long = "method", default_value = "directional")]
+    method: String,
+
+    /// Ignore UMI — deduplicate by position only
+    #[arg(long = "ignore-umi")]
+    ignore_umi: bool,
+
+    /// Output SAM instead of BAM
+    #[arg(long = "out-sam")]
+    out_sam: bool,
+
+    /// Random seed for reproducible tie-breaking
+    #[arg(long = "random-seed", default_value = "0")]
+    random_seed: u64,
+
+    /// UMI separator in read name
+    #[arg(long = "umi-separator", default_value = "_")]
+    umi_separator: String,
+
+    /// Only process reads on this chromosome
+    #[arg(long = "chrom")]
+    chrom: Option<String>,
+
+    /// Edit distance threshold for UMI clustering
+    #[arg(long = "edit-distance-threshold", default_value = "1")]
+    edit_distance_threshold: u32,
+
+    /// Random subset of reads to process (0.0-1.0)
+    #[arg(long = "subset")]
+    subset: Option<f32>,
+
+    /// UMI extraction method: `read_id` or `tag`
+    #[arg(long = "extract-umi-method", default_value = "read_id")]
+    extract_umi_method: String,
+
+    /// BAM tag to extract UMI from (when extract-umi-method=tag)
+    #[arg(long = "umi-tag")]
+    umi_tag: Option<String>,
+
+    /// Deduplicate per gene (requires --gene-tag)
+    #[arg(long = "per-gene")]
+    per_gene: bool,
+
+    /// BAM tag containing gene assignment
+    #[arg(long = "gene-tag")]
+    gene_tag: Option<String>,
+
+    /// Skip reads with gene tag matching this regex
+    #[arg(long = "skip-tags-regex")]
+    skip_tags_regex: Option<String>,
+
+    /// Output stats file prefix
+    #[arg(long = "output-stats")]
+    output_stats: Option<String>,
+
+    /// Enable paired-end deduplication
+    #[arg(long = "paired")]
+    paired: bool,
+
+    /// Ignore template length when grouping reads (paired mode)
+    #[arg(long = "ignore-tlen")]
+    ignore_tlen: bool,
+
+    /// Filter UMIs against whitelist
+    #[arg(long = "filter-umi")]
+    filter_umi: bool,
+
+    /// UMI whitelist file (or read1 whitelist for paired UMIs)
+    #[arg(long = "umi-whitelist")]
+    umi_whitelist: Option<String>,
+
+    /// Read2 UMI whitelist file (paired UMI mode, Cartesian product with read1)
+    #[arg(long = "umi-whitelist-paired")]
+    umi_whitelist_paired: Option<String>,
+
+    /// Log file (accepted but ignored)
+    #[arg(short = 'L', long = "log")]
+    _log: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct CountArgs {
+    /// Input BAM file
+    #[arg(short = 'I', long = "stdin")]
+    input: Option<String>,
+
+    /// Output file (default: stdout)
+    #[arg(short = 'S', long = "stdout")]
+    output: Option<String>,
+
+    /// Dedup method: unique, percentile, cluster, adjacency, directional
+    #[arg(long = "method", default_value = "directional")]
+    method: String,
+
+    /// BAM tag containing gene assignment
+    #[arg(long = "gene-tag", default_value = "XF")]
+    gene_tag: String,
+
+    /// Skip reads with gene tag matching this regex
+    #[arg(long = "skip-tags-regex")]
+    skip_tags_regex: Option<String>,
+
+    /// UMI extraction method: umis, `read_id`, tag
+    #[arg(long = "extract-umi-method", default_value = "read_id")]
+    extract_umi_method: String,
+
+    /// Count per cell barcode
+    #[arg(long = "per-cell")]
+    per_cell: bool,
+
+    /// Output wide-format cell counts (requires --per-cell)
+    #[arg(long = "wide-format-cell-counts")]
+    wide_format: bool,
+
+    /// Edit distance threshold for UMI clustering
+    #[arg(long = "edit-distance-threshold", default_value = "1")]
+    edit_distance_threshold: u32,
+
+    /// Random seed (accepted but unused)
+    #[arg(long = "random-seed", default_value = "0")]
+    _random_seed: u64,
+
+    /// Log file (accepted but ignored)
+    #[arg(short = 'L', long = "log")]
+    _log: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct CountTabArgs {
+    /// Input TSV file (default: stdin)
+    #[arg(short = 'I', long = "stdin")]
+    input: Option<String>,
+
+    /// Output file (default: stdout)
+    #[arg(short = 'S', long = "stdout")]
+    output: Option<String>,
+
+    /// Count per cell barcode
+    #[arg(long = "per-cell")]
+    per_cell: bool,
+
+    /// Barcode separator in read name
+    #[arg(long = "barcode-separator", default_value = "_")]
+    separator: String,
+
+    /// Dedup method: unique, percentile, cluster, adjacency, directional
+    #[arg(long = "method", default_value = "directional")]
+    method: String,
+
+    /// Edit distance threshold for UMI clustering
+    #[arg(long = "edit-distance-threshold", default_value = "1")]
+    edit_distance_threshold: u32,
+
+    /// Log file (accepted but ignored)
+    #[arg(short = 'L', long = "log")]
+    _log: Option<String>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -420,7 +441,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Extract {
+        Commands::Extract(ExtractArgs {
             bc_pattern,
             bc_pattern2,
             extract_method,
@@ -441,7 +462,7 @@ fn main() -> Result<()> {
             filtered_out,
             filtered_out2,
             either_read,
-        } => {
+        }) => {
             let is_paired = read2_in.is_some();
             if !is_paired && bc_pattern.is_none() {
                 bail!("--bc-pattern is required for single-end extraction");
@@ -473,7 +494,7 @@ fn main() -> Result<()> {
                 either_read,
             )
         }
-        Commands::Whitelist {
+        Commands::Whitelist(WhitelistArgs {
             bc_pattern,
             extract_method,
             input,
@@ -487,7 +508,7 @@ fn main() -> Result<()> {
             _plot_prefix: _,
             filtered_out,
             subset_reads,
-        } => run_whitelist_cmd(
+        }) => run_whitelist_cmd(
             &bc_pattern,
             &extract_method,
             input.as_deref(),
@@ -501,7 +522,7 @@ fn main() -> Result<()> {
             filtered_out.as_deref(),
             subset_reads,
         ),
-        Commands::Group {
+        Commands::Group(GroupArgs {
             input,
             method,
             ignore_umi,
@@ -522,7 +543,7 @@ fn main() -> Result<()> {
             skip_tags_regex,
             per_contig,
             _log: _,
-        } => run_group_cmd(
+        }) => run_group_cmd(
             input.as_deref(),
             &method,
             ignore_umi,
@@ -543,7 +564,7 @@ fn main() -> Result<()> {
             skip_tags_regex.as_deref(),
             per_contig,
         ),
-        Commands::Dedup {
+        Commands::Dedup(DedupArgs {
             input,
             method,
             ignore_umi,
@@ -565,7 +586,7 @@ fn main() -> Result<()> {
             umi_whitelist,
             umi_whitelist_paired,
             _log: _,
-        } => run_dedup_cmd(
+        }) => run_dedup_cmd(
             input.as_deref(),
             &method,
             ignore_umi,
@@ -587,7 +608,7 @@ fn main() -> Result<()> {
             umi_whitelist.as_deref(),
             umi_whitelist_paired.as_deref(),
         ),
-        Commands::Count {
+        Commands::Count(CountArgs {
             input,
             output,
             method,
@@ -599,7 +620,7 @@ fn main() -> Result<()> {
             edit_distance_threshold,
             _random_seed: _,
             _log: _,
-        } => run_count_cmd(
+        }) => run_count_cmd(
             input.as_deref(),
             output.as_deref(),
             &method,
@@ -609,7 +630,7 @@ fn main() -> Result<()> {
             wide_format,
             edit_distance_threshold,
         ),
-        Commands::CountTab {
+        Commands::CountTab(CountTabArgs {
             input,
             output,
             per_cell,
@@ -617,7 +638,7 @@ fn main() -> Result<()> {
             method,
             edit_distance_threshold,
             _log: _,
-        } => run_count_tab_cmd(
+        }) => run_count_tab_cmd(
             input.as_deref(),
             output.as_deref(),
             per_cell,
