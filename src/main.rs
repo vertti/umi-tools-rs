@@ -13,7 +13,7 @@ use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use umi_core::alignment_io::{AlignmentFormat, determine_format};
 use umi_core::count::{CountConfig, CountTabConfig, run_count, run_count_tab};
-use umi_core::dedup::{DedupConfig, DedupMethod, run_dedup};
+use umi_core::dedup::{DedupConfig, DedupMethod, PositionOptions, run_dedup};
 use umi_core::extract::{
     ExtractConfig, QualityEncoding, extract_reads, extract_reads_either_read, extract_reads_paired,
     extract_reads_paired_r1_pattern,
@@ -263,6 +263,9 @@ struct GroupArgs {
     #[arg(long = "subset")]
     subset: Option<f32>,
 
+    #[command(flatten)]
+    position: PositionArgs,
+
     /// Include unmapped reads in output (alias for --unmapped-reads=output)
     #[arg(long = "output-unmapped")]
     output_unmapped: bool,
@@ -339,6 +342,9 @@ struct DedupArgs {
     /// Edit distance threshold for UMI clustering
     #[arg(long = "edit-distance-threshold", default_value = "1")]
     edit_distance_threshold: u32,
+
+    #[command(flatten)]
+    position: PositionArgs,
 
     /// Random subset of reads to process (0.0-1.0)
     #[arg(long = "subset")]
@@ -499,6 +505,32 @@ impl InputFormatArgs {
     fn note_ignored_flags(&self) {
         if self.input_options.is_some() {
             note_ignored("--input-options");
+        }
+    }
+}
+
+/// Grouping-key options shared by dedup and group.
+#[derive(clap::Args, Clone, Copy)]
+struct PositionArgs {
+    /// Treat a spliced read as different from an unspliced one at the same position
+    #[arg(long = "spliced-is-unique", action = ArgAction::SetTrue, overrides_with = "spliced_is_unique")]
+    spliced_is_unique: bool,
+
+    /// Bases soft-clipped from the 5' end before a read counts as spliced
+    #[arg(long = "soft-clip-threshold", default_value = "4")]
+    soft_clip_threshold: f64,
+
+    /// Use read length as well as position and UMI to identify duplicates
+    #[arg(long = "read-length", action = ArgAction::SetTrue, overrides_with = "read_length")]
+    read_length: bool,
+}
+
+impl PositionArgs {
+    const fn options(self) -> PositionOptions {
+        PositionOptions {
+            spliced_is_unique: self.spliced_is_unique,
+            soft_clip_threshold: self.soft_clip_threshold,
+            read_length: self.read_length,
         }
     }
 }
@@ -831,6 +863,7 @@ fn run(command: Commands) -> Result<String> {
             output_bam,
             no_sort_output,
             subset,
+            position,
             output_unmapped,
             paired,
             chimeric_pairs,
@@ -854,6 +887,7 @@ fn run(command: Commands) -> Result<String> {
             output_bam,
             no_sort_output,
             subset,
+            position.options(),
             output_unmapped,
             paired,
             chimeric_pairs.as_deref(),
@@ -874,6 +908,7 @@ fn run(command: Commands) -> Result<String> {
             umi_separator,
             chrom,
             edit_distance_threshold,
+            position,
             subset,
             extract_umi_method,
             umi_tag,
@@ -898,6 +933,7 @@ fn run(command: Commands) -> Result<String> {
             &umi_separator,
             chrom.as_deref(),
             edit_distance_threshold,
+            position.options(),
             subset,
             &extract_umi_method,
             umi_tag.as_deref(),
@@ -1251,6 +1287,7 @@ fn run_group_cmd(
     output_bam: bool,
     no_sort_output: bool,
     subset: Option<f32>,
+    position: PositionOptions,
     output_unmapped: bool,
     paired: bool,
     chimeric_pairs: Option<&str>,
@@ -1313,6 +1350,7 @@ fn run_group_cmd(
         chrom: chrom.map(String::from),
         group_out: group_out.map(String::from),
         edit_distance_threshold: 1,
+        position,
         subset,
         per_gene,
         gene_tag: gene_tag.map(String::from),
@@ -1343,6 +1381,7 @@ fn run_dedup_cmd(
     umi_separator: &str,
     chrom: Option<&str>,
     edit_distance_threshold: u32,
+    position: PositionOptions,
     subset: Option<f32>,
     extract_umi_method: &str,
     umi_tag: Option<&str>,
@@ -1389,6 +1428,7 @@ fn run_dedup_cmd(
         reference: input_format.reference_filename.clone(),
         chrom: chrom.map(String::from),
         edit_distance_threshold,
+        position,
         subset,
         extract_umi_method: extract_umi_method.to_string(),
         umi_tag: umi_tag.map(String::from),

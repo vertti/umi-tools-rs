@@ -48,7 +48,7 @@ def _load_tests_yaml():
 @dataclass
 class Case:
     name: str
-    stdin: str | None
+    stdin: Path | None
     options: str
     outputs: list
     references: list
@@ -57,11 +57,19 @@ class Case:
     reference_dir: Path
 
 
+def resolve_input(name, input_dir):
+    """Golden inputs live in tests/golden/inputs; everything else comes from upstream."""
+    if name is None:
+        return None
+    local = GOLDEN_DIR / "inputs" / name
+    return local if local.exists() else input_dir / name
+
+
 def _case(name, values, input_dir, reference_dir):
     return pytest.param(
         Case(
             name=name,
-            stdin=values.get("stdin"),
+            stdin=resolve_input(values.get("stdin"), input_dir),
             options=values["options"],
             outputs=values["outputs"],
             references=values["references"],
@@ -157,9 +165,7 @@ def run_case(rust_binary, case):
     tmpdir = tempfile.mkdtemp()
     stdout_path = os.path.join(tmpdir, "stdout")
 
-    stdin_flag = ""
-    if case.stdin:
-        stdin_flag = f"--stdin={case.input_dir / case.stdin}"
+    stdin_flag = f"--stdin={case.stdin}" if case.stdin else ""
 
     opts = substitute_placeholders(case.options, case.input_dir, tmpdir)
     statement = f"/bin/bash -c '{rust_binary} {opts} {stdin_flag} > {stdout_path}'"

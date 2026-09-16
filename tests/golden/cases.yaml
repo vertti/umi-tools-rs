@@ -1,3 +1,35 @@
 # Cases for flags the upstream test suite does not exercise. Same schema as
-# upstream tests/tests.yaml: stdin is a file in the upstream tests directory,
-# references live here and are regenerated with tests/golden/generate.py.
+# upstream tests/tests.yaml. stdin names a file in tests/golden/inputs (subsampled
+# from the upstream test data with samtools view -s) or, failing that, in the
+# upstream tests directory. References live here, gzipped, and are regenerated
+# with tests/golden/generate.py.
+
+dedup_spliced_is_unique:
+  stdin: chr19_gene_tags.bam
+  outputs: [stdout]
+  references: [dedup_spliced_is_unique.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --spliced-is-unique
+
+dedup_spliced_soft_clip_threshold:
+  stdin: whitelist_umi_sub.bam
+  outputs: [stdout]
+  references: [dedup_spliced_soft_clip_threshold.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --spliced-is-unique --soft-clip-threshold=0
+
+dedup_read_length:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [dedup_read_length.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --read-length
+
+group_spliced_is_unique:
+  stdin: whitelist_umi_sub.bam
+  outputs: [group_spliced_is_unique.tsv]
+  references: [group_spliced_is_unique.tsv.gz]
+  options: group --paired --random-seed=123456789 --spliced-is-unique --soft-clip-threshold=0 --group-out=group_spliced_is_unique.tsv
+
+group_read_length:
+  stdin: paired_sub.bam
+  outputs: [group_read_length.tsv]
+  references: [group_read_length.tsv.gz]
+  options: group --paired --random-seed=123456789 --read-length --group-out=group_read_length.tsv
