@@ -22,6 +22,10 @@ description = "Run tests"
 run = "cargo check --workspace --all-targets"
 description = "Type check"
 
+[tasks.build]
+run = "cargo build --workspace"
+description = "Build debug binary"
+
 [tasks.ci]
 depends = ["fmt", "check", "lint", "test"]
 description = "Run all CI checks"
@@ -29,7 +33,7 @@ description = "Run all CI checks"
 [tasks.compat]
 run = "uv run --group test pytest tests/umi_tools_compat -v"
 description = "Run umi-tools compatibility tests"
-depends = ["check"]
+depends = ["build"]
 
 [tasks.bench-setup]
 run = "bash benchmarks/setup.sh"
