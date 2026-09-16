@@ -17,9 +17,6 @@ ENABLED_TESTS = [
     "count_tab_single_per_cell",
 ]
 
-# Flags the Rust binary doesn't support yet — stripped before invocation.
-UNSUPPORTED_FLAG_RE = re.compile(r"--log=\S+|-L\s+\S+")
-
 
 def _read(path):
     """Read file, decode, strip comment lines."""
@@ -79,8 +76,6 @@ def test_count(
     opts = opts.replace("%TMP%", tmpdir)
     opts = re.sub(r"\n", "", opts)
 
-    # Strip unsupported flags
-    opts = UNSUPPORTED_FLAG_RE.sub("", opts)
 
     statement = f"/bin/bash -c '{rust_binary} {opts} {stdin_flag} > {stdout_path}'"
 

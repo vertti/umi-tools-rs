@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Parser, Subcommand};
@@ -24,7 +27,8 @@ use umi_core::whitelist::{EdAboveThreshold, KneeMethod, WhitelistConfig, run_whi
     name = "umi-tools-rs",
     version,
     about = "Fast UMI tools in Rust",
-    infer_long_args = true
+    infer_long_args = true,
+    propagate_version = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -135,6 +139,13 @@ struct ExtractArgs {
     /// Either-read mode: try pattern on both reads, use whichever matches
     #[arg(long = "either-read")]
     either_read: bool,
+
+    /// No randomness in this command; accepted for umi-tools compatibility
+    #[arg(long = "random-seed")]
+    _random_seed: Option<u64>,
+
+    #[command(flatten)]
+    common: CommonArgs,
 }
 
 #[derive(clap::Args)]
@@ -179,9 +190,9 @@ struct WhitelistArgs {
     #[arg(long = "ed-above-threshold")]
     ed_above_threshold: Option<String>,
 
-    /// Plot prefix (accepted but ignored)
+    /// Prefix for knee plots. Accepted for umi-tools compatibility; plots are not generated
     #[arg(long = "plot-prefix")]
-    _plot_prefix: Option<String>,
+    plot_prefix: Option<String>,
 
     /// Output file for reads that failed barcode extraction
     #[arg(long = "filtered-out")]
@@ -190,6 +201,13 @@ struct WhitelistArgs {
     /// Max reads to process (default: `100_000_000`)
     #[arg(long = "subset-reads", default_value = "100000000")]
     subset_reads: usize,
+
+    /// No randomness in this command; accepted for umi-tools compatibility
+    #[arg(long = "random-seed")]
+    _random_seed: Option<u64>,
+
+    #[command(flatten)]
+    common: CommonArgs,
 }
 
 #[derive(clap::Args)]
@@ -277,9 +295,8 @@ struct GroupArgs {
     #[arg(long = "per-contig")]
     per_contig: bool,
 
-    /// Log file (accepted but ignored)
-    #[arg(short = 'L', long = "log")]
-    _log: Option<String>,
+    #[command(flatten)]
+    common: CommonArgs,
 }
 
 #[derive(clap::Args)]
@@ -371,9 +388,8 @@ struct DedupArgs {
     #[arg(long = "umi-whitelist-paired")]
     umi_whitelist_paired: Option<String>,
 
-    /// Log file (accepted but ignored)
-    #[arg(short = 'L', long = "log")]
-    _log: Option<String>,
+    #[command(flatten)]
+    common: CommonArgs,
 }
 
 #[derive(clap::Args)]
@@ -417,13 +433,12 @@ struct CountArgs {
     #[arg(long = "edit-distance-threshold", default_value = "1")]
     edit_distance_threshold: u32,
 
-    /// Random seed (accepted but unused)
-    #[arg(long = "random-seed", default_value = "0")]
-    _random_seed: u64,
+    /// No randomness in this command; accepted for umi-tools compatibility
+    #[arg(long = "random-seed")]
+    _random_seed: Option<u64>,
 
-    /// Log file (accepted but ignored)
-    #[arg(short = 'L', long = "log")]
-    _log: Option<String>,
+    #[command(flatten)]
+    common: CommonArgs,
 }
 
 #[derive(clap::Args)]
@@ -452,9 +467,12 @@ struct CountTabArgs {
     #[arg(long = "edit-distance-threshold", default_value = "1")]
     edit_distance_threshold: u32,
 
-    /// Log file (accepted but ignored)
-    #[arg(short = 'L', long = "log")]
-    _log: Option<String>,
+    /// No randomness in this command; accepted for umi-tools compatibility
+    #[arg(long = "random-seed")]
+    _random_seed: Option<u64>,
+
+    #[command(flatten)]
+    common: CommonArgs,
 }
 
 /// Options shared by the commands that read alignments.
@@ -519,15 +537,199 @@ impl OutputFormatArgs {
     }
 }
 
+/// Logging options shared with `umi_tools`.
+#[derive(clap::Args, Clone)]
+struct CommonArgs {
+    /// Append the run summary to this file instead of printing it to stderr
+    #[arg(short = 'L', long = "log")]
+    log: Option<String>,
+
+    /// Print the run summary to stderr (the default)
+    #[arg(long = "log2stderr", action = ArgAction::SetTrue, overrides_with = "_log2stderr")]
+    _log2stderr: bool,
+
+    /// Write umi-tools-rs notes and errors to this file instead of stderr. htslib messages still go to stderr.
+    #[arg(short = 'E', long = "error")]
+    error: Option<String>,
+
+    /// Verbosity: 0 silences the run summary and notes; higher levels have no further effect
+    #[arg(short = 'v', long = "verbose", default_value = "1")]
+    verbose: u8,
+
+    /// gzip level for .gz outputs, 1-9. umi-tools defaults to 6.
+    #[arg(long = "compresslevel", default_value = "3", value_parser = clap::value_parser!(u32).range(1..=9))]
+    compresslevel: u32,
+
+    /// Same as --help
+    #[arg(long = "help-extended", action = ArgAction::Help)]
+    _help_extended: Option<bool>,
+
+    /// Directory for temporary files. Accepted for umi-tools compatibility; has no effect.
+    #[arg(long = "temp-dir")]
+    temp_dir: Option<String>,
+
+    /// Timing output file. Accepted for umi-tools compatibility; has no effect.
+    #[arg(long = "timeit")]
+    timeit: Option<String>,
+
+    /// Name for the timing row. Accepted for umi-tools compatibility; has no effect.
+    #[arg(long = "timeit-name")]
+    timeit_name: Option<String>,
+
+    /// Write a header to the timing file. Accepted for umi-tools compatibility; has no effect.
+    #[arg(long = "timeit-header", action = ArgAction::SetTrue, overrides_with = "timeit_header")]
+    timeit_header: bool,
+}
+
+impl CommonArgs {
+    fn note_ignored_flags(&self) {
+        let flags = [
+            ("--temp-dir", self.temp_dir.is_some()),
+            ("--timeit", self.timeit.is_some()),
+            ("--timeit-name", self.timeit_name.is_some()),
+            ("--timeit-header", self.timeit_header),
+        ];
+        for (flag, given) in flags {
+            if given {
+                note_ignored(flag);
+            }
+        }
+    }
+}
+
+impl Commands {
+    const fn common(&self) -> &CommonArgs {
+        match self {
+            Self::Extract(args) => &args.common,
+            Self::Whitelist(args) => &args.common,
+            Self::Group(args) => &args.common,
+            Self::Dedup(args) => &args.common,
+            Self::Count(args) => &args.common,
+            Self::CountTab(args) => &args.common,
+        }
+    }
+
+    fn note_ignored_flags(&self) {
+        self.common().note_ignored_flags();
+        if let Self::Whitelist(args) = self
+            && args.plot_prefix.is_some()
+        {
+            note("--plot-prefix is accepted for umi-tools compatibility; plots are not generated");
+        }
+    }
+}
+
+/// Where the run summary goes: stderr, or the `--log` file appended to as `umi_tools` does.
+struct RunLog {
+    file: Option<File>,
+    quiet: bool,
+}
+
+impl RunLog {
+    fn open(path: Option<&str>, args: &[String], quiet: bool) -> Result<Self> {
+        let file = path
+            .map(|p| {
+                let mut file = OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(p)
+                    .with_context(|| format!("failed to open log file: {p}"))?;
+                if !quiet {
+                    writeln!(
+                        file,
+                        "# umi-tools-rs version: {}",
+                        env!("CARGO_PKG_VERSION")
+                    )?;
+                    writeln!(file, "# output generated by {}", args.join(" "))?;
+                    writeln!(file, "# job started at {}", timestamp())?;
+                }
+                Ok::<_, anyhow::Error>(file)
+            })
+            .transpose()?;
+        Ok(Self { file, quiet })
+    }
+
+    fn finish(mut self, summary: &str) -> Result<()> {
+        if self.quiet {
+            return Ok(());
+        }
+        match self.file.as_mut() {
+            Some(file) => {
+                writeln!(file, "{summary}")?;
+                writeln!(file, "# job finished at {}", timestamp())?;
+            }
+            None => eprintln!("{summary}"),
+        }
+        Ok(())
+    }
+}
+
+fn timestamp() -> humantime::Rfc3339Timestamp {
+    humantime::format_rfc3339_seconds(std::time::SystemTime::now())
+}
+
+/// Destination for notes and the final error message: stderr, or the `--error` file.
+static DIAGNOSTICS: Mutex<Option<File>> = Mutex::new(None);
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+fn install_diagnostics(error_path: Option<&str>, quiet: bool) -> Result<()> {
+    QUIET.store(quiet, Ordering::Relaxed);
+    if let Some(path) = error_path {
+        let file =
+            File::create(path).with_context(|| format!("failed to create error file: {path}"))?;
+        *DIAGNOSTICS.lock().unwrap_or_else(PoisonError::into_inner) = Some(file);
+    }
+    Ok(())
+}
+
+fn diagnostic(message: &str) {
+    let mut sink = DIAGNOSTICS.lock().unwrap_or_else(PoisonError::into_inner);
+    match sink.as_mut() {
+        Some(file) => {
+            let _ = writeln!(file, "{message}");
+        }
+        None => eprintln!("{message}"),
+    }
+}
+
+fn note(message: &str) {
+    if !QUIET.load(Ordering::Relaxed) {
+        diagnostic(&format!("note: {message}"));
+    }
+}
+
 fn note_ignored(flag: &str) {
-    eprintln!("note: {flag} is accepted for umi-tools compatibility and has no effect");
+    note(&format!(
+        "{flag} is accepted for umi-tools compatibility and has no effect"
+    ));
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let common = cli.command.common().clone();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    match run_logged(cli.command, &common, &args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            diagnostic(&format!("Error: {e:?}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_logged(command: Commands, common: &CommonArgs, args: &[String]) -> Result<()> {
+    let quiet = common.verbose == 0;
+    install_diagnostics(common.error.as_deref(), quiet)?;
+    command.note_ignored_flags();
+    let log = RunLog::open(common.log.as_deref(), args, quiet)?;
+    let summary = run(command)?;
+    log.finish(&summary)
 }
 
 #[allow(clippy::too_many_lines)]
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-
-    match cli.command {
+fn run(command: Commands) -> Result<String> {
+    match command {
         Commands::Extract(ExtractArgs {
             bc_pattern,
             bc_pattern2,
@@ -549,6 +751,8 @@ fn main() -> Result<()> {
             filtered_out,
             filtered_out2,
             either_read,
+            _random_seed: _,
+            common,
         }) => {
             let is_paired = read2_in.is_some();
             if !is_paired && bc_pattern.is_none() {
@@ -579,6 +783,7 @@ fn main() -> Result<()> {
                 filtered_out.as_deref(),
                 filtered_out2.as_deref(),
                 either_read,
+                common.compresslevel,
             )
         }
         Commands::Whitelist(WhitelistArgs {
@@ -592,9 +797,11 @@ fn main() -> Result<()> {
             expect_cells,
             error_correct_threshold,
             ed_above_threshold,
-            _plot_prefix: _,
+            plot_prefix: _,
             filtered_out,
             subset_reads,
+            _random_seed: _,
+            common,
         }) => run_whitelist_cmd(
             &bc_pattern,
             &extract_method,
@@ -608,6 +815,7 @@ fn main() -> Result<()> {
             ed_above_threshold.as_deref(),
             filtered_out.as_deref(),
             subset_reads,
+            common.compresslevel,
         ),
         Commands::Group(GroupArgs {
             input,
@@ -631,7 +839,7 @@ fn main() -> Result<()> {
             gene_tag,
             skip_tags_regex,
             per_contig,
-            _log: _,
+            common: _,
         }) => run_group_cmd(
             input.as_deref(),
             &method,
@@ -678,7 +886,7 @@ fn main() -> Result<()> {
             filter_umi,
             umi_whitelist,
             umi_whitelist_paired,
-            _log: _,
+            common: _,
         }) => run_dedup_cmd(
             input.as_deref(),
             &method,
@@ -715,7 +923,7 @@ fn main() -> Result<()> {
             wide_format,
             edit_distance_threshold,
             _random_seed: _,
-            _log: _,
+            common,
         }) => run_count_cmd(
             input.as_deref(),
             output.as_deref(),
@@ -726,6 +934,7 @@ fn main() -> Result<()> {
             per_cell,
             wide_format,
             edit_distance_threshold,
+            common.compresslevel,
         ),
         Commands::CountTab(CountTabArgs {
             input,
@@ -734,7 +943,8 @@ fn main() -> Result<()> {
             separator,
             method,
             edit_distance_threshold,
-            _log: _,
+            _random_seed: _,
+            common,
         }) => run_count_tab_cmd(
             input.as_deref(),
             output.as_deref(),
@@ -742,6 +952,7 @@ fn main() -> Result<()> {
             &separator,
             &method,
             edit_distance_threshold,
+            common.compresslevel,
         ),
     }
 }
@@ -779,13 +990,16 @@ fn open_input(path: Option<&str>) -> Result<Box<dyn Read + Send>> {
     }
 }
 
-fn open_output(path: Option<&str>) -> Result<Box<dyn Write>> {
+fn open_output(path: Option<&str>, compresslevel: u32) -> Result<Box<dyn Write>> {
     match path {
         Some(p) => {
             let file =
                 File::create(p).with_context(|| format!("failed to create output file: {p}"))?;
             if is_gzipped(p) {
-                Ok(Box::new(GzEncoder::new(file, Compression::new(3))))
+                Ok(Box::new(GzEncoder::new(
+                    file,
+                    Compression::new(compresslevel),
+                )))
             } else {
                 Ok(Box::new(file))
             }
@@ -816,7 +1030,8 @@ fn run_extract(
     filtered_out_path: Option<&str>,
     filtered_out2_path: Option<&str>,
     either_read: bool,
-) -> Result<()> {
+    compresslevel: u32,
+) -> Result<String> {
     let pattern = bc_pattern
         .map(|p| parse_pattern(p, extract_method, prime3))
         .transpose()?;
@@ -862,36 +1077,36 @@ fn run_extract(
     let stats = if let Some(r2_path) = read2_in_path {
         let reader2 = open_input(Some(r2_path))?;
         if either_read {
-            let writer1 = open_output(output_path)?;
-            let writer2 = open_output(read2_out_path)
+            let writer1 = open_output(output_path, compresslevel)?;
+            let writer2 = open_output(read2_out_path, compresslevel)
                 .context("--read2-out is required when --either-read is specified")?;
             extract_reads_either_read(&config, reader1, reader2, writer1, writer2)
                 .context("either-read extraction failed")?
         } else if read2_stdout {
-            let writer = open_output(output_path)?;
+            let writer = open_output(output_path, compresslevel)?;
             let filt1 = filtered_out_path
-                .map(|p| open_output(Some(p)))
+                .map(|p| open_output(Some(p), compresslevel))
                 .transpose()
                 .context("failed to open --filtered-out")?;
             let filt2 = filtered_out2_path
-                .map(|p| open_output(Some(p)))
+                .map(|p| open_output(Some(p), compresslevel))
                 .transpose()
                 .context("failed to open --filtered-out2")?;
             extract_reads_paired_r1_pattern(&config, reader1, reader2, writer, filt1, filt2)
                 .context("paired-end extraction failed")?
         } else {
-            let writer1 = open_output(output_path)?;
-            let writer2 = open_output(read2_out_path)
+            let writer1 = open_output(output_path, compresslevel)?;
+            let writer2 = open_output(read2_out_path, compresslevel)
                 .context("--read2-out is required when --read2-in is specified")?;
             extract_reads_paired(&config, reader1, reader2, writer1, writer2)
                 .context("paired-end extraction failed")?
         }
     } else {
-        let writer1 = open_output(output_path)?;
+        let writer1 = open_output(output_path, compresslevel)?;
         extract_reads(&config, reader1, writer1).context("extraction failed")?
     };
 
-    eprintln!(
+    Ok(format!(
         "Reads input: {}, output: {}, too short: {}, no match: {}, quality filtered: {}, whitelist filtered: {}",
         stats.input_reads,
         stats.output_reads,
@@ -899,9 +1114,7 @@ fn run_extract(
         stats.no_match,
         stats.quality_filtered,
         stats.whitelist_filtered,
-    );
-
-    Ok(())
+    ))
 }
 
 type WhitelistWithCorrection = (HashSet<Vec<u8>>, Option<HashMap<Vec<u8>, Vec<u8>>>);
@@ -977,7 +1190,8 @@ fn run_whitelist_cmd(
     ed_above_threshold: Option<&str>,
     filtered_out_path: Option<&str>,
     subset_reads: usize,
-) -> Result<()> {
+    compresslevel: u32,
+) -> Result<String> {
     let pattern = parse_pattern(bc_pattern, extract_method, prime3)?;
 
     let km = match knee_method {
@@ -1007,21 +1221,19 @@ fn run_whitelist_cmd(
     };
 
     let reader = open_input(input_path)?;
-    let writer = open_output(output_path)?;
+    let writer = open_output(output_path, compresslevel)?;
     let filt_out = filtered_out_path
-        .map(|p| open_output(Some(p)))
+        .map(|p| open_output(Some(p), compresslevel))
         .transpose()
         .context("failed to open --filtered-out")?;
 
     let stats =
         run_whitelist(&config, reader, writer, filt_out).context("whitelist command failed")?;
 
-    eprintln!(
+    Ok(format!(
         "Reads input: {}, no barcode match: {}",
         stats.input_reads, stats.no_match,
-    );
-
-    Ok(())
+    ))
 }
 
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
@@ -1047,7 +1259,7 @@ fn run_group_cmd(
     gene_tag: Option<&str>,
     skip_tags_regex: Option<&str>,
     per_contig: bool,
-) -> Result<()> {
+) -> Result<String> {
     let input = input_path.context("--stdin is required for group (BAM input path)")?;
     if output_path.is_some() && !output_bam {
         bail!("--stdout requires --output-bam");
@@ -1113,12 +1325,10 @@ fn run_group_cmd(
 
     let stats = run_group(&config, input).context("group failed")?;
 
-    eprintln!(
+    Ok(format!(
         "Reads input: {}, output: {}",
         stats.input_reads, stats.output_reads,
-    );
-
-    Ok(())
+    ))
 }
 
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
@@ -1145,7 +1355,7 @@ fn run_dedup_cmd(
     filter_umi: bool,
     umi_whitelist_path: Option<&str>,
     umi_whitelist_paired_path: Option<&str>,
-) -> Result<()> {
+) -> Result<String> {
     let input = input_path.context("--stdin is required for dedup (BAM input path)")?;
     input_format.note_ignored_flags();
     output_format.note_ignored_flags();
@@ -1193,12 +1403,10 @@ fn run_dedup_cmd(
 
     let stats = run_dedup(&config, input).context("dedup failed")?;
 
-    eprintln!(
+    Ok(format!(
         "Reads input: {}, output: {}, positions: {}",
         stats.input_reads, stats.output_reads, stats.positions,
-    );
-
-    Ok(())
+    ))
 }
 
 fn load_umi_whitelist(path: &str, paired_path: Option<&str>) -> Result<HashSet<Vec<u8>>> {
@@ -1257,7 +1465,8 @@ fn run_count_cmd(
     per_cell: bool,
     wide_format: bool,
     edit_distance_threshold: u32,
-) -> Result<()> {
+    compresslevel: u32,
+) -> Result<String> {
     let input = input_path.context("--stdin is required for count (BAM input path)")?;
     input_format.note_ignored_flags();
 
@@ -1280,15 +1489,13 @@ fn run_count_cmd(
         reference: input_format.reference_filename.clone(),
     };
 
-    let mut output = open_output(output_path)?;
+    let mut output = open_output(output_path, compresslevel)?;
     let stats = run_count(&config, input, &mut output).context("count failed")?;
 
-    eprintln!(
+    Ok(format!(
         "Reads input: {}, counted: {}",
         stats.input_reads, stats.counted_reads,
-    );
-
-    Ok(())
+    ))
 }
 
 fn run_count_tab_cmd(
@@ -1298,7 +1505,8 @@ fn run_count_tab_cmd(
     separator: &str,
     method: &str,
     edit_distance_threshold: u32,
-) -> Result<()> {
+    compresslevel: u32,
+) -> Result<String> {
     let dedup_method = match method {
         "unique" => DedupMethod::Unique,
         "percentile" => DedupMethod::Percentile,
@@ -1319,15 +1527,13 @@ fn run_count_tab_cmd(
 
     let input = open_input(input_path)?;
     let mut reader = io::BufReader::new(input);
-    let mut output = open_output(output_path)?;
+    let mut output = open_output(output_path, compresslevel)?;
     let stats = run_count_tab(&config, &mut reader, &mut output).context("count_tab failed")?;
 
-    eprintln!(
+    Ok(format!(
         "Reads input: {}, counted: {}",
         stats.input_reads, stats.counted_reads,
-    );
-
-    Ok(())
+    ))
 }
 
 fn is_gzipped(path: &str) -> bool {
@@ -1338,6 +1544,9 @@ fn is_gzipped(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
+    use clap::error::ErrorKind;
+
     use super::*;
 
     fn parse(args: &[&str]) -> Cli {
@@ -1374,6 +1583,104 @@ mod tests {
             panic!("expected group");
         };
         assert_eq!(args.unmapped, "use");
+    }
+
+    #[test]
+    fn log_file_gets_header_summary_and_footer_and_is_appended_to() {
+        let path =
+            std::env::temp_dir().join(format!("umi-tools-rs-runlog-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let path_str = path.to_str().unwrap();
+        let args = ["dedup".to_string(), "--stdin=in.bam".to_string()];
+
+        for _ in 0..2 {
+            let log = RunLog::open(Some(path_str), &args, false).unwrap();
+            log.finish("Reads input: 1, output: 1").unwrap();
+        }
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 10, "two runs append two blocks:\n{text}");
+        assert!(lines[0].starts_with("# umi-tools-rs version: "));
+        assert_eq!(lines[1], "# output generated by dedup --stdin=in.bam");
+        assert!(lines[2].starts_with("# job started at "));
+        assert_eq!(lines[3], "Reads input: 1, output: 1");
+        assert!(lines[4].starts_with("# job finished at "));
+        assert_eq!(&lines[5..10], &lines[0..5]);
+    }
+
+    #[test]
+    fn quiet_log_creates_an_empty_file() {
+        let path =
+            std::env::temp_dir().join(format!("umi-tools-rs-quietlog-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let log = RunLog::open(Some(path.to_str().unwrap()), &[], true).unwrap();
+        log.finish("summary").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn verbose_and_error_are_shared_by_all_commands() {
+        let cli = parse(&["extract", "--bc-pattern=NNN", "-v", "0", "-E", "err.txt"]);
+        let common = cli.command.common();
+        assert_eq!(common.verbose, 0);
+        assert_eq!(common.error.as_deref(), Some("err.txt"));
+    }
+
+    #[test]
+    fn compresslevel_is_range_checked() {
+        assert!(Cli::try_parse_from(["umi-tools-rs", "extract", "--compresslevel=0"]).is_err());
+        let cli = parse(&["extract", "--bc-pattern=NNN", "--compresslevel=9"]);
+        assert_eq!(cli.command.common().compresslevel, 9);
+    }
+
+    #[test]
+    fn help_extended_and_version_work_on_subcommands() {
+        Cli::command().debug_assert();
+        let err = Cli::try_parse_from(["umi-tools-rs", "dedup", "--help-extended"])
+            .err()
+            .expect("help stops parsing");
+        assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+        let err = Cli::try_parse_from(["umi-tools-rs", "dedup", "--version"])
+            .err()
+            .expect("version stops parsing");
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn upstream_profiling_and_seed_flags_parse_everywhere() {
+        let required = |command: &str| {
+            if matches!(command, "extract" | "whitelist") {
+                "--bc-pattern=NNN"
+            } else {
+                "--stdin=in.bam"
+            }
+        };
+        for command in [
+            "extract",
+            "whitelist",
+            "group",
+            "dedup",
+            "count",
+            "count_tab",
+        ] {
+            let cli = parse(&[
+                command,
+                required(command),
+                "--temp-dir=/tmp",
+                "--timeit=t.tsv",
+                "--timeit-name=x",
+                "--timeit-header",
+                "--timeit-header",
+            ]);
+            assert_eq!(cli.command.common().timeit.as_deref(), Some("t.tsv"));
+        }
+        for command in ["extract", "whitelist", "count", "count_tab"] {
+            parse(&[command, required(command), "--random-seed=1"]);
+        }
     }
 
     #[test]
