@@ -471,6 +471,18 @@ struct InputFormatArgs {
     /// FASTA reference for reading and writing CRAM. Local path only; defaults to the UR field of the input header.
     #[arg(long = "reference-filename")]
     reference_filename: Option<String>,
+
+    /// htslib format options for reading. Accepted for umi-tools compatibility; has no effect.
+    #[arg(long = "input-options")]
+    input_options: Option<String>,
+}
+
+impl InputFormatArgs {
+    fn note_ignored_flags(&self) {
+        if self.input_options.is_some() {
+            note_ignored("--input-options");
+        }
+    }
 }
 
 /// Options shared by the commands that write alignments.
@@ -483,9 +495,19 @@ struct OutputFormatArgs {
     /// Output SAM (same as --out-format=sam)
     #[arg(short = 'o', long = "out-sam", action = ArgAction::SetTrue, overrides_with = "out_sam")]
     out_sam: bool,
+
+    /// htslib format options for writing. Accepted for umi-tools compatibility; has no effect.
+    #[arg(long = "output-options")]
+    output_options: Option<String>,
 }
 
 impl OutputFormatArgs {
+    fn note_ignored_flags(&self) {
+        if self.output_options.is_some() {
+            note_ignored("--output-options");
+        }
+    }
+
     fn resolve(&self, output_path: Option<&str>) -> Result<AlignmentFormat> {
         let explicit = self
             .out_format
@@ -495,6 +517,10 @@ impl OutputFormatArgs {
             .map_err(|name| anyhow::anyhow!("unknown output format '{name}'"))?;
         Ok(determine_format(output_path, self.out_sam, explicit))
     }
+}
+
+fn note_ignored(flag: &str) {
+    eprintln!("note: {flag} is accepted for umi-tools compatibility and has no effect");
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1026,6 +1052,8 @@ fn run_group_cmd(
     if output_path.is_some() && !output_bam {
         bail!("--stdout requires --output-bam");
     }
+    input_format.note_ignored_flags();
+    output_format.note_ignored_flags();
 
     let dedup_method = match method {
         "unique" => DedupMethod::Unique,
@@ -1119,6 +1147,8 @@ fn run_dedup_cmd(
     umi_whitelist_paired_path: Option<&str>,
 ) -> Result<()> {
     let input = input_path.context("--stdin is required for dedup (BAM input path)")?;
+    input_format.note_ignored_flags();
+    output_format.note_ignored_flags();
 
     let dedup_method = match method {
         "unique" => DedupMethod::Unique,
@@ -1229,6 +1259,7 @@ fn run_count_cmd(
     edit_distance_threshold: u32,
 ) -> Result<()> {
     let input = input_path.context("--stdin is required for count (BAM input path)")?;
+    input_format.note_ignored_flags();
 
     let dedup_method = match method {
         "unique" => DedupMethod::Unique,
