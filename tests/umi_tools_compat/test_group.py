@@ -28,9 +28,6 @@ ENABLED_TESTS = [
     "group_paired_use_unmapped",
 ]
 
-# Flags the Rust binary doesn't support yet — stripped before invocation.
-UNSUPPORTED_FLAG_RE = re.compile(r"--log=\S+|-L\s+\S+")
-
 
 def _read(path):
     """Read file, decode, strip comment lines (matching umi-tools test logic)."""
@@ -94,8 +91,6 @@ def test_group(
     opts = opts.replace("%TMP%", tmpdir)
     opts = re.sub(r"\n", "", opts)
 
-    # Strip unsupported flags
-    opts = UNSUPPORTED_FLAG_RE.sub("", opts)
 
     statement = f"/bin/bash -c '{rust_binary} {opts} {stdin_flag} > {stdout_path}'"
 

@@ -32,9 +32,6 @@ ENABLED_TESTS = [
     "dedup_bam_to_cram",
 ]
 
-# Flags the Rust binary doesn't support yet — stripped before invocation.
-UNSUPPORTED_FLAG_RE = re.compile(r"--log=\S+|-L\s+\S+")
-
 # Upstream points the CRAM tests at a reference on GitHub; use the local copy.
 REFERENCE_URL_RE = re.compile(r"(--reference-file\S*=)https://\S+/(\S+\.fa)")
 
@@ -119,8 +116,6 @@ def test_dedup(
     opts = opts.replace("%TMP%", tmpdir)
     opts = re.sub(r"\n", "", opts)
 
-    # Strip unsupported flags
-    opts = UNSUPPORTED_FLAG_RE.sub("", opts)
     opts = REFERENCE_URL_RE.sub(lambda m: f"{m.group(1)}{umi_tools_tests_dir}/{m.group(2)}", opts)
 
     statement = f"/bin/bash -c '{rust_binary} {opts} {stdin_flag} > {stdout_path}'"
