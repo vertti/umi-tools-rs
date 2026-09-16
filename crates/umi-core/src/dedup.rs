@@ -1692,7 +1692,62 @@ pub enum DedupError {
 
 #[cfg(test)]
 mod tests {
+    use rust_htslib::bam::HeaderView;
+
     use super::*;
+
+    fn record(flag: u16, cigar: &str) -> Record {
+        let header = HeaderView::from_bytes(b"@SQ\tSN:chr1\tLN:100000\n");
+        let line = format!("r\t{flag}\tchr1\t101\t60\t{cigar}\t*\t0\t0\t*\t*");
+        Record::from_sam(&header, line.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn read_position_matches_umi_tools() {
+        // Expected values from umi_tools.sam_methods.get_read_position via pysam (0-based).
+        let cases: [(u16, &str, f64, i64, i64, i64); 13] = [
+            (0, "10M", 4.0, 100, 100, 0),
+            (0, "5S10M", 4.0, 95, 95, 0),
+            (0, "10M5S", 4.0, 100, 100, 10),
+            (0, "10M5S", 5.0, 100, 100, 0),
+            (0, "3S10M5S", 4.0, 97, 97, 13),
+            (0, "10M100N10M", 4.0, 100, 100, 10),
+            (0, "2S10M100N10M", 4.0, 98, 98, 12),
+            (16, "10M5S", 4.0, 100, 115, 0),
+            (16, "5S10M", 4.0, 100, 110, 10),
+            (16, "10M100N10M5S", 4.0, 100, 225, 15),
+            (16, "10M100N10M", 4.0, 100, 220, 10),
+            (0, "4M2I6M50N10M", 4.0, 100, 100, 10),
+            (0, "4M2D6M50N10M", 4.0, 100, 100, 12),
+        ];
+        for (flag, cigar, threshold, start, pos, splice) in cases {
+            let p = get_read_position(&record(flag, cigar), threshold);
+            assert_eq!(
+                (p.start, p.pos, p.splice_offset),
+                (start, pos, splice),
+                "flag={flag} cigar={cigar} threshold={threshold}"
+            );
+        }
+    }
+
+    #[test]
+    fn key_parts_follow_options() {
+        // read_length is the SEQ length as stored, soft clips included.
+        let header = HeaderView::from_bytes(b"@SQ\tSN:chr1\tLN:100000\n");
+        let line = b"r\t0\tchr1\t101\t60\t10M5S\t*\t0\t0\tACGTACGTACGTACG\t*";
+        let read = Record::from_sam(&header, line).unwrap();
+        let position = get_read_position(&read, 4.0);
+        assert_eq!(
+            PositionOptions::default().key_parts(&position, &read),
+            (0, 0)
+        );
+        let all = PositionOptions {
+            spliced_is_unique: true,
+            soft_clip_threshold: 4.0,
+            read_length: true,
+        };
+        assert_eq!(all.key_parts(&position, &read), (10, 15));
+    }
 
     #[test]
     fn python_random_matches() {
