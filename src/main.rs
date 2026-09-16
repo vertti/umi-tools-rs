@@ -386,6 +386,9 @@ struct CountArgs {
     #[arg(short = 'S', long = "stdout")]
     output: Option<String>,
 
+    #[command(flatten)]
+    input_format: InputFormatArgs,
+
     /// Dedup method: unique, percentile, cluster, adjacency, directional
     #[arg(long = "method", default_value = "directional")]
     method: String,
@@ -677,6 +680,7 @@ fn main() -> Result<()> {
         Commands::Count(CountArgs {
             input,
             output,
+            input_format,
             method,
             gene_tag,
             skip_tags_regex,
@@ -689,6 +693,7 @@ fn main() -> Result<()> {
         }) => run_count_cmd(
             input.as_deref(),
             output.as_deref(),
+            &input_format,
             &method,
             &gene_tag,
             skip_tags_regex.as_deref(),
@@ -1215,6 +1220,7 @@ fn load_umi_whitelist(path: &str, paired_path: Option<&str>) -> Result<HashSet<V
 fn run_count_cmd(
     input_path: Option<&str>,
     output_path: Option<&str>,
+    input_format: &InputFormatArgs,
     method: &str,
     gene_tag: &str,
     skip_tags_regex: Option<&str>,
@@ -1240,6 +1246,7 @@ fn run_count_cmd(
         per_cell,
         wide_format,
         edit_distance_threshold,
+        reference: input_format.reference_filename.clone(),
     };
 
     let mut output = open_output(output_path)?;
