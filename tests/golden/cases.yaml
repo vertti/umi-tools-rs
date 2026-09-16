@@ -1,0 +1,3 @@
+# Cases for flags the upstream test suite does not exercise. Same schema as
+# upstream tests/tests.yaml: stdin is a file in the upstream tests directory,
+# references live here and are regenerated with tests/golden/generate.py.
