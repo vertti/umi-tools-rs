@@ -542,6 +542,10 @@ struct CommonArgs {
     /// Verbosity: 0 silences the run summary and notes; higher levels have no further effect
     #[arg(short = 'v', long = "verbose", default_value = "1")]
     verbose: u8,
+
+    /// gzip level for .gz outputs, 1-9. umi-tools defaults to 6.
+    #[arg(long = "compresslevel", default_value = "3", value_parser = clap::value_parser!(u32).range(1..=9))]
+    compresslevel: u32,
 }
 
 impl Commands {
@@ -684,7 +688,7 @@ fn run(command: Commands) -> Result<String> {
             filtered_out,
             filtered_out2,
             either_read,
-            common: _,
+            common,
         }) => {
             let is_paired = read2_in.is_some();
             if !is_paired && bc_pattern.is_none() {
@@ -715,6 +719,7 @@ fn run(command: Commands) -> Result<String> {
                 filtered_out.as_deref(),
                 filtered_out2.as_deref(),
                 either_read,
+                common.compresslevel,
             )
         }
         Commands::Whitelist(WhitelistArgs {
@@ -731,7 +736,7 @@ fn run(command: Commands) -> Result<String> {
             _plot_prefix: _,
             filtered_out,
             subset_reads,
-            common: _,
+            common,
         }) => run_whitelist_cmd(
             &bc_pattern,
             &extract_method,
@@ -745,6 +750,7 @@ fn run(command: Commands) -> Result<String> {
             ed_above_threshold.as_deref(),
             filtered_out.as_deref(),
             subset_reads,
+            common.compresslevel,
         ),
         Commands::Group(GroupArgs {
             input,
@@ -852,7 +858,7 @@ fn run(command: Commands) -> Result<String> {
             wide_format,
             edit_distance_threshold,
             _random_seed: _,
-            common: _,
+            common,
         }) => run_count_cmd(
             input.as_deref(),
             output.as_deref(),
@@ -863,6 +869,7 @@ fn run(command: Commands) -> Result<String> {
             per_cell,
             wide_format,
             edit_distance_threshold,
+            common.compresslevel,
         ),
         Commands::CountTab(CountTabArgs {
             input,
@@ -871,7 +878,7 @@ fn run(command: Commands) -> Result<String> {
             separator,
             method,
             edit_distance_threshold,
-            common: _,
+            common,
         }) => run_count_tab_cmd(
             input.as_deref(),
             output.as_deref(),
@@ -879,6 +886,7 @@ fn run(command: Commands) -> Result<String> {
             &separator,
             &method,
             edit_distance_threshold,
+            common.compresslevel,
         ),
     }
 }
@@ -916,13 +924,16 @@ fn open_input(path: Option<&str>) -> Result<Box<dyn Read + Send>> {
     }
 }
 
-fn open_output(path: Option<&str>) -> Result<Box<dyn Write>> {
+fn open_output(path: Option<&str>, compresslevel: u32) -> Result<Box<dyn Write>> {
     match path {
         Some(p) => {
             let file =
                 File::create(p).with_context(|| format!("failed to create output file: {p}"))?;
             if is_gzipped(p) {
-                Ok(Box::new(GzEncoder::new(file, Compression::new(3))))
+                Ok(Box::new(GzEncoder::new(
+                    file,
+                    Compression::new(compresslevel),
+                )))
             } else {
                 Ok(Box::new(file))
             }
@@ -953,6 +964,7 @@ fn run_extract(
     filtered_out_path: Option<&str>,
     filtered_out2_path: Option<&str>,
     either_read: bool,
+    compresslevel: u32,
 ) -> Result<String> {
     let pattern = bc_pattern
         .map(|p| parse_pattern(p, extract_method, prime3))
@@ -999,32 +1011,32 @@ fn run_extract(
     let stats = if let Some(r2_path) = read2_in_path {
         let reader2 = open_input(Some(r2_path))?;
         if either_read {
-            let writer1 = open_output(output_path)?;
-            let writer2 = open_output(read2_out_path)
+            let writer1 = open_output(output_path, compresslevel)?;
+            let writer2 = open_output(read2_out_path, compresslevel)
                 .context("--read2-out is required when --either-read is specified")?;
             extract_reads_either_read(&config, reader1, reader2, writer1, writer2)
                 .context("either-read extraction failed")?
         } else if read2_stdout {
-            let writer = open_output(output_path)?;
+            let writer = open_output(output_path, compresslevel)?;
             let filt1 = filtered_out_path
-                .map(|p| open_output(Some(p)))
+                .map(|p| open_output(Some(p), compresslevel))
                 .transpose()
                 .context("failed to open --filtered-out")?;
             let filt2 = filtered_out2_path
-                .map(|p| open_output(Some(p)))
+                .map(|p| open_output(Some(p), compresslevel))
                 .transpose()
                 .context("failed to open --filtered-out2")?;
             extract_reads_paired_r1_pattern(&config, reader1, reader2, writer, filt1, filt2)
                 .context("paired-end extraction failed")?
         } else {
-            let writer1 = open_output(output_path)?;
-            let writer2 = open_output(read2_out_path)
+            let writer1 = open_output(output_path, compresslevel)?;
+            let writer2 = open_output(read2_out_path, compresslevel)
                 .context("--read2-out is required when --read2-in is specified")?;
             extract_reads_paired(&config, reader1, reader2, writer1, writer2)
                 .context("paired-end extraction failed")?
         }
     } else {
-        let writer1 = open_output(output_path)?;
+        let writer1 = open_output(output_path, compresslevel)?;
         extract_reads(&config, reader1, writer1).context("extraction failed")?
     };
 
@@ -1112,6 +1124,7 @@ fn run_whitelist_cmd(
     ed_above_threshold: Option<&str>,
     filtered_out_path: Option<&str>,
     subset_reads: usize,
+    compresslevel: u32,
 ) -> Result<String> {
     let pattern = parse_pattern(bc_pattern, extract_method, prime3)?;
 
@@ -1142,9 +1155,9 @@ fn run_whitelist_cmd(
     };
 
     let reader = open_input(input_path)?;
-    let writer = open_output(output_path)?;
+    let writer = open_output(output_path, compresslevel)?;
     let filt_out = filtered_out_path
-        .map(|p| open_output(Some(p)))
+        .map(|p| open_output(Some(p), compresslevel))
         .transpose()
         .context("failed to open --filtered-out")?;
 
@@ -1386,6 +1399,7 @@ fn run_count_cmd(
     per_cell: bool,
     wide_format: bool,
     edit_distance_threshold: u32,
+    compresslevel: u32,
 ) -> Result<String> {
     let input = input_path.context("--stdin is required for count (BAM input path)")?;
     input_format.note_ignored_flags();
@@ -1409,7 +1423,7 @@ fn run_count_cmd(
         reference: input_format.reference_filename.clone(),
     };
 
-    let mut output = open_output(output_path)?;
+    let mut output = open_output(output_path, compresslevel)?;
     let stats = run_count(&config, input, &mut output).context("count failed")?;
 
     Ok(format!(
@@ -1425,6 +1439,7 @@ fn run_count_tab_cmd(
     separator: &str,
     method: &str,
     edit_distance_threshold: u32,
+    compresslevel: u32,
 ) -> Result<String> {
     let dedup_method = match method {
         "unique" => DedupMethod::Unique,
@@ -1446,7 +1461,7 @@ fn run_count_tab_cmd(
 
     let input = open_input(input_path)?;
     let mut reader = io::BufReader::new(input);
-    let mut output = open_output(output_path)?;
+    let mut output = open_output(output_path, compresslevel)?;
     let stats = run_count_tab(&config, &mut reader, &mut output).context("count_tab failed")?;
 
     Ok(format!(
@@ -1544,6 +1559,13 @@ mod tests {
         let common = cli.command.common();
         assert_eq!(common.verbose, 0);
         assert_eq!(common.error.as_deref(), Some("err.txt"));
+    }
+
+    #[test]
+    fn compresslevel_is_range_checked() {
+        assert!(Cli::try_parse_from(["umi-tools-rs", "extract", "--compresslevel=0"]).is_err());
+        let cli = parse(&["extract", "--bc-pattern=NNN", "--compresslevel=9"]);
+        assert_eq!(cli.command.common().compresslevel, 9);
     }
 
     #[test]
