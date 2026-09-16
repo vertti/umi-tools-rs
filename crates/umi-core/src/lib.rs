@@ -1,3 +1,4 @@
+pub mod alignment_io;
 pub mod count;
 pub mod dedup;
 pub mod error;

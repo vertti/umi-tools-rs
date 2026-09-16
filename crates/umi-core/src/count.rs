@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, BufRead, Write as IoWrite};
 
-use rust_htslib::bam::{self, Read as BamRead, record::Aux};
+use rust_htslib::bam::{Read as BamRead, record::Aux};
 use thiserror::Error;
 
+use crate::alignment_io;
 use crate::dedup::{DedupMethod, count_umis, extract_umi_umis};
 
 #[derive(Error, Debug)]
@@ -25,6 +26,7 @@ pub struct CountConfig {
     pub per_cell: bool,
     pub wide_format: bool,
     pub edit_distance_threshold: u32,
+    pub reference: Option<String>,
 }
 
 pub struct CountStats {
@@ -48,8 +50,8 @@ pub fn run_count(
     bam_path: &str,
     output: &mut dyn IoWrite,
 ) -> Result<CountStats, CountError> {
-    let mut reader =
-        bam::Reader::from_path(bam_path).map_err(|e| CountError::BamOpen(e.to_string()))?;
+    let mut reader = alignment_io::open_reader(bam_path, config.reference.as_deref())
+        .map_err(|e| CountError::BamOpen(e.to_string()))?;
 
     let skip_regex = config
         .skip_tags_regex

@@ -17,3 +17,21 @@ jobs:
       - run: mise run ci
         env:
           MISE_AUTO_INSTALL: "false"
+
+  compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: CGATOxford/UMI-tools
+          ref: c457eefc5e0c47368cf3652b9b6d497b78c3050a
+          path: umi-tools
+      - uses: jdx/mise-action@v4
+        with:
+          install_args: "rust uv"
+      - uses: Swatinem/rust-cache@v2
+      - run: mise run compat
+        env:
+          MISE_AUTO_INSTALL: "false"
+          UMI_TOOLS_TESTS_DIR: ${{ github.workspace }}/umi-tools/tests
