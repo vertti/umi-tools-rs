@@ -4,10 +4,11 @@ use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
+use umi_core::alignment_io::{AlignmentFormat, determine_format};
 use umi_core::count::{CountConfig, CountTabConfig, run_count, run_count_tab};
 use umi_core::dedup::{DedupConfig, DedupMethod, run_dedup};
 use umi_core::extract::{
@@ -285,9 +286,15 @@ struct DedupArgs {
     #[arg(long = "ignore-umi")]
     ignore_umi: bool,
 
-    /// Output SAM instead of BAM
-    #[arg(long = "out-sam")]
-    out_sam: bool,
+    /// Output file (default: stdout)
+    #[arg(short = 'S', long = "stdout")]
+    output: Option<String>,
+
+    #[command(flatten)]
+    input_format: InputFormatArgs,
+
+    #[command(flatten)]
+    output_format: OutputFormatArgs,
 
     /// Random seed for reproducible tie-breaking
     #[arg(long = "random-seed", default_value = "0")]
@@ -436,6 +443,46 @@ struct CountTabArgs {
     _log: Option<String>,
 }
 
+/// Options shared by the commands that read alignments.
+#[derive(clap::Args)]
+struct InputFormatArgs {
+    /// Input format: sam, bam or cram. Detected from the file content, so this has no effect.
+    #[arg(long = "in-format", value_parser = ["sam", "bam", "cram"])]
+    _in_format: Option<String>,
+
+    /// Input is SAM. Detected from the file content, so this has no effect.
+    #[arg(short = 'i', long = "in-sam", action = ArgAction::SetTrue, overrides_with = "_in_sam")]
+    _in_sam: bool,
+
+    /// FASTA reference for reading and writing CRAM. Local path only; defaults to the UR field of the input header.
+    #[arg(long = "reference-filename")]
+    reference_filename: Option<String>,
+}
+
+/// Options shared by the commands that write alignments.
+#[derive(clap::Args)]
+struct OutputFormatArgs {
+    /// Output format: sam, bam or cram (default: from the --stdout extension, else bam)
+    #[arg(long = "out-format", value_parser = ["sam", "bam", "cram"])]
+    out_format: Option<String>,
+
+    /// Output SAM (same as --out-format=sam)
+    #[arg(short = 'o', long = "out-sam", action = ArgAction::SetTrue, overrides_with = "out_sam")]
+    out_sam: bool,
+}
+
+impl OutputFormatArgs {
+    fn resolve(&self, output_path: Option<&str>) -> Result<AlignmentFormat> {
+        let explicit = self
+            .out_format
+            .as_deref()
+            .map(AlignmentFormat::parse)
+            .transpose()
+            .map_err(|name| anyhow::anyhow!("unknown output format '{name}'"))?;
+        Ok(determine_format(output_path, self.out_sam, explicit))
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -568,7 +615,9 @@ fn main() -> Result<()> {
             input,
             method,
             ignore_umi,
-            out_sam,
+            output,
+            input_format,
+            output_format,
             random_seed,
             umi_separator,
             chrom,
@@ -590,7 +639,9 @@ fn main() -> Result<()> {
             input.as_deref(),
             &method,
             ignore_umi,
-            out_sam,
+            output.as_deref(),
+            &input_format,
+            &output_format,
             random_seed,
             &umi_separator,
             chrom.as_deref(),
@@ -1019,7 +1070,9 @@ fn run_dedup_cmd(
     input_path: Option<&str>,
     method: &str,
     ignore_umi: bool,
-    out_sam: bool,
+    output_path: Option<&str>,
+    input_format: &InputFormatArgs,
+    output_format: &OutputFormatArgs,
     random_seed: u64,
     umi_separator: &str,
     chrom: Option<&str>,
@@ -1063,7 +1116,9 @@ fn run_dedup_cmd(
         ignore_umi,
         umi_separator: sep_byte,
         random_seed,
-        out_sam,
+        output_path: output_path.map(String::from),
+        output_format: output_format.resolve(output_path)?,
+        reference: input_format.reference_filename.clone(),
         chrom: chrom.map(String::from),
         edit_distance_threshold,
         subset,
@@ -1078,8 +1133,7 @@ fn run_dedup_cmd(
         umi_whitelist,
     };
 
-    let mut stdout = io::stdout().lock();
-    let stats = run_dedup(&config, input, &mut stdout).context("dedup failed")?;
+    let stats = run_dedup(&config, input).context("dedup failed")?;
 
     eprintln!(
         "Reads input: {}, output: {}, positions: {}",

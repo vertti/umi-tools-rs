@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{self, Write as IoWrite};
+use std::io::Write as IoWrite;
 
-use rust_htslib::bam::{self, Read as BamRead, Record};
+use rust_htslib::bam::{Read as BamRead, Record};
+
+use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
 
 /// Trait for RNG used in reservoir-sampling tie-breaks.
 ///
@@ -202,7 +204,9 @@ pub struct DedupConfig {
     pub ignore_umi: bool,
     pub umi_separator: u8,
     pub random_seed: u64,
-    pub out_sam: bool,
+    pub output_path: Option<String>,
+    pub output_format: AlignmentFormat,
+    pub reference: Option<String>,
     pub chrom: Option<String>,
     pub edit_distance_threshold: u32,
     pub subset: Option<f32>,
@@ -981,14 +985,15 @@ struct RandomReadGenerator {
 impl RandomReadGenerator {
     fn new(
         bam_path: &str,
+        reference: Option<&str>,
         umi_separator: u8,
         extract_method: &str,
         umi_tag: Option<&str>,
         chrom: Option<&str>,
         seed: u32,
     ) -> Result<Self, DedupError> {
-        let mut reader =
-            bam::Reader::from_path(bam_path).map_err(|e| DedupError::BamOpen(e.to_string()))?;
+        let mut reader = alignment_io::open_reader(bam_path, reference)
+            .map_err(|e| DedupError::BamOpen(e.to_string()))?;
 
         let chrom_tid: Option<i32> = chrom
             .map(|c| {
@@ -1329,23 +1334,20 @@ impl StatsCollector {
 ///
 /// Returns `DedupError` on BAM I/O failures or unknown chromosome filter.
 #[allow(clippy::too_many_lines)]
-pub fn run_dedup(
-    config: &DedupConfig,
-    input_path: &str,
-    output: &mut dyn io::Write,
-) -> Result<DedupStats, DedupError> {
-    let mut reader =
-        bam::Reader::from_path(input_path).map_err(|e| DedupError::BamOpen(e.to_string()))?;
-    let header = bam::Header::from_template(reader.header());
+pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, DedupError> {
+    let mut reader = alignment_io::open_reader(input_path, config.reference.as_deref())
+        .map_err(|e| DedupError::BamOpen(e.to_string()))?;
+    let header = alignment_io::coordinate_sorted_header(reader.header());
 
-    let format = if config.out_sam {
-        bam::Format::Sam
-    } else {
-        bam::Format::Bam
-    };
-
-    let mut writer = bam::Writer::from_stdout(&header, format)
-        .map_err(|e| DedupError::BamWrite(e.to_string()))?;
+    let mut writer = alignment_io::open_writer(
+        &header,
+        AlignmentOutput {
+            path: config.output_path.as_deref(),
+            format: config.output_format,
+            reference: config.reference.as_deref(),
+        },
+    )
+    .map_err(|e| DedupError::BamWrite(e.to_string()))?;
 
     // Optional chromosome filter
     let chrom_filter: Option<i32> = config
@@ -1394,6 +1396,7 @@ pub fn run_dedup(
         .map(|_| {
             let read_gen = RandomReadGenerator::new(
                 input_path,
+                config.reference.as_deref(),
                 config.umi_separator,
                 &config.extract_umi_method,
                 config.umi_tag.as_deref(),
@@ -1518,8 +1521,8 @@ pub fn run_dedup(
         for r1 in &output_records {
             mate_set.insert((r1.qname().to_vec(), r1.mtid(), r1.mpos()));
         }
-        let mut reader2 =
-            bam::Reader::from_path(input_path).map_err(|e| DedupError::BamOpen(e.to_string()))?;
+        let mut reader2 = alignment_io::open_reader(input_path, config.reference.as_deref())
+            .map_err(|e| DedupError::BamOpen(e.to_string()))?;
         for result in reader2.records() {
             let record = result.map_err(|e| DedupError::BamRead(e.to_string()))?;
             if record.is_unmapped() || record.is_mate_unmapped() {
@@ -1545,9 +1548,6 @@ pub fn run_dedup(
             .map_err(|e| DedupError::BamWrite(e.to_string()))?;
     }
 
-    // Drop writer to flush SAM/BAM output.
-    // The output arg is unused for now (Writer writes to stdout directly).
-    let _ = output;
     drop(writer);
 
     // Write stats files if requested
