@@ -69,3 +69,20 @@ umi-tools-rs dedup --method=directional --stdin=aligned.bam --stdout=deduped.bam
 # Count unique molecules per gene
 umi-tools-rs count --gene-tag=XF --per-cell --stdin=aligned.bam > counts.tsv
 ```
+
+### CRAM
+
+`dedup`, `group` and `count` read CRAM, and `dedup` and `group` write it. The output format follows the `--stdout` file extension, or set it with `--out-format=cram`. Pass `--reference-filename` when the `UR` field of the input header does not point at a local FASTA:
+
+```sh
+umi-tools-rs dedup --stdin=aligned.cram --reference-filename=genome.fa --stdout=deduped.cram
+```
+
+## Compatibility notes
+
+Optparse-style abbreviations work as in UMI-tools, for example `--unmapped` for `--unmapped-reads`. Flags UMI-tools accepts that umi-tools-rs does not implement are rejected with an error rather than silently ignored. Known differences:
+
+- `--reference-filename` takes a local path; URL references are not fetched.
+- `--input-options` and `--output-options` print a note and are not applied.
+- `--in-format` and `--in-sam` have no effect because the input format is detected from the file content.
+- Help output is rendered by clap and does not match the UMI-tools text.
