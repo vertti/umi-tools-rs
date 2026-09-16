@@ -41,6 +41,7 @@ pub struct GroupConfig {
     pub edit_distance_threshold: u32,
     pub position: PositionOptions,
     pub subset: Option<f32>,
+    pub mapping_quality: u8,
     pub per_gene: bool,
     pub gene_tag: Option<String>,
     pub skip_tags_regex: Option<String>,
@@ -482,6 +483,10 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     UnmappedHandling::Use => {} // fall through to grouping with TLEN=0
                 }
             }
+        }
+
+        if record.mapq() < config.mapping_quality {
+            continue;
         }
 
         if config.per_gene {

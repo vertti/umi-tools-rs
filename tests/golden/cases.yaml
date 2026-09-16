@@ -33,3 +33,21 @@ group_read_length:
   outputs: [group_read_length.tsv]
   references: [group_read_length.tsv.gz]
   options: group --paired --random-seed=123456789 --read-length --group-out=group_read_length.tsv
+
+dedup_paired_mapq:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [dedup_paired_mapq.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --mapping-quality=20
+
+dedup_single_mapq:
+  stdin: chr19_gene_tags.bam
+  outputs: [stdout]
+  references: [dedup_single_mapq.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --mapping-quality=20
+
+group_mapq:
+  stdin: paired_sub.bam
+  outputs: [group_mapq.tsv]
+  references: [group_mapq.tsv.gz]
+  options: group --paired --random-seed=123456789 --mapping-quality=20 --group-out=group_mapq.tsv

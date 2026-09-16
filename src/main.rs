@@ -266,6 +266,10 @@ struct GroupArgs {
     #[command(flatten)]
     position: PositionArgs,
 
+    /// Minimum mapping quality for a read to be retained
+    #[arg(long = "mapping-quality", default_value = "0")]
+    mapping_quality: u8,
+
     /// Include unmapped reads in output (alias for --unmapped-reads=output)
     #[arg(long = "output-unmapped")]
     output_unmapped: bool,
@@ -346,6 +350,10 @@ struct DedupArgs {
     #[command(flatten)]
     position: PositionArgs,
 
+    /// Minimum mapping quality for a read to be retained
+    #[arg(long = "mapping-quality", default_value = "0")]
+    mapping_quality: u8,
+
     /// Random subset of reads to process (0.0-1.0)
     #[arg(long = "subset")]
     subset: Option<f32>,
@@ -410,6 +418,10 @@ struct CountArgs {
 
     #[command(flatten)]
     input_format: InputFormatArgs,
+
+    /// Minimum mapping quality for a read to be retained
+    #[arg(long = "mapping-quality", default_value = "0")]
+    mapping_quality: u8,
 
     /// Dedup method: unique, percentile, cluster, adjacency, directional
     #[arg(long = "method", default_value = "directional")]
@@ -864,6 +876,7 @@ fn run(command: Commands) -> Result<String> {
             no_sort_output,
             subset,
             position,
+            mapping_quality,
             output_unmapped,
             paired,
             chimeric_pairs,
@@ -888,6 +901,7 @@ fn run(command: Commands) -> Result<String> {
             no_sort_output,
             subset,
             position.options(),
+            mapping_quality,
             output_unmapped,
             paired,
             chimeric_pairs.as_deref(),
@@ -909,6 +923,7 @@ fn run(command: Commands) -> Result<String> {
             chrom,
             edit_distance_threshold,
             position,
+            mapping_quality,
             subset,
             extract_umi_method,
             umi_tag,
@@ -934,6 +949,7 @@ fn run(command: Commands) -> Result<String> {
             chrom.as_deref(),
             edit_distance_threshold,
             position.options(),
+            mapping_quality,
             subset,
             &extract_umi_method,
             umi_tag.as_deref(),
@@ -951,6 +967,7 @@ fn run(command: Commands) -> Result<String> {
             input,
             output,
             input_format,
+            mapping_quality,
             method,
             gene_tag,
             skip_tags_regex,
@@ -964,6 +981,7 @@ fn run(command: Commands) -> Result<String> {
             input.as_deref(),
             output.as_deref(),
             &input_format,
+            mapping_quality,
             &method,
             &gene_tag,
             skip_tags_regex.as_deref(),
@@ -1288,6 +1306,7 @@ fn run_group_cmd(
     no_sort_output: bool,
     subset: Option<f32>,
     position: PositionOptions,
+    mapping_quality: u8,
     output_unmapped: bool,
     paired: bool,
     chimeric_pairs: Option<&str>,
@@ -1352,6 +1371,7 @@ fn run_group_cmd(
         edit_distance_threshold: 1,
         position,
         subset,
+        mapping_quality,
         per_gene,
         gene_tag: gene_tag.map(String::from),
         skip_tags_regex: skip_tags_regex.map(String::from),
@@ -1382,6 +1402,7 @@ fn run_dedup_cmd(
     chrom: Option<&str>,
     edit_distance_threshold: u32,
     position: PositionOptions,
+    mapping_quality: u8,
     subset: Option<f32>,
     extract_umi_method: &str,
     umi_tag: Option<&str>,
@@ -1430,6 +1451,7 @@ fn run_dedup_cmd(
         edit_distance_threshold,
         position,
         subset,
+        mapping_quality,
         extract_umi_method: extract_umi_method.to_string(),
         umi_tag: umi_tag.map(String::from),
         per_gene,
@@ -1499,6 +1521,7 @@ fn run_count_cmd(
     input_path: Option<&str>,
     output_path: Option<&str>,
     input_format: &InputFormatArgs,
+    mapping_quality: u8,
     method: &str,
     gene_tag: &str,
     skip_tags_regex: Option<&str>,
@@ -1527,6 +1550,7 @@ fn run_count_cmd(
         wide_format,
         edit_distance_threshold,
         reference: input_format.reference_filename.clone(),
+        mapping_quality,
     };
 
     let mut output = open_output(output_path, compresslevel)?;

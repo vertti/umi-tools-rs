@@ -212,6 +212,7 @@ pub struct DedupConfig {
     pub edit_distance_threshold: u32,
     pub position: PositionOptions,
     pub subset: Option<f32>,
+    pub mapping_quality: u8,
     pub extract_umi_method: String,
     pub umi_tag: Option<String>,
     pub per_gene: bool,
@@ -1534,6 +1535,10 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
 
         // Subset check consumes one RNG call per mapped read (before buffer.add)
         if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
+            continue;
+        }
+
+        if record.mapq() < config.mapping_quality {
             continue;
         }
 
