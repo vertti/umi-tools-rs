@@ -4,5 +4,9 @@ version = "0.0.0"
 requires-python = ">=3.10"
 
 [dependency-groups]
-test = ["pytest", "pyyaml"]
+test = [
+    "pysam>=0.23.3",
+    "pytest",
+    "pyyaml",
+]
 bench = ["umi_tools"]

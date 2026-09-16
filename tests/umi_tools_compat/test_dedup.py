@@ -27,14 +27,38 @@ ENABLED_TESTS = [
     "dedup_single_stats",
     "dedup_paired_ignore_tlen_tag",
     "dedup_paired_umi_whitelist",
+    "dedup_from_cram",
+    "dedup_to_cram",
+    "dedup_bam_to_cram",
 ]
 
 # Flags the Rust binary doesn't support yet — stripped before invocation.
 UNSUPPORTED_FLAG_RE = re.compile(r"--log=\S+|-L\s+\S+")
 
+# Upstream points the CRAM tests at a reference on GitHub; use the local copy.
+REFERENCE_URL_RE = re.compile(r"(--reference-file\S*=)https://\S+/(\S+\.fa)")
 
-def _read(path):
+
+def _read_cram(path, tests_dir):
+    """Decode CRAM to header text plus SAM records, like the upstream harness.
+
+    The reference is looked up next to the test data by the basename of the
+    UR field, so the GitHub URL upstream records in the header is never fetched.
+    """
+    import pysam
+
+    with pysam.AlignmentFile(path) as f:
+        urls = {sq["UR"] for sq in f.header.to_dict()["SQ"]}
+    assert len(urls) == 1, "harness supports a single reference per CRAM"
+    reference = os.path.join(tests_dir, os.path.basename(urls.pop()))
+    with pysam.AlignmentFile(path, reference_filename=reference) as f:
+        return [f.text] + [read.to_string() for read in f.fetch(until_eof=True)]
+
+
+def _read(path, cram=False, tests_dir=None):
     """Read file, decode, strip comment lines (matching umi-tools test logic)."""
+    if cram:
+        return _read_cram(path, tests_dir)
     if path.endswith(".gz"):
         with gzip.open(path) as f:
             data = f.read()
@@ -97,6 +121,7 @@ def test_dedup(
 
     # Strip unsupported flags
     opts = UNSUPPORTED_FLAG_RE.sub("", opts)
+    opts = REFERENCE_URL_RE.sub(lambda m: f"{m.group(1)}{umi_tools_tests_dir}/{m.group(2)}", opts)
 
     statement = f"/bin/bash -c '{rust_binary} {opts} {stdin_flag} > {stdout_path}'"
 
@@ -124,8 +149,9 @@ def test_dedup(
         assert os.path.exists(output_path), f"Output file missing: {output_path}"
         assert os.path.exists(ref_path), f"Reference file missing: {ref_path}"
 
-        actual = _read(output_path)
-        expected = _read(ref_path)
+        cram = ref_name.endswith(".cram")
+        actual = _read(output_path, cram, umi_tools_tests_dir)
+        expected = _read(ref_path, cram, umi_tools_tests_dir)
 
         if sort:
             actual = sorted(actual)
