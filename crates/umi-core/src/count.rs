@@ -5,7 +5,8 @@ use rust_htslib::bam::{Read as BamRead, record::Aux};
 use thiserror::Error;
 
 use crate::alignment_io;
-use crate::dedup::{DedupMethod, count_umis, extract_umi_umis};
+use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
+use crate::dedup::{DedupMethod, count_umis};
 
 #[derive(Error, Debug)]
 pub enum CountError {
@@ -17,13 +18,16 @@ pub enum CountError {
     InvalidRegex(String),
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error(transparent)]
+    Barcode(#[from] BarcodeError),
 }
 
 pub struct CountConfig {
     pub method: DedupMethod,
     pub gene_tag: String,
     pub skip_tags_regex: Option<String>,
-    pub per_cell: bool,
+    pub barcode: BarcodeExtractor,
+    pub ignore_umi: bool,
     pub wide_format: bool,
     pub edit_distance_threshold: u32,
     pub reference: Option<String>,
@@ -83,6 +87,12 @@ pub fn run_count(
             continue;
         }
 
+        let Some(Barcode { umi, cell }) =
+            config.barcode.for_grouping(&record, config.ignore_umi)?
+        else {
+            continue;
+        };
+
         let gene = match record.aux(config.gene_tag.as_bytes()) {
             Ok(Aux::String(s)) => s.to_string(),
             _ => continue,
@@ -92,13 +102,10 @@ pub fn run_count(
             continue;
         }
 
-        let (umi, cell) = extract_umi_umis(record.qname());
-
-        let cell_key = if config.per_cell {
-            cell.map(|c| String::from_utf8_lossy(&c).into_owned())
-        } else {
-            None
-        };
+        let cell_key = config
+            .barcode
+            .per_cell
+            .then(|| String::from_utf8_lossy(&cell).into_owned());
 
         stats.counted_reads += 1;
 
@@ -106,9 +113,9 @@ pub fn run_count(
         cell_map.add(cell_key, umi);
     }
 
-    if config.per_cell && config.wide_format {
+    if config.barcode.per_cell && config.wide_format {
         write_wide_format(&data, config, output)?;
-    } else if config.per_cell {
+    } else if config.barcode.per_cell {
         write_long_format(&data, config, output)?;
     } else {
         write_gene_counts(&data, config, output)?;
