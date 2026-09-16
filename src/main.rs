@@ -13,7 +13,9 @@ use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use umi_core::alignment_io::{AlignmentFormat, determine_format};
 use umi_core::count::{CountConfig, CountTabConfig, run_count, run_count_tab};
-use umi_core::dedup::{DedupConfig, DedupMethod, PositionOptions, run_dedup};
+use umi_core::dedup::{
+    DedupConfig, DedupMethod, MultimappingDetection, PositionOptions, run_dedup,
+};
 use umi_core::extract::{
     ExtractConfig, QualityEncoding, extract_reads, extract_reads_either_read, extract_reads_paired,
     extract_reads_paired_r1_pattern,
@@ -270,6 +272,14 @@ struct GroupArgs {
     #[arg(long = "mapping-quality", default_value = "0")]
     mapping_quality: u8,
 
+    /// Accepted for umi-tools compatibility; group keeps every read, so the tag is never consulted
+    #[arg(long = "multimapping-detection-method", value_parser = ["NH", "X0", "XT"])]
+    multimapping_detection_method: Option<String>,
+
+    /// Buffer a whole contig before grouping instead of a 1 kb window; uses more memory
+    #[arg(long = "buffer-whole-contig", alias = "whole-contig", action = ArgAction::SetTrue, overrides_with = "buffer_whole_contig")]
+    buffer_whole_contig: bool,
+
     /// Include unmapped reads in output (alias for --unmapped-reads=output)
     #[arg(long = "output-unmapped")]
     output_unmapped: bool,
@@ -353,6 +363,14 @@ struct DedupArgs {
     /// Minimum mapping quality for a read to be retained
     #[arg(long = "mapping-quality", default_value = "0")]
     mapping_quality: u8,
+
+    /// Tag that records multimapping (NH, X0 or XT); among duplicates with equal MAPQ the read with fewer hits is kept
+    #[arg(long = "multimapping-detection-method", value_parser = ["NH", "X0", "XT"])]
+    multimapping_detection_method: Option<String>,
+
+    /// Buffer a whole contig before grouping instead of a 1 kb window; uses more memory
+    #[arg(long = "buffer-whole-contig", alias = "whole-contig", action = ArgAction::SetTrue, overrides_with = "buffer_whole_contig")]
+    buffer_whole_contig: bool,
 
     /// Random subset of reads to process (0.0-1.0)
     #[arg(long = "subset")]
@@ -660,6 +678,14 @@ impl Commands {
         {
             note("--plot-prefix is accepted for umi-tools compatibility; plots are not generated");
         }
+        if let Self::Group(args) = self
+            && args.multimapping_detection_method.is_some()
+        {
+            note(
+                "--multimapping-detection-method is accepted for umi-tools compatibility; \
+                 group keeps every read, so it has no effect",
+            );
+        }
     }
 }
 
@@ -877,6 +903,8 @@ fn run(command: Commands) -> Result<String> {
             subset,
             position,
             mapping_quality,
+            multimapping_detection_method: _,
+            buffer_whole_contig,
             output_unmapped,
             paired,
             chimeric_pairs,
@@ -902,6 +930,7 @@ fn run(command: Commands) -> Result<String> {
             subset,
             position.options(),
             mapping_quality,
+            buffer_whole_contig,
             output_unmapped,
             paired,
             chimeric_pairs.as_deref(),
@@ -924,6 +953,8 @@ fn run(command: Commands) -> Result<String> {
             edit_distance_threshold,
             position,
             mapping_quality,
+            multimapping_detection_method,
+            buffer_whole_contig,
             subset,
             extract_umi_method,
             umi_tag,
@@ -950,6 +981,8 @@ fn run(command: Commands) -> Result<String> {
             edit_distance_threshold,
             position.options(),
             mapping_quality,
+            multimapping_detection_method.as_deref(),
+            buffer_whole_contig,
             subset,
             &extract_umi_method,
             umi_tag.as_deref(),
@@ -1307,6 +1340,7 @@ fn run_group_cmd(
     subset: Option<f32>,
     position: PositionOptions,
     mapping_quality: u8,
+    buffer_whole_contig: bool,
     output_unmapped: bool,
     paired: bool,
     chimeric_pairs: Option<&str>,
@@ -1372,6 +1406,7 @@ fn run_group_cmd(
         position,
         subset,
         mapping_quality,
+        buffer_whole_contig,
         per_gene,
         gene_tag: gene_tag.map(String::from),
         skip_tags_regex: skip_tags_regex.map(String::from),
@@ -1403,6 +1438,8 @@ fn run_dedup_cmd(
     edit_distance_threshold: u32,
     position: PositionOptions,
     mapping_quality: u8,
+    multimapping_detection_method: Option<&str>,
+    buffer_whole_contig: bool,
     subset: Option<f32>,
     extract_umi_method: &str,
     umi_tag: Option<&str>,
@@ -1431,6 +1468,13 @@ fn run_dedup_cmd(
 
     let sep_byte = umi_separator.as_bytes().first().copied().unwrap_or(b'_');
 
+    let multimapping_detection = multimapping_detection_method
+        .map(|name| {
+            MultimappingDetection::parse(name)
+                .ok_or_else(|| anyhow::anyhow!("unknown --multimapping-detection-method '{name}'"))
+        })
+        .transpose()?;
+
     let umi_whitelist = if filter_umi {
         let wl_path =
             umi_whitelist_path.context("--umi-whitelist is required when --filter-umi is set")?;
@@ -1452,6 +1496,8 @@ fn run_dedup_cmd(
         position,
         subset,
         mapping_quality,
+        multimapping_detection,
+        buffer_whole_contig,
         extract_umi_method: extract_umi_method.to_string(),
         umi_tag: umi_tag.map(String::from),
         per_gene,

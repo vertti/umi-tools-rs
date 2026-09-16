@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::Write as IoWrite;
 
-use rust_htslib::bam::record::Cigar;
+use rust_htslib::bam::record::{Aux, Cigar};
 use rust_htslib::bam::{Read as BamRead, Record};
 
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
@@ -213,6 +213,8 @@ pub struct DedupConfig {
     pub position: PositionOptions,
     pub subset: Option<f32>,
     pub mapping_quality: u8,
+    pub multimapping_detection: Option<MultimappingDetection>,
+    pub buffer_whole_contig: bool,
     pub extract_umi_method: String,
     pub umi_tag: Option<String>,
     pub per_gene: bool,
@@ -347,6 +349,92 @@ fn find_splice<'a>(ops: impl Iterator<Item = &'a Cigar>) -> i64 {
     0
 }
 
+/// Aligner tag consulted to break MAPQ ties between reads with the same position and UMI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultimappingDetection {
+    Nh,
+    X0,
+    Xt,
+}
+
+impl MultimappingDetection {
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "NH" => Some(Self::Nh),
+            "X0" => Some(Self::X0),
+            "XT" => Some(Self::Xt),
+            _ => None,
+        }
+    }
+
+    const fn tag(self) -> &'static [u8; 2] {
+        match self {
+            Self::Nh => b"NH",
+            Self::X0 => b"X0",
+            Self::Xt => b"XT",
+        }
+    }
+
+    /// `Some(true)` when `candidate` maps more uniquely than `current`, `Some(false)`
+    /// when it maps less uniquely, `None` when the tag does not separate them.
+    fn prefers_candidate(
+        self,
+        current: &Record,
+        candidate: &Record,
+    ) -> Result<Option<bool>, DedupError> {
+        let tag = self.tag();
+        let missing = |record: &Record| {
+            DedupError::MissingTag(
+                String::from_utf8_lossy(record.qname()).into_owned(),
+                String::from_utf8_lossy(tag).into_owned(),
+            )
+        };
+        match self {
+            Self::Nh | Self::X0 => {
+                let old = aux_int(current, tag).ok_or_else(|| missing(current))?;
+                let new = aux_int(candidate, tag).ok_or_else(|| missing(candidate))?;
+                Ok(match old.cmp(&new) {
+                    std::cmp::Ordering::Less => Some(false),
+                    std::cmp::Ordering::Greater => Some(true),
+                    std::cmp::Ordering::Equal => None,
+                })
+            }
+            Self::Xt => {
+                let old = aux_char(current, tag).ok_or_else(|| missing(current))?;
+                let new = aux_char(candidate, tag).ok_or_else(|| missing(candidate))?;
+                Ok(if old == b'U' {
+                    Some(false)
+                } else if new == b'U' {
+                    Some(true)
+                } else {
+                    None
+                })
+            }
+        }
+    }
+}
+
+fn aux_int(record: &Record, tag: &[u8]) -> Option<i64> {
+    match record.aux(tag).ok()? {
+        Aux::I8(v) => Some(i64::from(v)),
+        Aux::U8(v) => Some(i64::from(v)),
+        Aux::I16(v) => Some(i64::from(v)),
+        Aux::U16(v) => Some(i64::from(v)),
+        Aux::I32(v) => Some(i64::from(v)),
+        Aux::U32(v) => Some(i64::from(v)),
+        _ => None,
+    }
+}
+
+fn aux_char(record: &Record, tag: &[u8]) -> Option<u8> {
+    match record.aux(tag).ok()? {
+        Aux::Char(c) => Some(c),
+        Aux::String(s) => s.bytes().next(),
+        _ => None,
+    }
+}
+
 /// Sub-key within a position group: `(is_reverse, splice_offset, tlen, read_length)`.
 /// With default options, this collapses to `(is_reverse, 0, 0, 0)`.
 pub(crate) type GroupKey = (bool, i64, i64, usize);
@@ -392,7 +480,8 @@ impl ReadBuffer {
         key: GroupKey,
         umi: Vec<u8>,
         rng: &mut impl TieBreakRng,
-    ) {
+        detection: Option<MultimappingDetection>,
+    ) -> Result<(), DedupError> {
         let umi_map = self.groups.entry(pos).or_default().entry(key).or_default();
 
         let Some(slot) = umi_map.get_mut(&umi) else {
@@ -415,7 +504,7 @@ impl ReadBuffer {
                     insertion_order: order,
                 },
             );
-            return;
+            return Ok(());
         };
 
         slot.count += 1;
@@ -429,12 +518,28 @@ impl ReadBuffer {
                 slot.tie_count = 0;
             }
             std::cmp::Ordering::Equal => {
-                slot.tie_count += 1;
-                if rng.random() < 1.0 / f64::from(slot.tie_count) {
-                    slot.record = record;
+                let verdict = detection
+                    .map(|d| d.prefers_candidate(&slot.record, &record))
+                    .transpose()?
+                    .flatten();
+                match verdict {
+                    Some(false) => {}
+                    Some(true) => {
+                        // umi_tools resets the tie counter and then still draws once with probability 1.
+                        slot.record = record;
+                        slot.tie_count = 1;
+                        rng.random();
+                    }
+                    None => {
+                        slot.tie_count += 1;
+                        if rng.random() < 1.0 / f64::from(slot.tie_count) {
+                            slot.record = record;
+                        }
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     /// Drain all position groups with `pos <= threshold`, applying UMI dedup selection.
@@ -1570,7 +1675,14 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
                 next_gene_id += 1;
                 id
             });
-            buffer.add(record, gene_id, (false, 0, 0, 0), umi, &mut rng);
+            buffer.add(
+                record,
+                gene_id,
+                (false, 0, 0, 0),
+                umi,
+                &mut rng,
+                config.multimapping_detection,
+            )?;
         } else {
             let position = get_read_position(&record, config.position.soft_clip_threshold);
             let start = position.start;
@@ -1583,7 +1695,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
                     &mut stats_ctx,
                     wl_ref,
                 ));
-            } else if start > last_start + 1000 {
+            } else if !config.buffer_whole_contig && start > last_start + 1000 {
                 let threshold = start - 1000;
                 output_records.extend(buffer.drain_up_to(
                     threshold,
@@ -1604,7 +1716,14 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             };
             let (splice, length) = config.position.key_parts(&position, &record);
             let key: GroupKey = (record.is_reverse(), splice, tlen, length);
-            buffer.add(record, position.pos, key, umi, &mut rng);
+            buffer.add(
+                record,
+                position.pos,
+                key,
+                umi,
+                &mut rng,
+                config.multimapping_detection,
+            )?;
         }
     }
 
@@ -1693,6 +1812,8 @@ pub enum DedupError {
     InvalidRegex(String),
     #[error("failed to write stats file {0}: {1}")]
     StatsWrite(String, String),
+    #[error("read {0} has no {1} tag for --multimapping-detection-method")]
+    MissingTag(String, String),
 }
 
 #[cfg(test)]
@@ -1733,6 +1854,90 @@ mod tests {
                 "flag={flag} cigar={cigar} threshold={threshold}"
             );
         }
+    }
+
+    struct FixedRng {
+        value: f64,
+        draws: u32,
+    }
+
+    impl TieBreakRng for FixedRng {
+        fn random(&mut self) -> f64 {
+            self.draws += 1;
+            self.value
+        }
+    }
+
+    fn tagged(name: &str, tags: &str) -> Record {
+        let header = HeaderView::from_bytes(b"@SQ\tSN:chr1\tLN:100000\n");
+        let line = format!("{name}\t0\tchr1\t101\t60\t10M\t*\t0\t0\t*\t*\t{tags}");
+        Record::from_sam(&header, line.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn multimapping_tag_breaks_mapq_ties_like_umi_tools() {
+        let key: GroupKey = (false, 0, 0, 0);
+        let umi = b"ACGT".to_vec();
+        let nh = Some(MultimappingDetection::Nh);
+        let mut rng = FixedRng {
+            value: 0.5,
+            draws: 0,
+        };
+        let mut buffer = ReadBuffer::new();
+        let selected = |buffer: &ReadBuffer| {
+            let slot = &buffer.groups[&100][&key][&umi];
+            (slot.record.qname().to_vec(), slot.tie_count)
+        };
+
+        buffer
+            .add(tagged("a", "NH:i:3"), 100, key, umi.clone(), &mut rng, nh)
+            .unwrap();
+        buffer
+            .add(tagged("b", "NH:i:1"), 100, key, umi.clone(), &mut rng, nh)
+            .unwrap();
+        assert_eq!(selected(&buffer), (b"b".to_vec(), 1), "fewer hits wins");
+        assert_eq!(rng.draws, 1, "the replacement still consumes one draw");
+
+        buffer
+            .add(tagged("c", "NH:i:5"), 100, key, umi.clone(), &mut rng, nh)
+            .unwrap();
+        assert_eq!(selected(&buffer), (b"b".to_vec(), 1), "more hits loses");
+        assert_eq!(rng.draws, 1, "losing consumes no draw");
+
+        buffer
+            .add(tagged("d", "NH:i:1"), 100, key, umi.clone(), &mut rng, nh)
+            .unwrap();
+        assert_eq!(selected(&buffer), (b"b".to_vec(), 2), "equal hits sample");
+        assert_eq!(rng.draws, 2);
+
+        let err = buffer
+            .add(tagged("e", "AS:i:1"), 100, key, umi.clone(), &mut rng, nh)
+            .unwrap_err();
+        assert!(matches!(err, DedupError::MissingTag(_, _)));
+    }
+
+    #[test]
+    fn xt_unique_beats_repeat() {
+        let key: GroupKey = (false, 0, 0, 0);
+        let umi = b"ACGT".to_vec();
+        let xt = Some(MultimappingDetection::Xt);
+        let mut rng = FixedRng {
+            value: 0.5,
+            draws: 0,
+        };
+        let mut buffer = ReadBuffer::new();
+        buffer
+            .add(tagged("r", "XT:A:R"), 100, key, umi.clone(), &mut rng, xt)
+            .unwrap();
+        buffer
+            .add(tagged("u", "XT:A:U"), 100, key, umi.clone(), &mut rng, xt)
+            .unwrap();
+        buffer
+            .add(tagged("r2", "XT:A:R"), 100, key, umi.clone(), &mut rng, xt)
+            .unwrap();
+        let slot = &buffer.groups[&100][&key][&umi];
+        assert_eq!(slot.record.qname(), b"u");
+        assert_eq!(rng.draws, 1);
     }
 
     #[test]

@@ -42,6 +42,7 @@ pub struct GroupConfig {
     pub position: PositionOptions,
     pub subset: Option<f32>,
     pub mapping_quality: u8,
+    pub buffer_whole_contig: bool,
     pub per_gene: bool,
     pub gene_tag: Option<String>,
     pub skip_tags_regex: Option<String>,
@@ -553,7 +554,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     &header_view,
                     &gene_labels,
                 )?);
-            } else if start > last_start + 1000 {
+            } else if !config.buffer_whole_contig && start > last_start + 1000 {
                 let threshold = start - 1000;
                 output_records.extend(process_drained(
                     buffer.drain_up_to(threshold),

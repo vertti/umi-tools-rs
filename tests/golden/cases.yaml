@@ -51,3 +51,27 @@ group_mapq:
   outputs: [group_mapq.tsv]
   references: [group_mapq.tsv.gz]
   options: group --paired --random-seed=123456789 --mapping-quality=20 --group-out=group_mapq.tsv
+
+dedup_multimapping_nh:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [dedup_multimapping_nh.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --multimapping-detection-method=NH
+
+dedup_multimapping_nh_whitelist_input:
+  stdin: whitelist_umi_sub.bam
+  outputs: [stdout]
+  references: [dedup_multimapping_nh_whitelist_input.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --multimapping-detection-method=NH
+
+dedup_buffer_whole_contig:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [dedup_buffer_whole_contig.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --buffer-whole-contig
+
+group_buffer_whole_contig:
+  stdin: paired_sub.bam
+  outputs: [group_buffer_whole_contig.tsv]
+  references: [group_buffer_whole_contig.tsv.gz]
+  options: group --paired --random-seed=123456789 --whole-contig --group-out=group_buffer_whole_contig.tsv
