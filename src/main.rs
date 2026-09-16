@@ -27,7 +27,8 @@ use umi_core::whitelist::{EdAboveThreshold, KneeMethod, WhitelistConfig, run_whi
     name = "umi-tools-rs",
     version,
     about = "Fast UMI tools in Rust",
-    infer_long_args = true
+    infer_long_args = true,
+    propagate_version = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -546,6 +547,10 @@ struct CommonArgs {
     /// gzip level for .gz outputs, 1-9. umi-tools defaults to 6.
     #[arg(long = "compresslevel", default_value = "3", value_parser = clap::value_parser!(u32).range(1..=9))]
     compresslevel: u32,
+
+    /// Same as --help
+    #[arg(long = "help-extended", action = ArgAction::Help)]
+    _help_extended: Option<bool>,
 }
 
 impl Commands {
@@ -1478,6 +1483,9 @@ fn is_gzipped(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
+    use clap::error::ErrorKind;
+
     use super::*;
 
     fn parse(args: &[&str]) -> Cli {
@@ -1566,6 +1574,19 @@ mod tests {
         assert!(Cli::try_parse_from(["umi-tools-rs", "extract", "--compresslevel=0"]).is_err());
         let cli = parse(&["extract", "--bc-pattern=NNN", "--compresslevel=9"]);
         assert_eq!(cli.command.common().compresslevel, 9);
+    }
+
+    #[test]
+    fn help_extended_and_version_work_on_subcommands() {
+        Cli::command().debug_assert();
+        let err = Cli::try_parse_from(["umi-tools-rs", "dedup", "--help-extended"])
+            .err()
+            .expect("help stops parsing");
+        assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+        let err = Cli::try_parse_from(["umi-tools-rs", "dedup", "--version"])
+            .err()
+            .expect("version stops parsing");
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
     }
 
     #[test]
