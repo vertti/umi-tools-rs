@@ -140,6 +140,10 @@ struct ExtractArgs {
     #[arg(long = "either-read")]
     either_read: bool,
 
+    /// No randomness in this command; accepted for umi-tools compatibility
+    #[arg(long = "random-seed")]
+    _random_seed: Option<u64>,
+
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -186,9 +190,9 @@ struct WhitelistArgs {
     #[arg(long = "ed-above-threshold")]
     ed_above_threshold: Option<String>,
 
-    /// Plot prefix (accepted but ignored)
+    /// Prefix for knee plots. Accepted for umi-tools compatibility; plots are not generated
     #[arg(long = "plot-prefix")]
-    _plot_prefix: Option<String>,
+    plot_prefix: Option<String>,
 
     /// Output file for reads that failed barcode extraction
     #[arg(long = "filtered-out")]
@@ -197,6 +201,10 @@ struct WhitelistArgs {
     /// Max reads to process (default: `100_000_000`)
     #[arg(long = "subset-reads", default_value = "100000000")]
     subset_reads: usize,
+
+    /// No randomness in this command; accepted for umi-tools compatibility
+    #[arg(long = "random-seed")]
+    _random_seed: Option<u64>,
 
     #[command(flatten)]
     common: CommonArgs,
@@ -425,9 +433,9 @@ struct CountArgs {
     #[arg(long = "edit-distance-threshold", default_value = "1")]
     edit_distance_threshold: u32,
 
-    /// Random seed (accepted but unused)
-    #[arg(long = "random-seed", default_value = "0")]
-    _random_seed: u64,
+    /// No randomness in this command; accepted for umi-tools compatibility
+    #[arg(long = "random-seed")]
+    _random_seed: Option<u64>,
 
     #[command(flatten)]
     common: CommonArgs,
@@ -458,6 +466,10 @@ struct CountTabArgs {
     /// Edit distance threshold for UMI clustering
     #[arg(long = "edit-distance-threshold", default_value = "1")]
     edit_distance_threshold: u32,
+
+    /// No randomness in this command; accepted for umi-tools compatibility
+    #[arg(long = "random-seed")]
+    _random_seed: Option<u64>,
 
     #[command(flatten)]
     common: CommonArgs,
@@ -551,6 +563,38 @@ struct CommonArgs {
     /// Same as --help
     #[arg(long = "help-extended", action = ArgAction::Help)]
     _help_extended: Option<bool>,
+
+    /// Directory for temporary files. Accepted for umi-tools compatibility; has no effect.
+    #[arg(long = "temp-dir")]
+    temp_dir: Option<String>,
+
+    /// Timing output file. Accepted for umi-tools compatibility; has no effect.
+    #[arg(long = "timeit")]
+    timeit: Option<String>,
+
+    /// Name for the timing row. Accepted for umi-tools compatibility; has no effect.
+    #[arg(long = "timeit-name")]
+    timeit_name: Option<String>,
+
+    /// Write a header to the timing file. Accepted for umi-tools compatibility; has no effect.
+    #[arg(long = "timeit-header", action = ArgAction::SetTrue, overrides_with = "timeit_header")]
+    timeit_header: bool,
+}
+
+impl CommonArgs {
+    fn note_ignored_flags(&self) {
+        let flags = [
+            ("--temp-dir", self.temp_dir.is_some()),
+            ("--timeit", self.timeit.is_some()),
+            ("--timeit-name", self.timeit_name.is_some()),
+            ("--timeit-header", self.timeit_header),
+        ];
+        for (flag, given) in flags {
+            if given {
+                note_ignored(flag);
+            }
+        }
+    }
 }
 
 impl Commands {
@@ -562,6 +606,15 @@ impl Commands {
             Self::Dedup(args) => &args.common,
             Self::Count(args) => &args.common,
             Self::CountTab(args) => &args.common,
+        }
+    }
+
+    fn note_ignored_flags(&self) {
+        self.common().note_ignored_flags();
+        if let Self::Whitelist(args) = self
+            && args.plot_prefix.is_some()
+        {
+            note("--plot-prefix is accepted for umi-tools compatibility; plots are not generated");
         }
     }
 }
@@ -639,12 +692,16 @@ fn diagnostic(message: &str) {
     }
 }
 
-fn note_ignored(flag: &str) {
+fn note(message: &str) {
     if !QUIET.load(Ordering::Relaxed) {
-        diagnostic(&format!(
-            "note: {flag} is accepted for umi-tools compatibility and has no effect"
-        ));
+        diagnostic(&format!("note: {message}"));
     }
+}
+
+fn note_ignored(flag: &str) {
+    note(&format!(
+        "{flag} is accepted for umi-tools compatibility and has no effect"
+    ));
 }
 
 fn main() -> ExitCode {
@@ -664,6 +721,7 @@ fn main() -> ExitCode {
 fn run_logged(command: Commands, common: &CommonArgs, args: &[String]) -> Result<()> {
     let quiet = common.verbose == 0;
     install_diagnostics(common.error.as_deref(), quiet)?;
+    command.note_ignored_flags();
     let log = RunLog::open(common.log.as_deref(), args, quiet)?;
     let summary = run(command)?;
     log.finish(&summary)
@@ -693,6 +751,7 @@ fn run(command: Commands) -> Result<String> {
             filtered_out,
             filtered_out2,
             either_read,
+            _random_seed: _,
             common,
         }) => {
             let is_paired = read2_in.is_some();
@@ -738,9 +797,10 @@ fn run(command: Commands) -> Result<String> {
             expect_cells,
             error_correct_threshold,
             ed_above_threshold,
-            _plot_prefix: _,
+            plot_prefix: _,
             filtered_out,
             subset_reads,
+            _random_seed: _,
             common,
         }) => run_whitelist_cmd(
             &bc_pattern,
@@ -883,6 +943,7 @@ fn run(command: Commands) -> Result<String> {
             separator,
             method,
             edit_distance_threshold,
+            _random_seed: _,
             common,
         }) => run_count_tab_cmd(
             input.as_deref(),
@@ -1587,6 +1648,39 @@ mod tests {
             .err()
             .expect("version stops parsing");
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn upstream_profiling_and_seed_flags_parse_everywhere() {
+        let required = |command: &str| {
+            if matches!(command, "extract" | "whitelist") {
+                "--bc-pattern=NNN"
+            } else {
+                "--stdin=in.bam"
+            }
+        };
+        for command in [
+            "extract",
+            "whitelist",
+            "group",
+            "dedup",
+            "count",
+            "count_tab",
+        ] {
+            let cli = parse(&[
+                command,
+                required(command),
+                "--temp-dir=/tmp",
+                "--timeit=t.tsv",
+                "--timeit-name=x",
+                "--timeit-header",
+                "--timeit-header",
+            ]);
+            assert_eq!(cli.command.common().timeit.as_deref(), Some("t.tsv"));
+        }
+        for command in ["extract", "whitelist", "count", "count_tab"] {
+            parse(&[command, required(command), "--random-seed=1"]);
+        }
     }
 
     #[test]
