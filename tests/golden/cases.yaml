@@ -75,3 +75,9 @@ group_buffer_whole_contig:
   outputs: [group_buffer_whole_contig.tsv]
   references: [group_buffer_whole_contig.tsv.gz]
   options: group --paired --random-seed=123456789 --whole-contig --group-out=group_buffer_whole_contig.tsv
+
+group_edit_distance_2:
+  stdin: chr19_sub.bam
+  outputs: [group_edit_distance_2.tsv]
+  references: [group_edit_distance_2.tsv.gz]
+  options: group --random-seed=123456789 --edit-distance-threshold=2 --group-out=group_edit_distance_2.tsv

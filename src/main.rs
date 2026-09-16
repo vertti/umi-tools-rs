@@ -223,6 +223,10 @@ struct GroupArgs {
     #[arg(long = "method", default_value = "directional")]
     method: String,
 
+    /// Edit distance threshold for UMI clustering
+    #[arg(long = "edit-distance-threshold", default_value = "1")]
+    edit_distance_threshold: u32,
+
     /// Ignore UMI — group by position only
     #[arg(long = "ignore-umi")]
     ignore_umi: bool,
@@ -890,6 +894,7 @@ fn run(command: Commands) -> Result<String> {
         Commands::Group(GroupArgs {
             input,
             method,
+            edit_distance_threshold,
             ignore_umi,
             output,
             input_format,
@@ -917,6 +922,7 @@ fn run(command: Commands) -> Result<String> {
         }) => run_group_cmd(
             input.as_deref(),
             &method,
+            edit_distance_threshold,
             ignore_umi,
             output.as_deref(),
             &input_format,
@@ -1327,6 +1333,7 @@ fn run_whitelist_cmd(
 fn run_group_cmd(
     input_path: Option<&str>,
     method: &str,
+    edit_distance_threshold: u32,
     ignore_umi: bool,
     output_path: Option<&str>,
     input_format: &InputFormatArgs,
@@ -1402,7 +1409,7 @@ fn run_group_cmd(
         no_sort_output,
         chrom: chrom.map(String::from),
         group_out: group_out.map(String::from),
-        edit_distance_threshold: 1,
+        edit_distance_threshold,
         position,
         subset,
         mapping_quality,
