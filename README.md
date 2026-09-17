@@ -93,4 +93,6 @@ Optparse-style abbreviations work as in UMI-tools, for example `--unmapped` for 
 - `--reference-filename` takes a local path; URL references are not fetched.
 - `--input-options`, `--output-options`, `--temp-dir`, `--timeit`, `--timeit-name` and `--timeit-header` print a note and have no effect. `--plot-prefix` prints a note and no plots are generated. `group --multimapping-detection-method` prints a note because group keeps every read.
 - `--in-format` and `--in-sam` have no effect because the input format is detected from the file content.
+- `--gene-transcript-map` reads a gene's transcripts in file order. UMI-tools iterates a set, so which read represents a UMI group there varies with the Python hash seed; counts agree.
+- `count` needs `--gene-tag` or `--per-contig`, as UMI-tools does; earlier releases defaulted to `XF`.
 - Help output is rendered by clap and does not match the UMI-tools text.
