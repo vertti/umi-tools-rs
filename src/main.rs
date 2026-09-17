@@ -18,14 +18,16 @@ use umi_core::dedup::{
     DedupConfig, DedupMethod, MultimappingDetection, PositionOptions, run_dedup,
 };
 use umi_core::extract::{
-    ExtractConfig, QualityEncoding, extract_reads, extract_reads_either_read, extract_reads_paired,
-    extract_reads_paired_r1_pattern,
+    EitherReadResolve, ExtractConfig, QualityEncoding, extract_reads, extract_reads_either_read,
+    extract_reads_paired, extract_reads_paired_r1_pattern,
 };
 use umi_core::gene::{DEFAULT_SKIP_REGEX, GeneOptions};
 use umi_core::group::{GroupConfig, run_group};
 use umi_core::pairing::{PairPolicy, PairingOptions};
 use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
-use umi_core::whitelist::{EdAboveThreshold, KneeMethod, WhitelistConfig, run_whitelist};
+use umi_core::whitelist::{
+    EdAboveThreshold, KneeMethod, WhitelistConfig, WhitelistMethod, run_whitelist,
+};
 
 #[derive(Parser)]
 #[command(
@@ -145,6 +147,22 @@ struct ExtractArgs {
     #[arg(long = "either-read")]
     either_read: bool,
 
+    /// When both reads match in --either-read mode: discard the pair, or keep the read whose UMI has the higher minimum quality
+    #[arg(long = "either-read-resolve", default_value = "discard", value_parser = ["discard", "quality"])]
+    either_read_resolve: String,
+
+    /// Replace UMI bases below this quality with N
+    #[arg(long = "quality-filter-mask")]
+    quality_filter_mask: Option<u8>,
+
+    /// Extract from read2 only; requires --bc-pattern2 and forbids --bc-pattern
+    #[arg(long = "read2-only", action = ArgAction::SetTrue, overrides_with = "read2_only")]
+    read2_only: bool,
+
+    /// Stop after this many input reads
+    #[arg(long = "subset-reads", alias = "reads-subset")]
+    subset_reads: Option<u64>,
+
     /// No randomness in this command; accepted for umi-tools compatibility
     #[arg(long = "random-seed")]
     _random_seed: Option<u64>,
@@ -154,10 +172,39 @@ struct ExtractArgs {
 }
 
 #[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
 struct WhitelistArgs {
     /// Barcode pattern (e.g. CCCCCCNNNNNNNNNN). N=UMI, C=cell, X=discard.
     #[arg(long = "bc-pattern")]
-    bc_pattern: String,
+    bc_pattern: Option<String>,
+
+    /// Barcode pattern for read2; its cell bases follow read1's
+    #[arg(long = "bc-pattern2")]
+    bc_pattern2: Option<String>,
+
+    /// Read2 FASTQ file
+    #[arg(long = "read2-in")]
+    read2_in: Option<String>,
+
+    /// Extract from read2 only; requires --bc-pattern2 and forbids --bc-pattern
+    #[arg(long = "read2-only", action = ArgAction::SetTrue, overrides_with = "read2_only")]
+    read2_only: bool,
+
+    /// Output file for read2s whose pair failed barcode extraction
+    #[arg(long = "filtered-out2")]
+    filtered_out2: Option<String>,
+
+    /// Accepted for umi-tools compatibility; whitelist writes no read names, so it has no effect
+    #[arg(long = "ignore-read-pair-suffixes", action = ArgAction::SetTrue, overrides_with = "ignore_read_pair_suffixes")]
+    ignore_read_pair_suffixes: bool,
+
+    /// Count reads or distinct UMIs per cell barcode
+    #[arg(long = "method", default_value = "reads", value_parser = ["reads", "umis"])]
+    method: String,
+
+    /// Write an empty whitelist instead of failing when the density knee finds no threshold
+    #[arg(long = "allow-threshold-error", action = ArgAction::SetTrue, overrides_with = "allow_threshold_error")]
+    allow_threshold_error: bool,
 
     /// Extraction method: "string" for fixed-position, "regex" for named capture groups
     #[arg(long = "extract-method", default_value = "string")]
@@ -452,6 +499,7 @@ struct CountArgs {
 }
 
 #[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
 struct CountTabArgs {
     /// Input TSV file (default: stdin)
     #[arg(short = 'I', long = "stdin")]
@@ -480,6 +528,34 @@ struct CountTabArgs {
     /// No randomness in this command; accepted for umi-tools compatibility
     #[arg(long = "random-seed")]
     _random_seed: Option<u64>,
+
+    /// Accepted for umi-tools compatibility; `count_tab` reads a table, so it has no effect
+    #[arg(long = "in-format", value_parser = ["sam", "bam", "cram"])]
+    in_format: Option<String>,
+
+    /// Accepted for umi-tools compatibility; `count_tab` reads a table, so it has no effect
+    #[arg(short = 'i', long = "in-sam", action = ArgAction::SetTrue, overrides_with = "in_sam")]
+    in_sam: bool,
+
+    /// Accepted for umi-tools compatibility; `count_tab` reads a table, so it has no effect
+    #[arg(long = "input-options")]
+    input_options: Option<String>,
+
+    /// Accepted for umi-tools compatibility; `count_tab` reads a table, so it has no effect
+    #[arg(long = "reference-filename")]
+    reference_filename: Option<String>,
+
+    /// Accepted for umi-tools compatibility; `count_tab` has no positions, so it has no effect
+    #[arg(long = "read-length", action = ArgAction::SetTrue, overrides_with = "read_length")]
+    read_length: bool,
+
+    /// Accepted for umi-tools compatibility; `count_tab` has no positions, so it has no effect
+    #[arg(long = "soft-clip-threshold")]
+    soft_clip_threshold: Option<f64>,
+
+    /// Accepted for umi-tools compatibility; `count_tab` has no positions, so it has no effect
+    #[arg(long = "spliced-is-unique", action = ArgAction::SetTrue, overrides_with = "spliced_is_unique")]
+    spliced_is_unique: bool,
 
     #[command(flatten)]
     common: CommonArgs,
@@ -807,6 +883,29 @@ impl Commands {
         {
             note("--plot-prefix is accepted for umi-tools compatibility; plots are not generated");
         }
+        if let Self::Whitelist(args) = self
+            && args.ignore_read_pair_suffixes
+        {
+            note(
+                "--ignore-read-pair-suffixes is accepted for umi-tools compatibility; whitelist writes no read names, so it has no effect",
+            );
+        }
+        if let Self::CountTab(args) = self {
+            let flags = [
+                ("--in-format", args.in_format.is_some()),
+                ("--in-sam", args.in_sam),
+                ("--input-options", args.input_options.is_some()),
+                ("--reference-filename", args.reference_filename.is_some()),
+                ("--read-length", args.read_length),
+                ("--soft-clip-threshold", args.soft_clip_threshold.is_some()),
+                ("--spliced-is-unique", args.spliced_is_unique),
+            ];
+            for (flag, given) in flags {
+                if given {
+                    note_ignored(flag);
+                }
+            }
+        }
         if let Self::Count(args) = self {
             if args.pairing.ignore_tlen {
                 note(
@@ -962,10 +1061,15 @@ fn run(command: Commands) -> Result<String> {
             filtered_out,
             filtered_out2,
             either_read,
+            either_read_resolve,
+            quality_filter_mask,
+            read2_only,
+            subset_reads,
             _random_seed: _,
             common,
         }) => {
             let is_paired = read2_in.is_some();
+            validate_read2_only(read2_only, bc_pattern.as_deref(), bc_pattern2.as_deref())?;
             if !is_paired && bc_pattern.is_none() {
                 bail!("--bc-pattern is required for single-end extraction");
             }
@@ -994,11 +1098,21 @@ fn run(command: Commands) -> Result<String> {
                 filtered_out.as_deref(),
                 filtered_out2.as_deref(),
                 either_read,
+                &either_read_resolve,
+                quality_filter_mask,
+                subset_reads,
                 common.compresslevel,
             )
         }
         Commands::Whitelist(WhitelistArgs {
             bc_pattern,
+            bc_pattern2,
+            read2_in,
+            read2_only,
+            filtered_out2,
+            ignore_read_pair_suffixes: _,
+            method,
+            allow_threshold_error,
             extract_method,
             input,
             output,
@@ -1014,7 +1128,13 @@ fn run(command: Commands) -> Result<String> {
             _random_seed: _,
             common,
         }) => run_whitelist_cmd(
-            &bc_pattern,
+            bc_pattern.as_deref(),
+            bc_pattern2.as_deref(),
+            read2_in.as_deref(),
+            read2_only,
+            filtered_out2.as_deref(),
+            &method,
+            allow_threshold_error,
             &extract_method,
             input.as_deref(),
             output.as_deref(),
@@ -1164,6 +1284,13 @@ fn run(command: Commands) -> Result<String> {
             method,
             edit_distance_threshold,
             _random_seed: _,
+            in_format: _,
+            in_sam: _,
+            input_options: _,
+            reference_filename: _,
+            read_length: _,
+            soft_clip_threshold: _,
+            spliced_is_unique: _,
             common,
         }) => run_count_tab_cmd(
             input.as_deref(),
@@ -1175,6 +1302,23 @@ fn run(command: Commands) -> Result<String> {
             common.compresslevel,
         ),
     }
+}
+
+/// `validateExtractOptions` for `--read2-only`.
+fn validate_read2_only(
+    read2_only: bool,
+    pattern: Option<&str>,
+    pattern2: Option<&str>,
+) -> Result<()> {
+    if read2_only {
+        if pattern2.is_none() {
+            bail!("Must supply --bc-pattern2 if extracting from just read2");
+        }
+        if pattern.is_some() {
+            bail!("Don't supply --bc-pattern if extracting from just read2");
+        }
+    }
+    Ok(())
 }
 
 fn parse_pattern(raw: &str, extract_method: &str, prime3: bool) -> Result<BarcodePattern> {
@@ -1250,6 +1394,9 @@ fn run_extract(
     filtered_out_path: Option<&str>,
     filtered_out2_path: Option<&str>,
     either_read: bool,
+    either_read_resolve: &str,
+    quality_filter_mask: Option<u8>,
+    subset_reads: Option<u64>,
     compresslevel: u32,
 ) -> Result<String> {
     let pattern = bc_pattern
@@ -1279,6 +1426,12 @@ fn run_extract(
 
     let blacklist = blacklist_path.map(load_blacklist).transpose()?;
 
+    let either_read_resolve = match either_read_resolve {
+        "discard" => EitherReadResolve::Discard,
+        "quality" => EitherReadResolve::Quality,
+        other => bail!("unknown --either-read-resolve '{other}'; expected 'discard' or 'quality'"),
+    };
+
     let config = ExtractConfig {
         pattern,
         pattern2,
@@ -1290,6 +1443,9 @@ fn run_extract(
         blacklist,
         ignore_read_pair_suffixes,
         reconcile_pairs,
+        quality_filter_mask,
+        either_read_resolve,
+        subset_reads,
     };
 
     let reader1 = open_input(input_path)?;
@@ -1398,7 +1554,13 @@ fn load_blacklist(path: &str) -> Result<HashSet<Vec<u8>>> {
 
 #[allow(clippy::too_many_arguments)]
 fn run_whitelist_cmd(
-    bc_pattern: &str,
+    bc_pattern: Option<&str>,
+    bc_pattern2: Option<&str>,
+    read2_in: Option<&str>,
+    read2_only: bool,
+    filtered_out2_path: Option<&str>,
+    method: &str,
+    allow_threshold_error: bool,
     extract_method: &str,
     input_path: Option<&str>,
     output_path: Option<&str>,
@@ -1412,7 +1574,27 @@ fn run_whitelist_cmd(
     subset_reads: usize,
     compresslevel: u32,
 ) -> Result<String> {
-    let pattern = parse_pattern(bc_pattern, extract_method, prime3)?;
+    validate_read2_only(read2_only, bc_pattern, bc_pattern2)?;
+    if bc_pattern.is_none() && bc_pattern2.is_none() {
+        bail!("Must supply --bc-pattern for single-end");
+    }
+    if bc_pattern2.is_some() && read2_in.is_none() {
+        bail!("must specify a paired fastq --read2-in");
+    }
+    if filtered_out2_path.is_some() && read2_in.is_none() {
+        bail!("Cannot use --filtered-out2 without read2 input (--read2-in)");
+    }
+    let pattern = bc_pattern
+        .map(|p| parse_pattern(p, extract_method, prime3))
+        .transpose()?;
+    let pattern2 = bc_pattern2
+        .map(|p| parse_pattern(p, extract_method, prime3))
+        .transpose()?;
+    let method = match method {
+        "reads" => WhitelistMethod::Reads,
+        "umis" => WhitelistMethod::Umis,
+        other => bail!("unknown --method '{other}'; expected 'reads' or 'umis'"),
+    };
 
     let km = match knee_method {
         "distance" => KneeMethod::Distance,
@@ -1432,6 +1614,9 @@ fn run_whitelist_cmd(
 
     let config = WhitelistConfig {
         pattern,
+        pattern2,
+        method,
+        allow_threshold_error,
         knee_method: km,
         cell_number: set_cell_number,
         expect_cells,
@@ -1441,14 +1626,19 @@ fn run_whitelist_cmd(
     };
 
     let reader = open_input(input_path)?;
+    let reader2 = read2_in.map(|p| open_input(Some(p))).transpose()?;
     let writer = open_output(output_path, compresslevel)?;
     let filt_out = filtered_out_path
         .map(|p| open_output(Some(p), compresslevel))
         .transpose()
         .context("failed to open --filtered-out")?;
+    let filt_out2 = filtered_out2_path
+        .map(|p| open_output(Some(p), compresslevel))
+        .transpose()
+        .context("failed to open --filtered-out2")?;
 
-    let stats =
-        run_whitelist(&config, reader, writer, filt_out).context("whitelist command failed")?;
+    let stats = run_whitelist(&config, reader, reader2, writer, filt_out, filt_out2)
+        .context("whitelist command failed")?;
 
     Ok(format!(
         "Reads input: {}, no barcode match: {}",
@@ -1938,6 +2128,19 @@ mod tests {
         };
         assert!(args.gene.options(false).validate().is_err());
         assert_eq!(args.gene.skip_tags_regex, DEFAULT_SKIP_REGEX);
+    }
+
+    #[test]
+    fn read2_only_needs_pattern2_and_no_pattern() {
+        assert!(validate_read2_only(true, None, Some("NNNN")).is_ok());
+        assert!(validate_read2_only(true, None, None).is_err());
+        assert!(validate_read2_only(true, Some("NNNN"), Some("NNNN")).is_err());
+        assert!(validate_read2_only(false, Some("NNNN"), None).is_ok());
+        let cli = parse(&["extract", "--bc-pattern=NNN", "--reads-subset=5"]);
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected extract");
+        };
+        assert_eq!(args.subset_reads, Some(5));
     }
 
     #[test]

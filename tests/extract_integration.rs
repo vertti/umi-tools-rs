@@ -1,7 +1,7 @@
 use std::fs::File;
 
 use flate2::read::MultiGzDecoder;
-use umi_core::extract::{ExtractConfig, QualityEncoding, extract_reads};
+use umi_core::extract::{EitherReadResolve, ExtractConfig, QualityEncoding, extract_reads};
 use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
 
 fn read_gzipped_fastq(path: &str) -> String {
@@ -27,6 +27,9 @@ fn extract_string_matches_umi_tools_reference() {
         blacklist: None,
         ignore_read_pair_suffixes: false,
         reconcile_pairs: false,
+        quality_filter_mask: None,
+        either_read_resolve: EitherReadResolve::default(),
+        subset_reads: None,
     };
 
     let input = File::open("tests/data/slim.fastq.gz").unwrap();
@@ -67,6 +70,9 @@ fn extract_regex_matches_string_method() {
         blacklist: None,
         ignore_read_pair_suffixes: false,
         reconcile_pairs: false,
+        quality_filter_mask: None,
+        either_read_resolve: EitherReadResolve::default(),
+        subset_reads: None,
     };
     let regex_config = ExtractConfig {
         pattern: Some(regex_pattern),
@@ -79,6 +85,9 @@ fn extract_regex_matches_string_method() {
         blacklist: None,
         ignore_read_pair_suffixes: false,
         reconcile_pairs: false,
+        quality_filter_mask: None,
+        either_read_resolve: EitherReadResolve::default(),
+        subset_reads: None,
     };
 
     let string_input = File::open("tests/data/slim.fastq.gz").unwrap();
