@@ -12,20 +12,7 @@ use crate::dedup::{
     median, min_set_cover,
 };
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ChimericPairs {
-    Discard,
-    Output,
-    Use,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum UnmappedHandling {
-    Discard,
-    Output,
-    Use,
-}
+use crate::pairing::PairingOptions;
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct GroupConfig {
@@ -47,9 +34,8 @@ pub struct GroupConfig {
     pub mapping_quality: u8,
     pub buffer_whole_contig: bool,
     pub gene: GeneOptions,
-    pub paired: bool,
-    pub chimeric_pairs: ChimericPairs,
-    pub unmapped_handling: UnmappedHandling,
+    pub pairing: PairingOptions,
+    pub ignore_tlen: bool,
 }
 
 pub struct GroupStats {
@@ -409,9 +395,6 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         })
         .transpose()?;
 
-    let output_unmapped = config.unmapped_handling == UnmappedHandling::Output
-        || config.unmapped_handling == UnmappedHandling::Use;
-
     let mut buffer = GroupBuffer::<i64>::new();
     let mut gene_buffer = GroupBuffer::<Vec<u8>>::new();
     let mut stats = GroupStats {
@@ -432,65 +415,26 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         .read_next()
         .map_err(|e| GroupError::BamRead(e.to_string()))?
     {
-        // R2 reads are passthrough (no grouping, no tags).
-        if record.is_last_in_template() {
-            if record.is_unmapped() {
-                if output_unmapped {
-                    output_records.push(record);
-                }
-            } else {
-                output_records.push(record);
-            }
-            continue;
-        }
-
-        // Handle unmapped reads (R1 in paired mode, or any read in single-end)
-        if record.is_unmapped() {
-            if output_unmapped {
-                output_records.push(record);
-            }
-            continue;
-        }
-
         let tid = record.tid();
-
         if chrom_filter.is_some_and(|filter_tid| tid != filter_tid) {
             continue;
         }
 
+        let triage = config.pairing.triage(&record, true);
+        for _ in 0..triage.copies {
+            output_records.push(record.clone());
+        }
+        if triage.is_read2 {
+            continue;
+        }
         stats.input_reads += 1;
-
-        // Subset check consumes one RNG call per mapped read (before buffer.add)
-        if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
+        if !triage.grouped {
             continue;
         }
 
-        // Paired-mode filtering for R1 reads
-        if config.paired {
-            let is_chimeric =
-                !record.is_mate_unmapped() && record.tid() != record.mtid() && record.mtid() >= 0;
-
-            if is_chimeric {
-                match config.chimeric_pairs {
-                    ChimericPairs::Discard => continue,
-                    ChimericPairs::Output => {
-                        output_records.push(record);
-                        continue;
-                    }
-                    ChimericPairs::Use => {} // fall through to grouping with TLEN=0
-                }
-            }
-
-            if record.is_mate_unmapped() {
-                match config.unmapped_handling {
-                    UnmappedHandling::Discard => continue,
-                    UnmappedHandling::Output => {
-                        output_records.push(record);
-                        continue;
-                    }
-                    UnmappedHandling::Use => {} // fall through to grouping with TLEN=0
-                }
-            }
+        // Subset check consumes one RNG call per grouped read (before buffer.add)
+        if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
+            continue;
         }
 
         if record.mapq() < config.mapping_quality {
@@ -555,15 +499,11 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             last_start = start;
             last_chrom = tid;
 
-            // For paired non-chimeric reads, include signed TLEN in the group key.
-            // Python sorts GroupKeys as tuples: (is_reverse, is_spliced, tlen, r_length).
-            // We place signed tlen in position 2 (i64) to match Python's sorted() ordering.
-            let tlen =
-                if config.paired && !record.is_mate_unmapped() && record.tid() == record.mtid() {
-                    record.insert_size()
-                } else {
-                    0
-                };
+            let tlen = if config.pairing.paired && !config.ignore_tlen {
+                record.insert_size()
+            } else {
+                0
+            };
             let (splice, length) = config.position.key_parts(&position, &record);
             let key: GroupKey = (record.is_reverse(), splice, tlen, length, cell);
 
@@ -593,14 +533,8 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         w.flush().map_err(|e| GroupError::TsvWrite(e.to_string()))?;
     }
 
-    // Sort by coordinate unless --no-sort-output.
-    // Unmapped reads are placed after all mapped reads (matching Python).
     if !config.no_sort_output {
-        let (mut mapped, unmapped): (Vec<_>, Vec<_>) =
-            output_records.into_iter().partition(|r| !r.is_unmapped());
-        mapped.sort_by(|a, b| a.tid().cmp(&b.tid()).then_with(|| a.pos().cmp(&b.pos())));
-        mapped.extend(unmapped);
-        output_records = mapped;
+        output_records.sort_by_key(alignment_io::coordinate_sort_key);
     }
 
     stats.output_reads = output_records.len() as u64;

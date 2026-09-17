@@ -22,7 +22,8 @@ use umi_core::extract::{
     extract_reads_paired_r1_pattern,
 };
 use umi_core::gene::{DEFAULT_SKIP_REGEX, GeneOptions};
-use umi_core::group::{ChimericPairs, GroupConfig, UnmappedHandling, run_group};
+use umi_core::group::{GroupConfig, run_group};
+use umi_core::pairing::{PairPolicy, PairingOptions};
 use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
 use umi_core::whitelist::{EdAboveThreshold, KneeMethod, WhitelistConfig, run_whitelist};
 
@@ -293,17 +294,8 @@ struct GroupArgs {
     #[arg(long = "output-unmapped")]
     output_unmapped: bool,
 
-    /// Enable paired-end grouping
-    #[arg(long = "paired")]
-    paired: bool,
-
-    /// How to handle chimeric read pairs: discard, output, use
-    #[arg(long = "chimeric-pairs")]
-    chimeric_pairs: Option<String>,
-
-    /// How to handle unmapped reads: discard, output, use
-    #[arg(long = "unmapped-reads", default_value = "discard")]
-    unmapped: String,
+    #[command(flatten)]
+    pairing: PairedArgs,
 
     #[command(flatten)]
     gene: GeneArgs,
@@ -378,13 +370,8 @@ struct DedupArgs {
     #[arg(long = "output-stats")]
     output_stats: Option<String>,
 
-    /// Enable paired-end deduplication
-    #[arg(long = "paired")]
-    paired: bool,
-
-    /// Ignore template length when grouping reads (paired mode)
-    #[arg(long = "ignore-tlen")]
-    ignore_tlen: bool,
+    #[command(flatten)]
+    pairing: PairedArgs,
 
     /// Filter UMIs against whitelist
     #[arg(long = "filter-umi")]
@@ -441,9 +428,24 @@ struct CountArgs {
     #[arg(long = "edit-distance-threshold", default_value = "1")]
     edit_distance_threshold: u32,
 
-    /// No randomness in this command; accepted for umi-tools compatibility
-    #[arg(long = "random-seed")]
-    _random_seed: Option<u64>,
+    /// Random seed for --subset
+    #[arg(long = "random-seed", default_value = "0")]
+    random_seed: u64,
+
+    /// Only process reads on this chromosome
+    #[arg(long = "chrom")]
+    chrom: Option<String>,
+
+    /// Random subset of reads to process (0.0-1.0)
+    #[arg(long = "subset")]
+    subset: Option<f32>,
+
+    /// Accepted for umi-tools compatibility; count writes no alignments, so it has no effect
+    #[arg(long = "no-sort-output", action = ArgAction::SetTrue, overrides_with = "no_sort_output")]
+    no_sort_output: bool,
+
+    #[command(flatten)]
+    pairing: PairedArgs,
 
     #[command(flatten)]
     common: CommonArgs,
@@ -626,6 +628,46 @@ impl GeneArgs {
     }
 }
 
+/// Paired-end handling shared by dedup, group and count.
+#[derive(clap::Args, Clone)]
+struct PairedArgs {
+    /// Paired-end input: read2s follow their read1 in dedup and group output
+    #[arg(long = "paired", action = ArgAction::SetTrue, overrides_with = "paired")]
+    paired: bool,
+
+    /// Group read pairs by read1 alone, ignoring template length
+    #[arg(long = "ignore-tlen", action = ArgAction::SetTrue, overrides_with = "ignore_tlen")]
+    ignore_tlen: bool,
+
+    /// Read1s whose mate is unmapped: discard, use (group on read1 alone) or output (group only, ungrouped)
+    #[arg(long = "unmapped-reads", default_value = "discard", value_parser = ["discard", "use", "output"])]
+    unmapped_reads: String,
+
+    /// Pairs whose mates map to different contigs: discard, use or output (group only)
+    #[arg(long = "chimeric-pairs", default_value = "use", value_parser = ["discard", "use", "output"])]
+    chimeric_pairs: String,
+
+    /// Read1s without the paired flag: discard, use or output (group only)
+    #[arg(long = "unpaired-reads", default_value = "use", value_parser = ["discard", "use", "output"])]
+    unpaired_reads: String,
+}
+
+impl PairedArgs {
+    fn options(&self, output_unmapped: bool) -> PairingOptions {
+        let policy = |name: &str| PairPolicy::parse(name).unwrap_or(PairPolicy::Use);
+        PairingOptions {
+            paired: self.paired,
+            unmapped_reads: if output_unmapped {
+                PairPolicy::Output
+            } else {
+                policy(&self.unmapped_reads)
+            },
+            chimeric_pairs: policy(&self.chimeric_pairs),
+            unpaired_reads: policy(&self.unpaired_reads),
+        }
+    }
+}
+
 /// Grouping-key options shared by dedup and group.
 #[derive(clap::Args, Clone, Copy)]
 struct PositionArgs {
@@ -764,6 +806,18 @@ impl Commands {
             && args.plot_prefix.is_some()
         {
             note("--plot-prefix is accepted for umi-tools compatibility; plots are not generated");
+        }
+        if let Self::Count(args) = self {
+            if args.pairing.ignore_tlen {
+                note(
+                    "--ignore-tlen is accepted for umi-tools compatibility; count groups per gene, so it has no effect",
+                );
+            }
+            if args.no_sort_output {
+                note(
+                    "--no-sort-output is accepted for umi-tools compatibility; count writes no alignments, so it has no effect",
+                );
+            }
         }
         if let Self::Group(args) = self
             && args.multimapping_detection_method.is_some()
@@ -995,9 +1049,7 @@ fn run(command: Commands) -> Result<String> {
             multimapping_detection_method: _,
             buffer_whole_contig,
             output_unmapped,
-            paired,
-            chimeric_pairs,
-            unmapped,
+            pairing,
             gene,
             common: _,
         }) => run_group_cmd(
@@ -1019,10 +1071,8 @@ fn run(command: Commands) -> Result<String> {
             position.options(),
             mapping_quality,
             buffer_whole_contig,
-            output_unmapped,
-            paired,
-            chimeric_pairs.as_deref(),
-            &unmapped,
+            pairing.options(output_unmapped),
+            pairing.ignore_tlen,
             gene.options(false),
         ),
         Commands::Dedup(DedupArgs {
@@ -1043,8 +1093,7 @@ fn run(command: Commands) -> Result<String> {
             subset,
             gene,
             output_stats,
-            paired,
-            ignore_tlen,
+            pairing,
             filter_umi,
             umi_whitelist,
             umi_whitelist_paired,
@@ -1067,8 +1116,8 @@ fn run(command: Commands) -> Result<String> {
             subset,
             gene.options(false),
             output_stats.as_deref(),
-            paired,
-            ignore_tlen,
+            pairing.options(false),
+            pairing.ignore_tlen,
             filter_umi,
             umi_whitelist.as_deref(),
             umi_whitelist_paired.as_deref(),
@@ -1084,7 +1133,11 @@ fn run(command: Commands) -> Result<String> {
             ignore_umi,
             wide_format,
             edit_distance_threshold,
-            _random_seed: _,
+            random_seed,
+            chrom,
+            subset,
+            no_sort_output: _,
+            pairing,
             common,
         }) => run_count_cmd(
             input.as_deref(),
@@ -1095,6 +1148,10 @@ fn run(command: Commands) -> Result<String> {
             gene.options(true),
             barcode.extractor()?,
             ignore_umi,
+            pairing.options(false),
+            chrom.as_deref(),
+            subset,
+            random_seed,
             wide_format,
             edit_distance_threshold,
             common.compresslevel,
@@ -1419,10 +1476,8 @@ fn run_group_cmd(
     position: PositionOptions,
     mapping_quality: u8,
     buffer_whole_contig: bool,
-    output_unmapped: bool,
-    paired: bool,
-    chimeric_pairs: Option<&str>,
-    unmapped: &str,
+    pairing: PairingOptions,
+    ignore_tlen: bool,
     gene: GeneOptions,
 ) -> Result<String> {
     let input = input_path.context("--stdin is required for group (BAM input path)")?;
@@ -1439,28 +1494,6 @@ fn run_group_cmd(
         "adjacency" => DedupMethod::Adjacency,
         "directional" => DedupMethod::Directional,
         other => bail!("unknown method '{other}'"),
-    };
-
-    let chimeric = match chimeric_pairs {
-        Some("discard") => ChimericPairs::Discard,
-        Some("output") => ChimericPairs::Output,
-        Some("use") | None => ChimericPairs::Use,
-        Some(other) => {
-            bail!("unknown --chimeric-pairs '{other}'; expected 'discard', 'output', or 'use'")
-        }
-    };
-
-    let unmapped_handling = if output_unmapped {
-        UnmappedHandling::Output
-    } else {
-        match unmapped {
-            "discard" => UnmappedHandling::Discard,
-            "output" => UnmappedHandling::Output,
-            "use" => UnmappedHandling::Use,
-            other => {
-                bail!("unknown --unmapped-reads '{other}'; expected 'discard', 'output', or 'use'")
-            }
-        }
     };
 
     let config = GroupConfig {
@@ -1482,9 +1515,8 @@ fn run_group_cmd(
         mapping_quality,
         buffer_whole_contig,
         gene,
-        paired,
-        chimeric_pairs: chimeric,
-        unmapped_handling,
+        pairing,
+        ignore_tlen,
     };
 
     let stats = run_group(&config, input).context("group failed")?;
@@ -1514,7 +1546,7 @@ fn run_dedup_cmd(
     subset: Option<f32>,
     gene: GeneOptions,
     output_stats: Option<&str>,
-    paired: bool,
+    pairing: PairingOptions,
     ignore_tlen: bool,
     filter_umi: bool,
     umi_whitelist_path: Option<&str>,
@@ -1565,7 +1597,7 @@ fn run_dedup_cmd(
         buffer_whole_contig,
         gene,
         output_stats: output_stats.map(String::from),
-        paired,
+        pairing,
         ignore_tlen,
         umi_whitelist,
     };
@@ -1633,6 +1665,10 @@ fn run_count_cmd(
     gene: GeneOptions,
     barcode: BarcodeExtractor,
     ignore_umi: bool,
+    pairing: PairingOptions,
+    chrom: Option<&str>,
+    subset: Option<f32>,
+    random_seed: u64,
     wide_format: bool,
     edit_distance_threshold: u32,
     compresslevel: u32,
@@ -1654,6 +1690,10 @@ fn run_count_cmd(
         gene,
         barcode,
         ignore_umi,
+        pairing,
+        chrom: chrom.map(String::from),
+        subset,
+        random_seed,
         wide_format,
         edit_distance_threshold,
         reference: input_format.reference_filename.clone(),
@@ -1753,7 +1793,7 @@ mod tests {
         let Commands::Group(args) = cli.command else {
             panic!("expected group");
         };
-        assert_eq!(args.unmapped, "use");
+        assert_eq!(args.pairing.unmapped_reads, "use");
     }
 
     #[test]

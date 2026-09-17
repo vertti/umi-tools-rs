@@ -95,4 +95,5 @@ Optparse-style abbreviations work as in UMI-tools, for example `--unmapped` for 
 - `--in-format` and `--in-sam` have no effect because the input format is detected from the file content.
 - `--gene-transcript-map` reads a gene's transcripts in file order. UMI-tools iterates a set, so which read represents a UMI group there varies with the Python hash seed; counts agree.
 - `count` needs `--gene-tag` or `--per-contig`, as UMI-tools does; earlier releases defaulted to `XF`.
+- `group --unpaired-reads=output` writes each unpaired read twice, once ungrouped and once grouped, because UMI-tools yields it and then keeps processing it.
 - Help output is rendered by clap and does not match the UMI-tools text.

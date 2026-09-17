@@ -213,3 +213,93 @@ count_gene_transcript_map:
   outputs: [stdout]
   references: [count_gene_transcript_map.tsv.gz]
   options: count --random-seed=123456789 --method=directional --per-gene --per-contig --gene-transcript-map=<INPUTS>/gene_transcript_map.tsv
+
+dedup_paired_unmapped_reads_use:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [dedup_paired_unmapped_reads_use.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --unmapped-reads=use
+
+dedup_paired_chimeric_pairs_discard:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [dedup_paired_chimeric_pairs_discard.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --chimeric-pairs=discard
+
+dedup_paired_unpaired_reads_use:
+  stdin: paired_mixed_sub.bam
+  outputs: [stdout]
+  references: [dedup_paired_unpaired_reads_use.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789
+
+dedup_paired_unpaired_reads_discard:
+  stdin: paired_mixed_sub.bam
+  outputs: [stdout]
+  references: [dedup_paired_unpaired_reads_discard.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --unpaired-reads=discard
+
+group_paired_unpaired_reads_discard:
+  stdin: paired_mixed_sub.bam
+  outputs: [group_paired_unpaired_reads_discard.tsv]
+  references: [group_paired_unpaired_reads_discard.tsv.gz]
+  options: group --paired --random-seed=123456789 --unpaired-reads=discard --group-out=group_paired_unpaired_reads_discard.tsv
+
+group_paired_unpaired_reads_output:
+  stdin: paired_mixed_sub.bam
+  outputs: [stdout]
+  references: [group_paired_unpaired_reads_output.sam.gz]
+  options: group --paired --out-sam --output-bam --random-seed=123456789 --unpaired-reads=output
+
+group_paired_ignore_tlen:
+  stdin: paired_sub.bam
+  outputs: [group_paired_ignore_tlen.tsv]
+  references: [group_paired_ignore_tlen.tsv.gz]
+  options: group --paired --random-seed=123456789 --ignore-tlen --group-out=group_paired_ignore_tlen.tsv
+
+group_paired_subset:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [group_paired_subset.sam.gz]
+  options: group --paired --out-sam --output-bam --random-seed=123456789 --subset=0.2
+
+count_paired:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [count_paired.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --per-gene --per-contig --paired
+
+count_paired_unmapped_reads_use:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [count_paired_unmapped_reads_use.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --per-gene --per-contig --paired --unmapped-reads=use
+
+count_paired_chimeric_pairs_discard:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [count_paired_chimeric_pairs_discard.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --per-gene --per-contig --paired --chimeric-pairs=discard
+
+count_paired_unpaired_reads_discard:
+  stdin: paired_mixed_sub.bam
+  outputs: [stdout]
+  references: [count_paired_unpaired_reads_discard.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --per-gene --per-contig --paired --unpaired-reads=discard
+
+count_subset:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [count_subset.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --per-gene --per-contig --subset=0.5
+
+count_chrom:
+  stdin: transcripts_sub.bam
+  outputs: [stdout]
+  references: [count_chrom.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --per-gene --per-contig --chrom=ENST00000000003
+
+count_no_sort_output:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [count_no_sort_output.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --per-gene --per-contig --no-sort-output

@@ -5,8 +5,9 @@ use thiserror::Error;
 
 use crate::alignment_io::RecordSource;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
-use crate::dedup::{DedupMethod, count_umis};
+use crate::dedup::{DedupMethod, PythonRandom, TieBreakRng, count_umis};
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
+use crate::pairing::{PairingError, PairingOptions};
 
 #[derive(Error, Debug)]
 pub enum CountError {
@@ -16,6 +17,10 @@ pub enum CountError {
     BamRead(String),
     #[error("count needs --gene-tag or --per-contig")]
     NotPerGene,
+    #[error("unknown chromosome: {0}")]
+    UnknownChrom(String),
+    #[error(transparent)]
+    Pairing(#[from] PairingError),
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -33,6 +38,10 @@ pub struct CountConfig {
     pub edit_distance_threshold: u32,
     pub reference: Option<String>,
     pub mapping_quality: u8,
+    pub pairing: PairingOptions,
+    pub chrom: Option<String>,
+    pub subset: Option<f32>,
+    pub random_seed: u64,
 }
 
 pub struct CountStats {
@@ -61,10 +70,25 @@ pub fn run_count(
     bam_path: &str,
     output: &mut dyn IoWrite,
 ) -> Result<CountStats, CountError> {
+    config.pairing.validate(false)?;
     let mut source = RecordSource::whole(bam_path, config.reference.as_deref())
         .map_err(|e| CountError::BamOpen(e.to_string()))?;
     let assigner =
         GeneAssigner::new(&config.gene, source.header())?.ok_or(CountError::NotPerGene)?;
+    let chrom_filter: Option<i32> = config
+        .chrom
+        .as_ref()
+        .map(|c| {
+            let tid = source
+                .header()
+                .tid(c.as_bytes())
+                .ok_or_else(|| CountError::UnknownChrom(c.clone()))?;
+            #[allow(clippy::cast_possible_wrap)]
+            Ok::<i32, CountError>(tid as i32)
+        })
+        .transpose()?;
+    #[allow(clippy::cast_possible_truncation)]
+    let mut rng = PythonRandom::new(config.random_seed as u32);
     if let Some(map) = assigner.transcript_map() {
         source = RecordSource::by_contig(bam_path, config.reference.as_deref(), map.genes.clone())
             .map_err(|e| CountError::BamOpen(e.to_string()))?;
@@ -82,14 +106,23 @@ pub fn run_count(
         .read_next()
         .map_err(|e| CountError::BamRead(e.to_string()))?
     {
-        if record.is_unmapped() {
-            continue;
-        }
-        if record.is_paired() && record.is_last_in_template() {
+        let tid = record.tid();
+        if chrom_filter.is_some_and(|filter_tid| tid != filter_tid) {
             continue;
         }
 
+        let triage = config.pairing.triage(&record, false);
+        if triage.is_read2 {
+            continue;
+        }
         stats.input_reads += 1;
+        if !triage.grouped {
+            continue;
+        }
+
+        if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
+            continue;
+        }
 
         if record.mapq() < config.mapping_quality {
             continue;
@@ -105,7 +138,6 @@ pub fn run_count(
             continue;
         };
 
-        let tid = record.tid();
         match flusher.before_read(tid) {
             Flush::None => {}
             Flush::All => flush_genes(std::mem::take(&mut buffer), config, &mut rows),
