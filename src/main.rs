@@ -12,6 +12,7 @@ use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use umi_core::alignment_io::{AlignmentFormat, determine_format};
+use umi_core::barcode::{BarcodeExtractor, BarcodeSource};
 use umi_core::count::{CountConfig, CountTabConfig, run_count, run_count_tab};
 use umi_core::dedup::{
     DedupConfig, DedupMethod, MultimappingDetection, PositionOptions, run_dedup,
@@ -245,9 +246,12 @@ struct GroupArgs {
     #[arg(long = "random-seed", default_value = "0")]
     random_seed: u64,
 
-    /// UMI separator in read name
-    #[arg(long = "umi-separator", default_value = "_")]
-    umi_separator: String,
+    #[command(flatten)]
+    barcode: BarcodeArgs,
+
+    /// Tag written with the group's representative UMI
+    #[arg(long = "umi-group-tag", default_value = "BX")]
+    umi_group_tag: String,
 
     /// Only process reads on this chromosome
     #[arg(long = "chrom")]
@@ -349,9 +353,8 @@ struct DedupArgs {
     #[arg(long = "random-seed", default_value = "0")]
     random_seed: u64,
 
-    /// UMI separator in read name
-    #[arg(long = "umi-separator", default_value = "_")]
-    umi_separator: String,
+    #[command(flatten)]
+    barcode: BarcodeArgs,
 
     /// Only process reads on this chromosome
     #[arg(long = "chrom")]
@@ -379,14 +382,6 @@ struct DedupArgs {
     /// Random subset of reads to process (0.0-1.0)
     #[arg(long = "subset")]
     subset: Option<f32>,
-
-    /// UMI extraction method: `read_id` or `tag`
-    #[arg(long = "extract-umi-method", default_value = "read_id")]
-    extract_umi_method: String,
-
-    /// BAM tag to extract UMI from (when extract-umi-method=tag)
-    #[arg(long = "umi-tag")]
-    umi_tag: Option<String>,
 
     /// Deduplicate per gene (requires --gene-tag)
     #[arg(long = "per-gene")]
@@ -457,13 +452,12 @@ struct CountArgs {
     #[arg(long = "skip-tags-regex")]
     skip_tags_regex: Option<String>,
 
-    /// UMI extraction method: umis, `read_id`, tag
-    #[arg(long = "extract-umi-method", default_value = "read_id")]
-    extract_umi_method: String,
+    #[command(flatten)]
+    barcode: BarcodeArgs,
 
-    /// Count per cell barcode
-    #[arg(long = "per-cell")]
-    per_cell: bool,
+    /// Ignore UMIs and count one molecule per gene (and cell)
+    #[arg(long = "ignore-umi", action = ArgAction::SetTrue, overrides_with = "ignore_umi")]
+    ignore_umi: bool,
 
     /// Output wide-format cell counts (requires --per-cell)
     #[arg(long = "wide-format-cell-counts")]
@@ -540,6 +534,77 @@ impl InputFormatArgs {
         if self.input_options.is_some() {
             note_ignored("--input-options");
         }
+    }
+}
+
+/// How the UMI and cell barcode are read from each alignment.
+#[derive(clap::Args, Clone)]
+struct BarcodeArgs {
+    /// How the UMI and cell barcode are encoded: `read_id`, tag or umis
+    #[arg(long = "extract-umi-method", default_value = "read_id", value_parser = ["read_id", "tag", "umis"])]
+    extract_umi_method: String,
+
+    /// Separator between read id and UMI (`read_id` method)
+    #[arg(long = "umi-separator", default_value = "_")]
+    umi_separator: String,
+
+    /// Tag holding the UMI (tag method)
+    #[arg(long = "umi-tag", default_value = "RX")]
+    umi_tag: String,
+
+    /// Split the UMI tag on this string and keep the first part
+    #[arg(long = "umi-tag-split")]
+    umi_tag_split: Option<String>,
+
+    /// Remove this delimiter from the UMI tag
+    #[arg(long = "umi-tag-delimiter")]
+    umi_tag_delimiter: Option<String>,
+
+    /// Tag holding the cell barcode (tag method with --per-cell)
+    #[arg(long = "cell-tag")]
+    cell_tag: Option<String>,
+
+    /// Split the cell tag on this string and keep the first part, e.g. to drop a 10x GEM suffix
+    #[arg(long = "cell-tag-split", default_value = "-")]
+    cell_tag_split: String,
+
+    /// Remove this delimiter from the cell tag
+    #[arg(long = "cell-tag-delimiter")]
+    cell_tag_delimiter: Option<String>,
+
+    /// Group, deduplicate or count per cell barcode
+    #[arg(long = "per-cell", action = ArgAction::SetTrue, overrides_with = "per_cell")]
+    per_cell: bool,
+}
+
+impl BarcodeArgs {
+    fn extractor(&self) -> Result<BarcodeExtractor> {
+        let bytes = |s: &str| s.as_bytes().to_vec();
+        let optional = |s: Option<&str>| s.filter(|s| !s.is_empty()).map(bytes);
+        let source = match self.extract_umi_method.as_str() {
+            "read_id" => BarcodeSource::ReadId {
+                separator: bytes(&self.umi_separator),
+            },
+            "tag" => {
+                if self.per_cell && self.cell_tag.is_none() {
+                    bail!("--per-cell with --extract-umi-method=tag requires --cell-tag");
+                }
+                BarcodeSource::Tag {
+                    umi_tag: bytes(&self.umi_tag),
+                    umi_split: optional(self.umi_tag_split.as_deref()),
+                    umi_delimiter: optional(self.umi_tag_delimiter.as_deref()),
+                    cell_tag: self.cell_tag.as_deref().map(bytes),
+                    cell_split: optional(Some(&self.cell_tag_split)),
+                    cell_delimiter: optional(self.cell_tag_delimiter.as_deref()),
+                }
+            }
+            "umis" => BarcodeSource::Umis,
+            other => bail!("unknown --extract-umi-method '{other}'"),
+        };
+        Ok(BarcodeExtractor {
+            source,
+            per_cell: self.per_cell,
+        })
     }
 }
 
@@ -900,7 +965,8 @@ fn run(command: Commands) -> Result<String> {
             input_format,
             output_format,
             random_seed,
-            umi_separator,
+            barcode,
+            umi_group_tag,
             chrom,
             group_out,
             output_bam,
@@ -928,7 +994,8 @@ fn run(command: Commands) -> Result<String> {
             &input_format,
             &output_format,
             random_seed,
-            &umi_separator,
+            barcode.extractor()?,
+            &umi_group_tag,
             chrom.as_deref(),
             group_out.as_deref(),
             output_bam,
@@ -954,7 +1021,7 @@ fn run(command: Commands) -> Result<String> {
             input_format,
             output_format,
             random_seed,
-            umi_separator,
+            barcode,
             chrom,
             edit_distance_threshold,
             position,
@@ -962,8 +1029,6 @@ fn run(command: Commands) -> Result<String> {
             multimapping_detection_method,
             buffer_whole_contig,
             subset,
-            extract_umi_method,
-            umi_tag,
             per_gene,
             gene_tag,
             skip_tags_regex,
@@ -982,7 +1047,7 @@ fn run(command: Commands) -> Result<String> {
             &input_format,
             &output_format,
             random_seed,
-            &umi_separator,
+            barcode.extractor()?,
             chrom.as_deref(),
             edit_distance_threshold,
             position.options(),
@@ -990,8 +1055,6 @@ fn run(command: Commands) -> Result<String> {
             multimapping_detection_method.as_deref(),
             buffer_whole_contig,
             subset,
-            &extract_umi_method,
-            umi_tag.as_deref(),
             per_gene,
             gene_tag.as_deref(),
             skip_tags_regex.as_deref(),
@@ -1010,8 +1073,8 @@ fn run(command: Commands) -> Result<String> {
             method,
             gene_tag,
             skip_tags_regex,
-            extract_umi_method: _,
-            per_cell,
+            barcode,
+            ignore_umi,
             wide_format,
             edit_distance_threshold,
             _random_seed: _,
@@ -1024,7 +1087,8 @@ fn run(command: Commands) -> Result<String> {
             &method,
             &gene_tag,
             skip_tags_regex.as_deref(),
-            per_cell,
+            barcode.extractor()?,
+            ignore_umi,
             wide_format,
             edit_distance_threshold,
             common.compresslevel,
@@ -1339,7 +1403,8 @@ fn run_group_cmd(
     input_format: &InputFormatArgs,
     output_format: &OutputFormatArgs,
     random_seed: u64,
-    umi_separator: &str,
+    barcode: BarcodeExtractor,
+    umi_group_tag: &str,
     chrom: Option<&str>,
     group_out: Option<&str>,
     output_bam: bool,
@@ -1373,8 +1438,6 @@ fn run_group_cmd(
         other => bail!("unknown method '{other}'"),
     };
 
-    let sep_byte = umi_separator.as_bytes().first().copied().unwrap_or(b'_');
-
     let chimeric = match chimeric_pairs {
         Some("discard") => ChimericPairs::Discard,
         Some("output") => ChimericPairs::Output,
@@ -1400,7 +1463,8 @@ fn run_group_cmd(
     let config = GroupConfig {
         method: dedup_method,
         ignore_umi,
-        umi_separator: sep_byte,
+        barcode,
+        umi_group_tag: umi_group_tag.as_bytes().to_vec(),
         random_seed,
         output_path: output_path.map(String::from),
         output_format: output_format.resolve(output_path)?,
@@ -1440,7 +1504,7 @@ fn run_dedup_cmd(
     input_format: &InputFormatArgs,
     output_format: &OutputFormatArgs,
     random_seed: u64,
-    umi_separator: &str,
+    barcode: BarcodeExtractor,
     chrom: Option<&str>,
     edit_distance_threshold: u32,
     position: PositionOptions,
@@ -1448,8 +1512,6 @@ fn run_dedup_cmd(
     multimapping_detection_method: Option<&str>,
     buffer_whole_contig: bool,
     subset: Option<f32>,
-    extract_umi_method: &str,
-    umi_tag: Option<&str>,
     per_gene: bool,
     gene_tag: Option<&str>,
     skip_tags_regex: Option<&str>,
@@ -1473,8 +1535,6 @@ fn run_dedup_cmd(
         other => bail!("unknown dedup method '{other}'"),
     };
 
-    let sep_byte = umi_separator.as_bytes().first().copied().unwrap_or(b'_');
-
     let multimapping_detection = multimapping_detection_method
         .map(|name| {
             MultimappingDetection::parse(name)
@@ -1493,7 +1553,7 @@ fn run_dedup_cmd(
     let config = DedupConfig {
         method: dedup_method,
         ignore_umi,
-        umi_separator: sep_byte,
+        barcode,
         random_seed,
         output_path: output_path.map(String::from),
         output_format: output_format.resolve(output_path)?,
@@ -1505,8 +1565,6 @@ fn run_dedup_cmd(
         mapping_quality,
         multimapping_detection,
         buffer_whole_contig,
-        extract_umi_method: extract_umi_method.to_string(),
-        umi_tag: umi_tag.map(String::from),
         per_gene,
         gene_tag: gene_tag.map(String::from),
         skip_tags_regex: skip_tags_regex.map(String::from),
@@ -1578,7 +1636,8 @@ fn run_count_cmd(
     method: &str,
     gene_tag: &str,
     skip_tags_regex: Option<&str>,
-    per_cell: bool,
+    barcode: BarcodeExtractor,
+    ignore_umi: bool,
     wide_format: bool,
     edit_distance_threshold: u32,
     compresslevel: u32,
@@ -1599,7 +1658,8 @@ fn run_count_cmd(
         method: dedup_method,
         gene_tag: gene_tag.to_string(),
         skip_tags_regex: skip_tags_regex.map(String::from),
-        per_cell,
+        barcode,
+        ignore_umi,
         wide_format,
         edit_distance_threshold,
         reference: input_format.reference_filename.clone(),
@@ -1798,6 +1858,34 @@ mod tests {
         for command in ["extract", "whitelist", "count", "count_tab"] {
             parse(&[command, required(command), "--random-seed=1"]);
         }
+    }
+
+    #[test]
+    fn per_cell_tag_method_requires_a_cell_tag() {
+        let cli = parse(&[
+            "dedup",
+            "--stdin=in.bam",
+            "--extract-umi-method=tag",
+            "--per-cell",
+        ]);
+        let Commands::Dedup(args) = cli.command else {
+            panic!("expected dedup");
+        };
+        assert!(args.barcode.extractor().is_err());
+        let cli = parse(&[
+            "count",
+            "--stdin=in.bam",
+            "--extract-umi-method=tag",
+            "--per-cell",
+            "--cell-tag=CB",
+            "--umi-tag-delimiter=-",
+        ]);
+        let Commands::Count(args) = cli.command else {
+            panic!("expected count");
+        };
+        let extractor = args.barcode.extractor().unwrap();
+        assert!(extractor.per_cell);
+        assert!(matches!(extractor.source, BarcodeSource::Tag { .. }));
     }
 
     #[test]

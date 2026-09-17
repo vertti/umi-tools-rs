@@ -5,10 +5,11 @@ use std::io::{BufWriter, Write};
 use rust_htslib::bam::{self, Read as BamRead, Record};
 
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
+use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
 use crate::dedup::{
     DedupMethod, GroupKey, PositionOptions, PythonRandom, TieBreakRng, build_adjacency_list,
-    build_directional_adjacency_list, connected_components, extract_umi_from_name,
-    extract_umi_from_tag, five_prime_position, get_read_position, median, min_set_cover,
+    build_directional_adjacency_list, connected_components, extract_umi_from_tag,
+    five_prime_position, get_read_position, median, min_set_cover,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,7 +30,8 @@ pub enum UnmappedHandling {
 pub struct GroupConfig {
     pub method: DedupMethod,
     pub ignore_umi: bool,
-    pub umi_separator: u8,
+    pub barcode: BarcodeExtractor,
+    pub umi_group_tag: Vec<u8>,
     pub random_seed: u64,
     pub output_path: Option<String>,
     pub output_format: AlignmentFormat,
@@ -77,7 +79,12 @@ impl GroupBuffer {
     }
 
     fn add(&mut self, record: Record, pos: i64, key: GroupKey, umi: Vec<u8>) {
-        let umi_map = self.groups.entry(pos).or_default().entry(key).or_default();
+        let umi_map = self
+            .groups
+            .entry(pos)
+            .or_default()
+            .entry(key.clone())
+            .or_default();
 
         if let Some(slot) = umi_map.get_mut(&umi) {
             slot.count += 1;
@@ -243,8 +250,7 @@ fn assign_groups(
 #[allow(clippy::cast_sign_loss)]
 fn process_drained(
     drained: BTreeMap<i64, BTreeMap<GroupKey, HashMap<Vec<u8>, GroupSlot>>>,
-    method: DedupMethod,
-    edit_threshold: u32,
+    config: &GroupConfig,
     unique_id: &mut u32,
     tsv_writer: &mut Option<BufWriter<File>>,
     header_view: &bam::HeaderView,
@@ -269,7 +275,7 @@ fn process_drained(
         let gene_label = gene_labels.get(&pos).map_or("NA", String::as_str);
 
         for (_, mut umi_map) in key_map {
-            let groups = assign_groups(method, &umi_map, edit_threshold);
+            let groups = assign_groups(config.method, &umi_map, config.edit_distance_threshold);
 
             for group in &groups {
                 let top_umi = &group[0];
@@ -282,7 +288,7 @@ fn process_drained(
                     for record in slot.records {
                         if let Some(w) = tsv_writer.as_mut() {
                             let read_name = std::str::from_utf8(record.qname()).unwrap_or("");
-                            let contig =
+                            let contig_name =
                                 std::str::from_utf8(header_view.tid2name(record.tid() as u32))
                                     .unwrap_or("");
                             let umi_str = std::str::from_utf8(umi).unwrap_or("");
@@ -292,7 +298,7 @@ fn process_drained(
                                 w,
                                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                                 read_name,
-                                contig,
+                                contig_name,
                                 read_pos,
                                 gene_label,
                                 umi_str,
@@ -313,7 +319,10 @@ fn process_drained(
                             )
                             .ok();
                         tagged
-                            .push_aux(b"BX", rust_htslib::bam::record::Aux::String(top_umi_str))
+                            .push_aux(
+                                &config.umi_group_tag,
+                                rust_htslib::bam::record::Aux::String(top_umi_str),
+                            )
                             .ok();
 
                         output_records.push(tagged);
@@ -372,7 +381,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                 .tid(c.as_bytes())
                 .ok_or_else(|| GroupError::UnknownChrom(c.clone()))?;
             #[allow(clippy::cast_possible_wrap)]
-            Ok(tid as i32)
+            Ok::<i32, GroupError>(tid as i32)
         })
         .transpose()?;
 
@@ -389,7 +398,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                 "read_id\tcontig\tposition\tgene\tumi\tumi_count\tfinal_umi\tfinal_umi_count\tunique_id"
             )
             .map_err(|e| GroupError::TsvWrite(e.to_string()))?;
-            Ok(w)
+            Ok::<_, GroupError>(w)
         })
         .transpose()?;
 
@@ -490,6 +499,12 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             continue;
         }
 
+        let Some(Barcode { umi, cell }) =
+            config.barcode.for_grouping(&record, config.ignore_umi)?
+        else {
+            continue;
+        };
+
         if config.per_gene {
             // Per-gene mode: group by gene tag value (or contig name) instead of position
             let gene = if config.per_contig {
@@ -522,8 +537,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             if tid != last_chrom && last_chrom >= 0 {
                 output_records.extend(process_drained(
                     buffer.drain_all(),
-                    config.method,
-                    config.edit_distance_threshold,
+                    config,
                     &mut unique_id,
                     &mut tsv_writer,
                     &header_view,
@@ -532,12 +546,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             }
             last_chrom = tid;
 
-            let key: GroupKey = (false, 0, 0, 0);
-            let umi = if config.ignore_umi {
-                Vec::new()
-            } else {
-                extract_umi_from_name(&record, config.umi_separator)
-            };
+            let key: GroupKey = (false, 0, 0, 0, cell);
             buffer.add(record, gene_id, key, umi);
         } else {
             // Standard coordinate mode
@@ -547,8 +556,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             if tid != last_chrom {
                 output_records.extend(process_drained(
                     buffer.drain_all(),
-                    config.method,
-                    config.edit_distance_threshold,
+                    config,
                     &mut unique_id,
                     &mut tsv_writer,
                     &header_view,
@@ -558,8 +566,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                 let threshold = start - 1000;
                 output_records.extend(process_drained(
                     buffer.drain_up_to(threshold),
-                    config.method,
-                    config.edit_distance_threshold,
+                    config,
                     &mut unique_id,
                     &mut tsv_writer,
                     &header_view,
@@ -580,13 +587,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     0
                 };
             let (splice, length) = config.position.key_parts(&position, &record);
-            let key: GroupKey = (record.is_reverse(), splice, tlen, length);
-
-            let umi = if config.ignore_umi {
-                Vec::new()
-            } else {
-                extract_umi_from_name(&record, config.umi_separator)
-            };
+            let key: GroupKey = (record.is_reverse(), splice, tlen, length, cell);
 
             buffer.add(record, position.pos, key, umi);
         }
@@ -594,8 +595,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
 
     output_records.extend(process_drained(
         buffer.drain_all(),
-        config.method,
-        config.edit_distance_threshold,
+        config,
         &mut unique_id,
         &mut tsv_writer,
         &header_view,
@@ -648,4 +648,6 @@ pub enum GroupError {
     InvalidRegex(String),
     #[error("--per-contig requires --per-gene")]
     PerContigRequiresPerGene,
+    #[error(transparent)]
+    Barcode(#[from] BarcodeError),
 }

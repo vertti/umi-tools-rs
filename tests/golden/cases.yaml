@@ -81,3 +81,75 @@ group_edit_distance_2:
   outputs: [group_edit_distance_2.tsv]
   references: [group_edit_distance_2.tsv.gz]
   options: group --random-seed=123456789 --edit-distance-threshold=2 --group-out=group_edit_distance_2.tsv
+
+dedup_read_id_separator:
+  stdin: tags_sub.bam
+  outputs: [stdout]
+  references: [dedup_read_id_separator.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --umi-separator=#
+
+dedup_read_id_per_cell:
+  stdin: tags_sub.bam
+  outputs: [stdout]
+  references: [dedup_read_id_per_cell.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --umi-separator=# --per-cell
+
+dedup_tag_delimiter:
+  stdin: tags_sub.bam
+  outputs: [stdout]
+  references: [dedup_tag_delimiter.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --extract-umi-method=tag --umi-tag=RX --umi-tag-delimiter=-
+
+dedup_tag_split_per_cell:
+  stdin: tags_sub.bam
+  outputs: [stdout]
+  references: [dedup_tag_split_per_cell.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --extract-umi-method=tag --umi-tag=RY --umi-tag-split=- --per-cell --cell-tag=CB
+
+dedup_umis_per_cell:
+  stdin: chr19_gene_tags.bam
+  outputs: [stdout]
+  references: [dedup_umis_per_cell.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --extract-umi-method=umis --per-cell
+
+group_tag_per_cell:
+  stdin: tags_sub.bam
+  outputs: [group_tag_per_cell.tsv]
+  references: [group_tag_per_cell.tsv.gz]
+  options: group --random-seed=123456789 --extract-umi-method=tag --umi-tag=RX --umi-tag-delimiter=- --per-cell --cell-tag=CB --group-out=group_tag_per_cell.tsv
+
+group_umis_per_cell:
+  stdin: chr19_gene_tags.bam
+  outputs: [group_umis_per_cell.tsv]
+  references: [group_umis_per_cell.tsv.gz]
+  options: group --random-seed=123456789 --extract-umi-method=umis --per-cell --group-out=group_umis_per_cell.tsv
+
+count_read_id_default:
+  stdin: chr19_gene_tags.bam
+  outputs: [stdout]
+  references: [count_read_id_default.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --gene-tag=XF --skip-tags-regex="^[__|Unassigned]"
+
+count_tag_per_cell:
+  stdin: tags_sub.bam
+  outputs: [stdout]
+  references: [count_tag_per_cell.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --gene-tag=XF --skip-tags-regex="^[__|Unassigned]" --extract-umi-method=tag --umi-tag=RX --umi-tag-delimiter=- --per-cell --cell-tag=CB
+
+count_separator:
+  stdin: tags_sub.bam
+  outputs: [stdout]
+  references: [count_separator.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --gene-tag=XF --skip-tags-regex="^[__|Unassigned]" --umi-separator=#
+
+group_umi_group_tag:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [group_umi_group_tag.sam.gz]
+  options: group --paired --out-sam --output-bam --random-seed=123456789 --umi-group-tag=ZZ
+
+count_ignore_umi:
+  stdin: chr19_gene_tags.bam
+  outputs: [stdout]
+  references: [count_ignore_umi.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --gene-tag=XF --skip-tags-regex="^[__|Unassigned]" --extract-umi-method=umis --ignore-umi

@@ -6,6 +6,7 @@ use rust_htslib::bam::record::{Aux, Cigar};
 use rust_htslib::bam::{Read as BamRead, Record};
 
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
+use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
 
 /// Trait for RNG used in reservoir-sampling tie-breaks.
 ///
@@ -203,7 +204,6 @@ pub enum DedupMethod {
 pub struct DedupConfig {
     pub method: DedupMethod,
     pub ignore_umi: bool,
-    pub umi_separator: u8,
     pub random_seed: u64,
     pub output_path: Option<String>,
     pub output_format: AlignmentFormat,
@@ -215,8 +215,7 @@ pub struct DedupConfig {
     pub mapping_quality: u8,
     pub multimapping_detection: Option<MultimappingDetection>,
     pub buffer_whole_contig: bool,
-    pub extract_umi_method: String,
-    pub umi_tag: Option<String>,
+    pub barcode: BarcodeExtractor,
     pub per_gene: bool,
     pub gene_tag: Option<String>,
     pub skip_tags_regex: Option<String>,
@@ -435,9 +434,9 @@ fn aux_char(record: &Record, tag: &[u8]) -> Option<u8> {
     }
 }
 
-/// Sub-key within a position group: `(is_reverse, splice_offset, tlen, read_length)`.
-/// With default options, this collapses to `(is_reverse, 0, 0, 0)`.
-pub(crate) type GroupKey = (bool, i64, i64, usize);
+/// Sub-key within a position group: `(is_reverse, splice_offset, tlen, read_length, cell)`.
+/// With default options, this collapses to `(is_reverse, 0, 0, 0, [])`.
+pub(crate) type GroupKey = (bool, i64, i64, usize, Vec<u8>);
 
 /// Holds per-UMI read selection state: best record + reservoir-sampling counter.
 pub(crate) struct UmiSlot {
@@ -482,7 +481,12 @@ impl ReadBuffer {
         rng: &mut impl TieBreakRng,
         detection: Option<MultimappingDetection>,
     ) -> Result<(), DedupError> {
-        let umi_map = self.groups.entry(pos).or_default().entry(key).or_default();
+        let umi_map = self
+            .groups
+            .entry(pos)
+            .or_default()
+            .entry(key.clone())
+            .or_default();
 
         let Some(slot) = umi_map.get_mut(&umi) else {
             let counter = self
@@ -605,7 +609,7 @@ impl ReadBuffer {
                             &selected_umis,
                             &cluster_counts,
                             &bundle_records,
-                            ctx.umi_separator,
+                            &ctx.barcode,
                             &mut ctx.read_gen,
                         );
                     }
@@ -633,7 +637,7 @@ impl ReadBuffer {
 struct StatsContext {
     collector: StatsCollector,
     read_gen: RandomReadGenerator,
-    umi_separator: u8,
+    barcode: BarcodeExtractor,
 }
 
 /// Hamming distance between two byte slices of equal length.
@@ -988,22 +992,6 @@ pub fn count_umis(
 
 /// Extract UMI and optional cell barcode from a read name using the `umis` method.
 ///
-/// Splits `qname` by `:` and looks for `UMI_<seq>` and `CELL_<barcode>` prefixed
-/// fields. Returns `(umi, Option<cell>)`.
-#[must_use]
-pub fn extract_umi_umis(qname: &[u8]) -> (Vec<u8>, Option<Vec<u8>>) {
-    let mut umi = None;
-    let mut cell = None;
-    for part in qname.split(|&b| b == b':') {
-        if part.starts_with(b"UMI_") {
-            umi = Some(part[4..].to_vec());
-        } else if part.starts_with(b"CELL_") {
-            cell = Some(part[5..].to_vec());
-        }
-    }
-    (umi.unwrap_or_default(), cell)
-}
-
 /// Compute the median of a slice of u32 values, returned as f64.
 pub(crate) fn median(values: &[u32]) -> f64 {
     let mut sorted = values.to_vec();
@@ -1185,9 +1173,7 @@ impl RandomReadGenerator {
     fn new(
         bam_path: &str,
         reference: Option<&str>,
-        umi_separator: u8,
-        extract_method: &str,
-        umi_tag: Option<&str>,
+        barcode: &BarcodeExtractor,
         chrom: Option<&str>,
         seed: u32,
     ) -> Result<Self, DedupError> {
@@ -1201,7 +1187,7 @@ impl RandomReadGenerator {
                     .tid(c.as_bytes())
                     .ok_or_else(|| DedupError::UnknownChrom(c.to_string()))?;
                 #[allow(clippy::cast_possible_wrap)]
-                Ok(tid as i32)
+                Ok::<i32, DedupError>(tid as i32)
             })
             .transpose()?;
 
@@ -1222,13 +1208,10 @@ impl RandomReadGenerator {
             {
                 continue;
             }
-            let umi = if extract_method == "tag" {
-                match extract_umi_from_tag(&record, umi_tag.unwrap_or("RX")) {
-                    Some(u) => u,
-                    None => continue,
-                }
-            } else {
-                extract_umi_from_name(&record, umi_separator)
+            let umi = match barcode.extract(&record) {
+                Ok(barcode) => barcode.umi,
+                Err(BarcodeError::MissingTag(_)) => continue,
+                Err(e) => return Err(e.into()),
             };
             let entry = umi_counts.entry(umi.clone());
             if matches!(entry, std::collections::hash_map::Entry::Vacant(_)) {
@@ -1319,7 +1302,7 @@ impl StatsCollector {
         selected_umis: &[Vec<u8>],
         cluster_counts: &[u32],
         selected_records: &[&Record],
-        umi_separator: u8,
+        barcode: &BarcodeExtractor,
         read_gen: &mut RandomReadGenerator,
     ) {
         // Pre-dedup: all UMIs in the bundle
@@ -1344,7 +1327,7 @@ impl StatsCollector {
         // Post-dedup edit distance from the actual output records' UMIs
         let post_umis: Vec<Vec<u8>> = selected_records
             .iter()
-            .map(|r| extract_umi_from_name(r, umi_separator))
+            .map(|r| barcode.extract(r).map(|b| b.umi).unwrap_or_default())
             .collect();
         let post_refs: Vec<&[u8]> = post_umis.iter().map(Vec::as_slice).collect();
         let avg_post = get_average_umi_distance(&post_refs);
@@ -1558,7 +1541,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
                 .tid(c.as_bytes())
                 .ok_or_else(|| DedupError::UnknownChrom(c.clone()))?;
             #[allow(clippy::cast_possible_wrap)]
-            Ok(tid as i32)
+            Ok::<i32, DedupError>(tid as i32)
         })
         .transpose()?;
 
@@ -1596,16 +1579,14 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             let read_gen = RandomReadGenerator::new(
                 input_path,
                 config.reference.as_deref(),
-                config.umi_separator,
-                &config.extract_umi_method,
-                config.umi_tag.as_deref(),
+                &config.barcode,
                 config.chrom.as_deref(),
                 config.random_seed as u32,
             )?;
-            Ok(StatsContext {
+            Ok::<_, DedupError>(StatsContext {
                 collector: StatsCollector::new(),
                 read_gen,
-                umi_separator: config.umi_separator,
+                barcode: config.barcode.clone(),
             })
         })
         .transpose()?;
@@ -1647,15 +1628,10 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             continue;
         }
 
-        let umi = if config.ignore_umi {
-            Vec::new()
-        } else if config.extract_umi_method == "tag" {
-            match extract_umi_from_tag(&record, config.umi_tag.as_deref().unwrap_or("RX")) {
-                Some(u) => u,
-                None => continue,
-            }
-        } else {
-            extract_umi_from_name(&record, config.umi_separator)
+        let Some(Barcode { umi, cell }) =
+            config.barcode.for_grouping(&record, config.ignore_umi)?
+        else {
+            continue;
         };
 
         if config.per_gene {
@@ -1678,7 +1654,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             buffer.add(
                 record,
                 gene_id,
-                (false, 0, 0, 0),
+                (false, 0, 0, 0, cell),
                 umi,
                 &mut rng,
                 config.multimapping_detection,
@@ -1715,7 +1691,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
                 0
             };
             let (splice, length) = config.position.key_parts(&position, &record);
-            let key: GroupKey = (record.is_reverse(), splice, tlen, length);
+            let key: GroupKey = (record.is_reverse(), splice, tlen, length, cell);
             buffer.add(
                 record,
                 position.pos,
@@ -1791,13 +1767,6 @@ pub(crate) fn extract_umi_from_tag(record: &Record, tag: &str) -> Option<Vec<u8>
     }
 }
 
-pub(crate) fn extract_umi_from_name(record: &Record, separator: u8) -> Vec<u8> {
-    let name = record.qname();
-    name.iter()
-        .rposition(|&b| b == separator)
-        .map_or_else(|| name.to_vec(), |pos| name[pos + 1..].to_vec())
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum DedupError {
     #[error("failed to open BAM: {0}")]
@@ -1814,6 +1783,8 @@ pub enum DedupError {
     StatsWrite(String, String),
     #[error("read {0} has no {1} tag for --multimapping-detection-method")]
     MissingTag(String, String),
+    #[error(transparent)]
+    Barcode(#[from] BarcodeError),
 }
 
 #[cfg(test)]
@@ -1876,7 +1847,7 @@ mod tests {
 
     #[test]
     fn multimapping_tag_breaks_mapq_ties_like_umi_tools() {
-        let key: GroupKey = (false, 0, 0, 0);
+        let key: GroupKey = (false, 0, 0, 0, Vec::new());
         let umi = b"ACGT".to_vec();
         let nh = Some(MultimappingDetection::Nh);
         let mut rng = FixedRng {
@@ -1890,35 +1861,70 @@ mod tests {
         };
 
         buffer
-            .add(tagged("a", "NH:i:3"), 100, key, umi.clone(), &mut rng, nh)
+            .add(
+                tagged("a", "NH:i:3"),
+                100,
+                key.clone(),
+                umi.clone(),
+                &mut rng,
+                nh,
+            )
             .unwrap();
         buffer
-            .add(tagged("b", "NH:i:1"), 100, key, umi.clone(), &mut rng, nh)
+            .add(
+                tagged("b", "NH:i:1"),
+                100,
+                key.clone(),
+                umi.clone(),
+                &mut rng,
+                nh,
+            )
             .unwrap();
         assert_eq!(selected(&buffer), (b"b".to_vec(), 1), "fewer hits wins");
         assert_eq!(rng.draws, 1, "the replacement still consumes one draw");
 
         buffer
-            .add(tagged("c", "NH:i:5"), 100, key, umi.clone(), &mut rng, nh)
+            .add(
+                tagged("c", "NH:i:5"),
+                100,
+                key.clone(),
+                umi.clone(),
+                &mut rng,
+                nh,
+            )
             .unwrap();
         assert_eq!(selected(&buffer), (b"b".to_vec(), 1), "more hits loses");
         assert_eq!(rng.draws, 1, "losing consumes no draw");
 
         buffer
-            .add(tagged("d", "NH:i:1"), 100, key, umi.clone(), &mut rng, nh)
+            .add(
+                tagged("d", "NH:i:1"),
+                100,
+                key.clone(),
+                umi.clone(),
+                &mut rng,
+                nh,
+            )
             .unwrap();
         assert_eq!(selected(&buffer), (b"b".to_vec(), 2), "equal hits sample");
         assert_eq!(rng.draws, 2);
 
         let err = buffer
-            .add(tagged("e", "AS:i:1"), 100, key, umi.clone(), &mut rng, nh)
+            .add(
+                tagged("e", "AS:i:1"),
+                100,
+                key.clone(),
+                umi.clone(),
+                &mut rng,
+                nh,
+            )
             .unwrap_err();
         assert!(matches!(err, DedupError::MissingTag(_, _)));
     }
 
     #[test]
     fn xt_unique_beats_repeat() {
-        let key: GroupKey = (false, 0, 0, 0);
+        let key: GroupKey = (false, 0, 0, 0, Vec::new());
         let umi = b"ACGT".to_vec();
         let xt = Some(MultimappingDetection::Xt);
         let mut rng = FixedRng {
@@ -1927,13 +1933,34 @@ mod tests {
         };
         let mut buffer = ReadBuffer::new();
         buffer
-            .add(tagged("r", "XT:A:R"), 100, key, umi.clone(), &mut rng, xt)
+            .add(
+                tagged("r", "XT:A:R"),
+                100,
+                key.clone(),
+                umi.clone(),
+                &mut rng,
+                xt,
+            )
             .unwrap();
         buffer
-            .add(tagged("u", "XT:A:U"), 100, key, umi.clone(), &mut rng, xt)
+            .add(
+                tagged("u", "XT:A:U"),
+                100,
+                key.clone(),
+                umi.clone(),
+                &mut rng,
+                xt,
+            )
             .unwrap();
         buffer
-            .add(tagged("r2", "XT:A:R"), 100, key, umi.clone(), &mut rng, xt)
+            .add(
+                tagged("r2", "XT:A:R"),
+                100,
+                key.clone(),
+                umi.clone(),
+                &mut rng,
+                xt,
+            )
             .unwrap();
         let slot = &buffer.groups[&100][&key][&umi];
         assert_eq!(slot.record.qname(), b"u");
