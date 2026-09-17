@@ -27,6 +27,7 @@ pub struct CountConfig {
     pub wide_format: bool,
     pub edit_distance_threshold: u32,
     pub reference: Option<String>,
+    pub mapping_quality: u8,
 }
 
 pub struct CountStats {
@@ -77,6 +78,10 @@ pub fn run_count(
         }
 
         stats.input_reads += 1;
+
+        if record.mapq() < config.mapping_quality {
+            continue;
+        }
 
         let gene = match record.aux(config.gene_tag.as_bytes()) {
             Ok(Aux::String(s)) => s.to_string(),

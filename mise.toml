@@ -35,6 +35,10 @@ run = "uv run --group test pytest tests/umi_tools_compat -v"
 description = "Run umi-tools compatibility tests"
 depends = ["build"]
 
+[tasks.golden]
+run = "uv run --group bench python tests/golden/generate.py"
+description = "Regenerate tests/golden references with Python umi_tools"
+
 [tasks.bench-setup]
 run = "bash benchmarks/setup.sh"
 description = "Download benchmark data"

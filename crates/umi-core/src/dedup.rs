@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::Write as IoWrite;
 
+use rust_htslib::bam::record::{Aux, Cigar};
 use rust_htslib::bam::{Read as BamRead, Record};
 
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
@@ -209,7 +210,11 @@ pub struct DedupConfig {
     pub reference: Option<String>,
     pub chrom: Option<String>,
     pub edit_distance_threshold: u32,
+    pub position: PositionOptions,
     pub subset: Option<f32>,
+    pub mapping_quality: u8,
+    pub multimapping_detection: Option<MultimappingDetection>,
+    pub buffer_whole_contig: bool,
     pub extract_umi_method: String,
     pub umi_tag: Option<String>,
     pub per_gene: bool,
@@ -228,34 +233,211 @@ pub struct DedupStats {
 }
 
 /// Length of a trailing/leading soft-clip, or 0 if the CIGAR op isn't `S`.
-pub(crate) fn soft_clip_len(op: Option<&rust_htslib::bam::record::Cigar>) -> i64 {
+pub(crate) fn soft_clip_len(op: Option<&Cigar>) -> i64 {
     match op {
         Some(c) if c.char() == 'S' => i64::from(c.len()),
         _ => 0,
     }
 }
 
-/// Returns `(start, pos)` for a read.
-///
-/// - `start`: leftmost aligned position (used for buffer-flush decisions)
-/// - `pos`: 5′ coordinate accounting for soft-clipping (used for grouping)
-///
-/// Matches Python `get_read_position()` with default `soft_clip_threshold=4`.
-pub(crate) fn get_read_position(record: &Record) -> (i64, i64) {
-    let cigar = record.cigar();
-    if record.is_reverse() {
-        let start = record.pos();
-        let pos = cigar.end_pos() + soft_clip_len(cigar.last());
-        (start, pos)
-    } else {
-        let pos = record.pos() - soft_clip_len(cigar.first());
-        (pos, pos)
+/// Grouping-key options shared by dedup and group.
+#[derive(Debug, Clone, Copy)]
+pub struct PositionOptions {
+    /// Keep spliced and unspliced reads at the same position apart.
+    pub spliced_is_unique: bool,
+    /// A 5′ soft clip longer than this counts as splicing.
+    pub soft_clip_threshold: f64,
+    /// Add the read length to the grouping key.
+    pub read_length: bool,
+}
+
+impl Default for PositionOptions {
+    fn default() -> Self {
+        Self {
+            spliced_is_unique: false,
+            soft_clip_threshold: 4.0,
+            read_length: false,
+        }
     }
 }
 
-/// Sub-key within a position group: `(is_reverse, is_spliced, tlen, read_length)`.
-/// With default options, this collapses to `(is_reverse, false, 0, 0)`.
-pub(crate) type GroupKey = (bool, bool, i64, usize);
+impl PositionOptions {
+    /// The `(splice, read_length)` parts of a `GroupKey` for a read.
+    pub(crate) fn key_parts(self, position: &ReadPosition, record: &Record) -> (i64, usize) {
+        let splice = if self.spliced_is_unique {
+            position.splice_offset
+        } else {
+            0
+        };
+        let length = if self.read_length {
+            record.seq_len()
+        } else {
+            0
+        };
+        (splice, length)
+    }
+}
+
+/// A read's position as `umi_tools.sam_methods.get_read_position` computes it.
+pub(crate) struct ReadPosition {
+    /// Leftmost aligned position, used for buffer-flush decisions.
+    pub(crate) start: i64,
+    /// 5′ coordinate accounting for soft-clipping, used for grouping.
+    pub(crate) pos: i64,
+    /// Offset of the first splice from the 5′ end, or 0 when the read does not count as spliced.
+    pub(crate) splice_offset: i64,
+}
+
+/// 5′ coordinate of a read accounting for soft-clipping.
+pub(crate) fn five_prime_position(record: &Record) -> i64 {
+    let cigar = record.cigar();
+    if record.is_reverse() {
+        cigar.end_pos() + soft_clip_len(cigar.last())
+    } else {
+        record.pos() - soft_clip_len(cigar.first())
+    }
+}
+
+pub(crate) fn get_read_position(record: &Record, soft_clip_threshold: f64) -> ReadPosition {
+    let cigar = record.cigar();
+    let has_splice = cigar.iter().any(|op| op.char() == 'N');
+    let pos = five_prime_position(record);
+    if record.is_reverse() {
+        #[allow(clippy::cast_precision_loss)]
+        let clipped = soft_clip_len(cigar.first()) as f64 > soft_clip_threshold;
+        let splice_offset = if has_splice || clipped {
+            find_splice(cigar.iter().rev())
+        } else {
+            0
+        };
+        ReadPosition {
+            start: record.pos(),
+            pos,
+            splice_offset,
+        }
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        let clipped = soft_clip_len(cigar.last()) as f64 > soft_clip_threshold;
+        let splice_offset = if has_splice || clipped {
+            find_splice(cigar.iter())
+        } else {
+            0
+        };
+        ReadPosition {
+            start: pos,
+            pos,
+            splice_offset,
+        }
+    }
+}
+
+/// `umi_tools.sam_methods.find_splice`: reference offset of the first `N` or `S`
+/// after a skipped leading soft clip, or 0 when there is none. Python returns
+/// `False` for none, which compares and hashes equal to 0 in the grouping key.
+fn find_splice<'a>(ops: impl Iterator<Item = &'a Cigar>) -> i64 {
+    let mut ops = ops.peekable();
+    let mut offset = ops
+        .next_if(|op| op.char() == 'S')
+        .map_or(0, |first| i64::from(first.len()));
+    for op in ops {
+        match op.char() {
+            'N' | 'S' => return offset,
+            'M' | 'D' | '=' | 'X' => offset += i64::from(op.len()),
+            _ => {}
+        }
+    }
+    0
+}
+
+/// Aligner tag consulted to break MAPQ ties between reads with the same position and UMI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultimappingDetection {
+    Nh,
+    X0,
+    Xt,
+}
+
+impl MultimappingDetection {
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "NH" => Some(Self::Nh),
+            "X0" => Some(Self::X0),
+            "XT" => Some(Self::Xt),
+            _ => None,
+        }
+    }
+
+    const fn tag(self) -> &'static [u8; 2] {
+        match self {
+            Self::Nh => b"NH",
+            Self::X0 => b"X0",
+            Self::Xt => b"XT",
+        }
+    }
+
+    /// `Some(true)` when `candidate` maps more uniquely than `current`, `Some(false)`
+    /// when it maps less uniquely, `None` when the tag does not separate them.
+    fn prefers_candidate(
+        self,
+        current: &Record,
+        candidate: &Record,
+    ) -> Result<Option<bool>, DedupError> {
+        let tag = self.tag();
+        let missing = |record: &Record| {
+            DedupError::MissingTag(
+                String::from_utf8_lossy(record.qname()).into_owned(),
+                String::from_utf8_lossy(tag).into_owned(),
+            )
+        };
+        match self {
+            Self::Nh | Self::X0 => {
+                let old = aux_int(current, tag).ok_or_else(|| missing(current))?;
+                let new = aux_int(candidate, tag).ok_or_else(|| missing(candidate))?;
+                Ok(match old.cmp(&new) {
+                    std::cmp::Ordering::Less => Some(false),
+                    std::cmp::Ordering::Greater => Some(true),
+                    std::cmp::Ordering::Equal => None,
+                })
+            }
+            Self::Xt => {
+                let old = aux_char(current, tag).ok_or_else(|| missing(current))?;
+                let new = aux_char(candidate, tag).ok_or_else(|| missing(candidate))?;
+                Ok(if old == b'U' {
+                    Some(false)
+                } else if new == b'U' {
+                    Some(true)
+                } else {
+                    None
+                })
+            }
+        }
+    }
+}
+
+fn aux_int(record: &Record, tag: &[u8]) -> Option<i64> {
+    match record.aux(tag).ok()? {
+        Aux::I8(v) => Some(i64::from(v)),
+        Aux::U8(v) => Some(i64::from(v)),
+        Aux::I16(v) => Some(i64::from(v)),
+        Aux::U16(v) => Some(i64::from(v)),
+        Aux::I32(v) => Some(i64::from(v)),
+        Aux::U32(v) => Some(i64::from(v)),
+        _ => None,
+    }
+}
+
+fn aux_char(record: &Record, tag: &[u8]) -> Option<u8> {
+    match record.aux(tag).ok()? {
+        Aux::Char(c) => Some(c),
+        Aux::String(s) => s.bytes().next(),
+        _ => None,
+    }
+}
+
+/// Sub-key within a position group: `(is_reverse, splice_offset, tlen, read_length)`.
+/// With default options, this collapses to `(is_reverse, 0, 0, 0)`.
+pub(crate) type GroupKey = (bool, i64, i64, usize);
 
 /// Holds per-UMI read selection state: best record + reservoir-sampling counter.
 pub(crate) struct UmiSlot {
@@ -298,7 +480,8 @@ impl ReadBuffer {
         key: GroupKey,
         umi: Vec<u8>,
         rng: &mut impl TieBreakRng,
-    ) {
+        detection: Option<MultimappingDetection>,
+    ) -> Result<(), DedupError> {
         let umi_map = self.groups.entry(pos).or_default().entry(key).or_default();
 
         let Some(slot) = umi_map.get_mut(&umi) else {
@@ -321,7 +504,7 @@ impl ReadBuffer {
                     insertion_order: order,
                 },
             );
-            return;
+            return Ok(());
         };
 
         slot.count += 1;
@@ -335,12 +518,28 @@ impl ReadBuffer {
                 slot.tie_count = 0;
             }
             std::cmp::Ordering::Equal => {
-                slot.tie_count += 1;
-                if rng.random() < 1.0 / f64::from(slot.tie_count) {
-                    slot.record = record;
+                let verdict = detection
+                    .map(|d| d.prefers_candidate(&slot.record, &record))
+                    .transpose()?
+                    .flatten();
+                match verdict {
+                    Some(false) => {}
+                    Some(true) => {
+                        // umi_tools resets the tie counter and then still draws once with probability 1.
+                        slot.record = record;
+                        slot.tie_count = 1;
+                        rng.random();
+                    }
+                    None => {
+                        slot.tie_count += 1;
+                        if rng.random() < 1.0 / f64::from(slot.tie_count) {
+                            slot.record = record;
+                        }
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     /// Drain all position groups with `pos <= threshold`, applying UMI dedup selection.
@@ -1444,6 +1643,10 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             continue;
         }
 
+        if record.mapq() < config.mapping_quality {
+            continue;
+        }
+
         let umi = if config.ignore_umi {
             Vec::new()
         } else if config.extract_umi_method == "tag" {
@@ -1472,9 +1675,17 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
                 next_gene_id += 1;
                 id
             });
-            buffer.add(record, gene_id, (false, false, 0, 0), umi, &mut rng);
+            buffer.add(
+                record,
+                gene_id,
+                (false, 0, 0, 0),
+                umi,
+                &mut rng,
+                config.multimapping_detection,
+            )?;
         } else {
-            let (start, pos) = get_read_position(&record);
+            let position = get_read_position(&record, config.position.soft_clip_threshold);
+            let start = position.start;
 
             // Flush buffer when moving far enough or changing chromosome.
             if tid != last_chrom {
@@ -1484,7 +1695,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
                     &mut stats_ctx,
                     wl_ref,
                 ));
-            } else if start > last_start + 1000 {
+            } else if !config.buffer_whole_contig && start > last_start + 1000 {
                 let threshold = start - 1000;
                 output_records.extend(buffer.drain_up_to(
                     threshold,
@@ -1503,8 +1714,16 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             } else {
                 0
             };
-            let key: GroupKey = (record.is_reverse(), false, tlen, 0);
-            buffer.add(record, pos, key, umi, &mut rng);
+            let (splice, length) = config.position.key_parts(&position, &record);
+            let key: GroupKey = (record.is_reverse(), splice, tlen, length);
+            buffer.add(
+                record,
+                position.pos,
+                key,
+                umi,
+                &mut rng,
+                config.multimapping_detection,
+            )?;
         }
     }
 
@@ -1593,11 +1812,152 @@ pub enum DedupError {
     InvalidRegex(String),
     #[error("failed to write stats file {0}: {1}")]
     StatsWrite(String, String),
+    #[error("read {0} has no {1} tag for --multimapping-detection-method")]
+    MissingTag(String, String),
 }
 
 #[cfg(test)]
 mod tests {
+    use rust_htslib::bam::HeaderView;
+
     use super::*;
+
+    fn record(flag: u16, cigar: &str) -> Record {
+        let header = HeaderView::from_bytes(b"@SQ\tSN:chr1\tLN:100000\n");
+        let line = format!("r\t{flag}\tchr1\t101\t60\t{cigar}\t*\t0\t0\t*\t*");
+        Record::from_sam(&header, line.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn read_position_matches_umi_tools() {
+        // Expected values from umi_tools.sam_methods.get_read_position via pysam (0-based).
+        let cases: [(u16, &str, f64, i64, i64, i64); 13] = [
+            (0, "10M", 4.0, 100, 100, 0),
+            (0, "5S10M", 4.0, 95, 95, 0),
+            (0, "10M5S", 4.0, 100, 100, 10),
+            (0, "10M5S", 5.0, 100, 100, 0),
+            (0, "3S10M5S", 4.0, 97, 97, 13),
+            (0, "10M100N10M", 4.0, 100, 100, 10),
+            (0, "2S10M100N10M", 4.0, 98, 98, 12),
+            (16, "10M5S", 4.0, 100, 115, 0),
+            (16, "5S10M", 4.0, 100, 110, 10),
+            (16, "10M100N10M5S", 4.0, 100, 225, 15),
+            (16, "10M100N10M", 4.0, 100, 220, 10),
+            (0, "4M2I6M50N10M", 4.0, 100, 100, 10),
+            (0, "4M2D6M50N10M", 4.0, 100, 100, 12),
+        ];
+        for (flag, cigar, threshold, start, pos, splice) in cases {
+            let p = get_read_position(&record(flag, cigar), threshold);
+            assert_eq!(
+                (p.start, p.pos, p.splice_offset),
+                (start, pos, splice),
+                "flag={flag} cigar={cigar} threshold={threshold}"
+            );
+        }
+    }
+
+    struct FixedRng {
+        value: f64,
+        draws: u32,
+    }
+
+    impl TieBreakRng for FixedRng {
+        fn random(&mut self) -> f64 {
+            self.draws += 1;
+            self.value
+        }
+    }
+
+    fn tagged(name: &str, tags: &str) -> Record {
+        let header = HeaderView::from_bytes(b"@SQ\tSN:chr1\tLN:100000\n");
+        let line = format!("{name}\t0\tchr1\t101\t60\t10M\t*\t0\t0\t*\t*\t{tags}");
+        Record::from_sam(&header, line.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn multimapping_tag_breaks_mapq_ties_like_umi_tools() {
+        let key: GroupKey = (false, 0, 0, 0);
+        let umi = b"ACGT".to_vec();
+        let nh = Some(MultimappingDetection::Nh);
+        let mut rng = FixedRng {
+            value: 0.5,
+            draws: 0,
+        };
+        let mut buffer = ReadBuffer::new();
+        let selected = |buffer: &ReadBuffer| {
+            let slot = &buffer.groups[&100][&key][&umi];
+            (slot.record.qname().to_vec(), slot.tie_count)
+        };
+
+        buffer
+            .add(tagged("a", "NH:i:3"), 100, key, umi.clone(), &mut rng, nh)
+            .unwrap();
+        buffer
+            .add(tagged("b", "NH:i:1"), 100, key, umi.clone(), &mut rng, nh)
+            .unwrap();
+        assert_eq!(selected(&buffer), (b"b".to_vec(), 1), "fewer hits wins");
+        assert_eq!(rng.draws, 1, "the replacement still consumes one draw");
+
+        buffer
+            .add(tagged("c", "NH:i:5"), 100, key, umi.clone(), &mut rng, nh)
+            .unwrap();
+        assert_eq!(selected(&buffer), (b"b".to_vec(), 1), "more hits loses");
+        assert_eq!(rng.draws, 1, "losing consumes no draw");
+
+        buffer
+            .add(tagged("d", "NH:i:1"), 100, key, umi.clone(), &mut rng, nh)
+            .unwrap();
+        assert_eq!(selected(&buffer), (b"b".to_vec(), 2), "equal hits sample");
+        assert_eq!(rng.draws, 2);
+
+        let err = buffer
+            .add(tagged("e", "AS:i:1"), 100, key, umi.clone(), &mut rng, nh)
+            .unwrap_err();
+        assert!(matches!(err, DedupError::MissingTag(_, _)));
+    }
+
+    #[test]
+    fn xt_unique_beats_repeat() {
+        let key: GroupKey = (false, 0, 0, 0);
+        let umi = b"ACGT".to_vec();
+        let xt = Some(MultimappingDetection::Xt);
+        let mut rng = FixedRng {
+            value: 0.5,
+            draws: 0,
+        };
+        let mut buffer = ReadBuffer::new();
+        buffer
+            .add(tagged("r", "XT:A:R"), 100, key, umi.clone(), &mut rng, xt)
+            .unwrap();
+        buffer
+            .add(tagged("u", "XT:A:U"), 100, key, umi.clone(), &mut rng, xt)
+            .unwrap();
+        buffer
+            .add(tagged("r2", "XT:A:R"), 100, key, umi.clone(), &mut rng, xt)
+            .unwrap();
+        let slot = &buffer.groups[&100][&key][&umi];
+        assert_eq!(slot.record.qname(), b"u");
+        assert_eq!(rng.draws, 1);
+    }
+
+    #[test]
+    fn key_parts_follow_options() {
+        // read_length is the SEQ length as stored, soft clips included.
+        let header = HeaderView::from_bytes(b"@SQ\tSN:chr1\tLN:100000\n");
+        let line = b"r\t0\tchr1\t101\t60\t10M5S\t*\t0\t0\tACGTACGTACGTACG\t*";
+        let read = Record::from_sam(&header, line).unwrap();
+        let position = get_read_position(&read, 4.0);
+        assert_eq!(
+            PositionOptions::default().key_parts(&position, &read),
+            (0, 0)
+        );
+        let all = PositionOptions {
+            spliced_is_unique: true,
+            soft_clip_threshold: 4.0,
+            read_length: true,
+        };
+        assert_eq!(all.key_parts(&position, &read), (10, 15));
+    }
 
     #[test]
     fn python_random_matches() {

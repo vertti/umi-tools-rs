@@ -1,0 +1,83 @@
+# Cases for flags the upstream test suite does not exercise. Same schema as
+# upstream tests/tests.yaml. stdin names a file in tests/golden/inputs (subsampled
+# from the upstream test data with samtools view -s) or, failing that, in the
+# upstream tests directory. References live here, gzipped, and are regenerated
+# with tests/golden/generate.py.
+
+dedup_spliced_is_unique:
+  stdin: chr19_gene_tags.bam
+  outputs: [stdout]
+  references: [dedup_spliced_is_unique.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --spliced-is-unique
+
+dedup_spliced_soft_clip_threshold:
+  stdin: whitelist_umi_sub.bam
+  outputs: [stdout]
+  references: [dedup_spliced_soft_clip_threshold.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --spliced-is-unique --soft-clip-threshold=0
+
+dedup_read_length:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [dedup_read_length.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --read-length
+
+group_spliced_is_unique:
+  stdin: whitelist_umi_sub.bam
+  outputs: [group_spliced_is_unique.tsv]
+  references: [group_spliced_is_unique.tsv.gz]
+  options: group --paired --random-seed=123456789 --spliced-is-unique --soft-clip-threshold=0 --group-out=group_spliced_is_unique.tsv
+
+group_read_length:
+  stdin: paired_sub.bam
+  outputs: [group_read_length.tsv]
+  references: [group_read_length.tsv.gz]
+  options: group --paired --random-seed=123456789 --read-length --group-out=group_read_length.tsv
+
+dedup_paired_mapq:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [dedup_paired_mapq.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --mapping-quality=20
+
+dedup_single_mapq:
+  stdin: chr19_gene_tags.bam
+  outputs: [stdout]
+  references: [dedup_single_mapq.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --mapping-quality=20
+
+group_mapq:
+  stdin: paired_sub.bam
+  outputs: [group_mapq.tsv]
+  references: [group_mapq.tsv.gz]
+  options: group --paired --random-seed=123456789 --mapping-quality=20 --group-out=group_mapq.tsv
+
+dedup_multimapping_nh:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [dedup_multimapping_nh.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --multimapping-detection-method=NH
+
+dedup_multimapping_nh_whitelist_input:
+  stdin: whitelist_umi_sub.bam
+  outputs: [stdout]
+  references: [dedup_multimapping_nh_whitelist_input.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --multimapping-detection-method=NH
+
+dedup_buffer_whole_contig:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [dedup_buffer_whole_contig.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --buffer-whole-contig
+
+group_buffer_whole_contig:
+  stdin: paired_sub.bam
+  outputs: [group_buffer_whole_contig.tsv]
+  references: [group_buffer_whole_contig.tsv.gz]
+  options: group --paired --random-seed=123456789 --whole-contig --group-out=group_buffer_whole_contig.tsv
+
+group_edit_distance_2:
+  stdin: chr19_sub.bam
+  outputs: [group_edit_distance_2.tsv]
+  references: [group_edit_distance_2.tsv.gz]
+  options: group --random-seed=123456789 --edit-distance-threshold=2 --group-out=group_edit_distance_2.tsv

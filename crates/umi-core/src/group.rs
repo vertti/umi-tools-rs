@@ -6,9 +6,9 @@ use rust_htslib::bam::{self, Read as BamRead, Record};
 
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
 use crate::dedup::{
-    DedupMethod, GroupKey, PythonRandom, TieBreakRng, build_adjacency_list,
+    DedupMethod, GroupKey, PositionOptions, PythonRandom, TieBreakRng, build_adjacency_list,
     build_directional_adjacency_list, connected_components, extract_umi_from_name,
-    extract_umi_from_tag, get_read_position, median, min_set_cover,
+    extract_umi_from_tag, five_prime_position, get_read_position, median, min_set_cover,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,7 +39,10 @@ pub struct GroupConfig {
     pub chrom: Option<String>,
     pub group_out: Option<String>,
     pub edit_distance_threshold: u32,
+    pub position: PositionOptions,
     pub subset: Option<f32>,
+    pub mapping_quality: u8,
+    pub buffer_whole_contig: bool,
     pub per_gene: bool,
     pub gene_tag: Option<String>,
     pub skip_tags_regex: Option<String>,
@@ -283,7 +286,7 @@ fn process_drained(
                                 std::str::from_utf8(header_view.tid2name(record.tid() as u32))
                                     .unwrap_or("");
                             let umi_str = std::str::from_utf8(umi).unwrap_or("");
-                            let (_, read_pos) = get_read_position(&record);
+                            let read_pos = five_prime_position(&record);
 
                             writeln!(
                                 w,
@@ -483,6 +486,10 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             }
         }
 
+        if record.mapq() < config.mapping_quality {
+            continue;
+        }
+
         if config.per_gene {
             // Per-gene mode: group by gene tag value (or contig name) instead of position
             let gene = if config.per_contig {
@@ -525,7 +532,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             }
             last_chrom = tid;
 
-            let key: GroupKey = (false, false, 0, 0);
+            let key: GroupKey = (false, 0, 0, 0);
             let umi = if config.ignore_umi {
                 Vec::new()
             } else {
@@ -534,7 +541,8 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             buffer.add(record, gene_id, key, umi);
         } else {
             // Standard coordinate mode
-            let (start, pos) = get_read_position(&record);
+            let position = get_read_position(&record, config.position.soft_clip_threshold);
+            let start = position.start;
 
             if tid != last_chrom {
                 output_records.extend(process_drained(
@@ -546,7 +554,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     &header_view,
                     &gene_labels,
                 )?);
-            } else if start > last_start + 1000 {
+            } else if !config.buffer_whole_contig && start > last_start + 1000 {
                 let threshold = start - 1000;
                 output_records.extend(process_drained(
                     buffer.drain_up_to(threshold),
@@ -571,7 +579,8 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                 } else {
                     0
                 };
-            let key: GroupKey = (record.is_reverse(), false, tlen, 0);
+            let (splice, length) = config.position.key_parts(&position, &record);
+            let key: GroupKey = (record.is_reverse(), splice, tlen, length);
 
             let umi = if config.ignore_umi {
                 Vec::new()
@@ -579,7 +588,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                 extract_umi_from_name(&record, config.umi_separator)
             };
 
-            buffer.add(record, pos, key, umi);
+            buffer.add(record, position.pos, key, umi);
         }
     }
 
