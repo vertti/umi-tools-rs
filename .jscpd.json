@@ -1,0 +1,10 @@
+{
+  "format": ["rust"],
+  "minLines": 10,
+  "minTokens": 100,
+  "mode": "weak",
+  "ignoreIdentifiers": true,
+  "ignorePattern": ["(?s)#\\[cfg\\(test\\)\\].*"],
+  "reporters": ["console"],
+  "noColors": true
+}

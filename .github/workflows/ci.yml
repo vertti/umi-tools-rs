@@ -17,6 +17,9 @@ jobs:
       - run: mise run ci
         env:
           MISE_AUTO_INSTALL: "false"
+      - run: mise run duplicates
+        env:
+          MISE_AUTO_INSTALL: "false"
 
   compat:
     runs-on: ubuntu-latest

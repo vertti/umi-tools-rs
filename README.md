@@ -84,6 +84,10 @@ umi-tools-rs dedup --stdin=aligned.cram --reference-filename=genome.fa --stdout=
 
 Synthetic extraction tests also cover combinations of patterns, output destinations, filtering, and pair reconciliation, with expected outputs checked against Python umi_tools.
 
+`mise run duplicates` runs pinned [jscpd](https://github.com/kucherenko/jscpd) and fails on new duplicated Rust blocks of at least 10 lines and 100 tokens, including copies with renamed identifiers. CI runs this alongside the Rust checks. Inline test modules are excluded; existing production duplicates are recorded in `.jscpd-baseline.json` so they can be removed incrementally. This catches copied blocks, not every repeated algorithm, and does not replace compatibility tests.
+
+After reviewing an intentional duplication or removing existing copies, refresh the baseline with `uvx --from jscpd==5.2.1 jscpd --config .jscpd.json --baseline .jscpd-baseline.json --update-baseline src crates` and review its diff. Do not refresh it just to make a failure disappear.
+
 ## Compatibility notes
 
 Optparse-style abbreviations work as in UMI-tools, for example `--unmapped` for `--unmapped-reads`. Flags UMI-tools accepts that umi-tools-rs does not implement are rejected with an error rather than silently ignored. Known differences:
