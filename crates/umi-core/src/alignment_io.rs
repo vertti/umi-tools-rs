@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use rust_htslib::bam::{self, HeaderView};
+use rust_htslib::bam::record::Aux;
+use rust_htslib::bam::{self, HeaderView, Read as _, Record};
 use rust_htslib::errors::Error as HtsError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -104,6 +105,111 @@ pub fn open_writer(
         writer.set_reference(reference)?;
     }
     Ok(writer)
+}
+
+/// Records in file order, or contig by contig in the order a gene-transcript map
+/// dictates, each then tagged `MC:Z:<gene>` as `umi_tools`' `metafetcher` does.
+pub enum RecordSource {
+    Whole(bam::Reader),
+    ByContig {
+        reader: bam::IndexedReader,
+        plan: Vec<(Vec<u8>, Vec<u32>)>,
+        gene: usize,
+        contig: usize,
+        fetched: bool,
+    },
+}
+
+impl RecordSource {
+    /// # Errors
+    ///
+    /// Returns htslib errors from opening the file or the reference.
+    pub fn whole(path: &str, reference: Option<&str>) -> Result<Self, HtsError> {
+        Ok(Self::Whole(open_reader(path, reference)?))
+    }
+
+    /// Reads each gene's transcripts in turn; needs a BAM index.
+    ///
+    /// # Errors
+    ///
+    /// Returns htslib errors from opening the file, its index or the reference.
+    pub fn by_contig(
+        path: &str,
+        reference: Option<&str>,
+        plan: Vec<(Vec<u8>, Vec<u32>)>,
+    ) -> Result<Self, HtsError> {
+        let mut reader = bam::IndexedReader::from_path(path)?;
+        if let Some(reference) = reference {
+            reader.set_reference(reference)?;
+        }
+        Ok(Self::ByContig {
+            reader,
+            plan,
+            gene: 0,
+            contig: 0,
+            fetched: false,
+        })
+    }
+
+    #[must_use]
+    pub fn header(&self) -> &HeaderView {
+        match self {
+            Self::Whole(reader) => reader.header(),
+            Self::ByContig { reader, .. } => reader.header(),
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Returns htslib errors from reading or fetching.
+    pub fn read_next(&mut self) -> Result<Option<Record>, HtsError> {
+        match self {
+            Self::Whole(reader) => {
+                let mut record = Record::new();
+                match reader.read(&mut record) {
+                    Some(Ok(())) => Ok(Some(record)),
+                    Some(Err(e)) => Err(e),
+                    None => Ok(None),
+                }
+            }
+            Self::ByContig {
+                reader,
+                plan,
+                gene,
+                contig,
+                fetched,
+            } => loop {
+                let Some((name, tids)) = plan.get(*gene) else {
+                    return Ok(None);
+                };
+                if tids.is_empty() {
+                    *gene += 1;
+                    continue;
+                }
+                if !*fetched {
+                    reader.fetch(tids[*contig])?;
+                    *fetched = true;
+                }
+                let mut record = Record::new();
+                match reader.read(&mut record) {
+                    Some(Ok(())) => {
+                        let name = String::from_utf8_lossy(name);
+                        record.push_aux(b"MC", Aux::String(&name))?;
+                        return Ok(Some(record));
+                    }
+                    Some(Err(e)) => return Err(e),
+                    None => {
+                        *fetched = false;
+                        *contig += 1;
+                        if *contig >= tids.len() {
+                            *gene += 1;
+                            *contig = 0;
+                        }
+                    }
+                }
+            },
+        }
+    }
 }
 
 /// Header for coordinate-sorted output, rewritten the way `samtools sort` does it.

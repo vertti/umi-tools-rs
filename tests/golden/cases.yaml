@@ -1,8 +1,8 @@
 # Cases for flags the upstream test suite does not exercise. Same schema as
-# upstream tests/tests.yaml. stdin names a file in tests/golden/inputs (subsampled
-# from the upstream test data with samtools view -s) or, failing that, in the
-# upstream tests directory. References live here, gzipped, and are regenerated
-# with tests/golden/generate.py.
+# upstream tests/tests.yaml. stdin names a file in tests/golden/inputs (made by
+# inputs/make_inputs.py) or, failing that, in the upstream tests directory;
+# <INPUTS> in options expands to tests/golden/inputs. References live here,
+# gzipped, and are regenerated with tests/golden/generate.py.
 
 dedup_spliced_is_unique:
   stdin: chr19_gene_tags.bam
@@ -153,3 +153,63 @@ count_ignore_umi:
   outputs: [stdout]
   references: [count_ignore_umi.tsv.gz]
   options: count --random-seed=123456789 --method=directional --gene-tag=XF --skip-tags-regex="^[__|Unassigned]" --extract-umi-method=umis --ignore-umi
+
+dedup_per_contig:
+  stdin: transcripts_sub.bam
+  outputs: [stdout]
+  references: [dedup_per_contig.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --per-gene --per-contig
+
+dedup_per_gene_default_skip_regex:
+  stdin: chr19_gene_tags.bam
+  outputs: [stdout]
+  references: [dedup_per_gene_default_skip_regex.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --per-gene --gene-tag=XF
+
+dedup_assigned_status_tag:
+  stdin: tags_sub.bam
+  outputs: [stdout]
+  references: [dedup_assigned_status_tag.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --umi-separator=# --per-gene --gene-tag=XT --assigned-status-tag=XS
+
+dedup_gene_transcript_map:
+  stdin: transcripts_sub.bam
+  outputs: [stdout]
+  references: [dedup_gene_transcript_map.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --per-gene --per-contig --gene-transcript-map=<INPUTS>/gene_transcript_map_single.tsv
+
+group_assigned_status_tag:
+  stdin: tags_sub.bam
+  outputs: [group_assigned_status_tag.tsv]
+  references: [group_assigned_status_tag.tsv.gz]
+  options: group --random-seed=123456789 --umi-separator=# --per-gene --gene-tag=XT --assigned-status-tag=XS --group-out=group_assigned_status_tag.tsv
+
+group_gene_transcript_map:
+  stdin: transcripts_sub.bam
+  outputs: [stdout, group_gene_transcript_map.tsv]
+  references: [group_gene_transcript_map.sam.gz, group_gene_transcript_map.tsv.gz]
+  options: group --out-sam --output-bam --random-seed=123456789 --per-gene --per-contig --gene-transcript-map=<INPUTS>/gene_transcript_map_single.tsv --group-out=group_gene_transcript_map.tsv
+
+count_per_contig:
+  stdin: transcripts_sub.bam
+  outputs: [stdout]
+  references: [count_per_contig.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --per-gene --per-contig
+
+count_per_contig_mapq:
+  stdin: paired_sub.bam
+  outputs: [stdout]
+  references: [count_per_contig_mapq.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --per-gene --per-contig --mapping-quality=20
+
+count_assigned_status_tag:
+  stdin: tags_sub.bam
+  outputs: [stdout]
+  references: [count_assigned_status_tag.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --umi-separator=# --gene-tag=XT --assigned-status-tag=XS
+
+count_gene_transcript_map:
+  stdin: transcripts_sub.bam
+  outputs: [stdout]
+  references: [count_gene_transcript_map.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --per-gene --per-contig --gene-transcript-map=<INPUTS>/gene_transcript_map.tsv

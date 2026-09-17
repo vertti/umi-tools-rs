@@ -40,7 +40,9 @@ def make_tags(target, source):
 
     The RX delimiter sits at a read-dependent position so that removing it with
     --umi-tag-delimiter changes the grouping; RY carries a read-dependent suffix
-    so that cutting it off with --umi-tag-split changes the grouping.
+    so that cutting it off with --umi-tag-split changes the grouping. XS holds
+    the featureCounts-style assignment status and XT a gene for every read, so
+    --assigned-status-tag=XS changes which reads are skipped.
     """
     with pysam.AlignmentFile(str(UPSTREAM / source)) as inp:
         with pysam.AlignmentFile(str(HERE / target), "wb", template=inp) as out:
@@ -54,7 +56,50 @@ def make_tags(target, source):
                 read.set_tag("RX", f"{umi[:cut]}-{umi[cut:]}")
                 read.set_tag("RY", f"{umi}-{1 + digest % 2}")
                 read.set_tag("CB", f"{cell}-1")
+                assigned = not read.get_tag("XF").startswith(("Unassigned", "__"))
+                read.set_tag("XT", read.get_tag("XF") if assigned else "ENSG_UNASSIGNED")
+                read.set_tag("XS", "Assigned" if assigned else read.get_tag("XF"))
                 out.write(read)
+
+
+def make_transcripts(target, source, map_target, bins=12):
+    """Split single-contig reads into position bins and present each bin as a transcript.
+
+    Gives --per-contig several contigs to count over, and the gene map groups
+    transcripts into genes for --gene-transcript-map. The map also lists a
+    transcript absent from the BAM, which umi_tools ignores.
+    """
+    with pysam.AlignmentFile(str(HERE / source)) as inp:
+        reads = sorted(inp.fetch(until_eof=True), key=lambda r: r.reference_start)
+    per_bin = -(-len(reads) // bins)
+    chunks = [reads[i : i + per_bin] for i in range(0, len(reads), per_bin)]
+    names = [f"ENST{i + 1:011d}" for i in range(len(chunks))]
+    header = {
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [
+            {"SN": name, "LN": chunk[-1].reference_end - chunk[0].reference_start + 1000}
+            for name, chunk in zip(names, chunks)
+        ],
+    }
+    with pysam.AlignmentFile(str(HERE / target), "wb", header=header) as out:
+        for tid, chunk in enumerate(chunks):
+            offset = chunk[0].reference_start
+            for read in chunk:
+                read.reference_id = tid
+                read.reference_start -= offset
+                out.write(read)
+    genes = ["ENSG_A", "ENSG_A", "ENSG_A", "ENSG_B", "ENSG_C", "ENSG_C",
+             "ENSG_D", "ENSG_D", "ENSG_D", "ENSG_D", "ENSG_E", "ENSG_F"]
+    with open(HERE / map_target, "w") as out:
+        out.write("# gene\ttranscript\n")
+        for gene, name in zip(genes, names):
+            out.write(f"{gene}\t{name}\n")
+        out.write("ENSG_F\tENST99999999999\n")
+    # One transcript per gene: umi_tools' output is then independent of its
+    # hash-seeded set order, so dedup and group can have golden references.
+    with open(HERE / map_target.replace(".tsv", "_single.tsv"), "w") as out:
+        for i, name in enumerate(names):
+            out.write(f"ENSG_S{i + 1:02d}\t{name}\n")
 
 
 def main():
@@ -63,6 +108,7 @@ def main():
     for target, (source, fraction) in SUBSAMPLES.items():
         subsample(target, source, fraction)
     make_tags("tags_sub.bam", "chr19_gene_tags.bam")
+    make_transcripts("transcripts_sub.bam", "chr19_sub.bam", "gene_transcript_map.tsv")
     for bam in sorted(HERE.glob("*.bam")):
         pysam.index(str(bam))
         print(f"{bam.name}: {pysam.AlignmentFile(str(bam)).count(until_eof=True)} reads")

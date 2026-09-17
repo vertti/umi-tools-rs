@@ -2,15 +2,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-use rust_htslib::bam::{self, Read as BamRead, Record};
+use rust_htslib::bam::{self, Record};
 
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
 use crate::dedup::{
     DedupMethod, GroupKey, PositionOptions, PythonRandom, TieBreakRng, build_adjacency_list,
-    build_directional_adjacency_list, connected_components, extract_umi_from_tag,
-    five_prime_position, get_read_position, median, min_set_cover,
+    build_directional_adjacency_list, connected_components, five_prime_position, get_read_position,
+    median, min_set_cover,
 };
+use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ChimericPairs {
@@ -45,10 +46,7 @@ pub struct GroupConfig {
     pub subset: Option<f32>,
     pub mapping_quality: u8,
     pub buffer_whole_contig: bool,
-    pub per_gene: bool,
-    pub gene_tag: Option<String>,
-    pub skip_tags_regex: Option<String>,
-    pub per_contig: bool,
+    pub gene: GeneOptions,
     pub paired: bool,
     pub chimeric_pairs: ChimericPairs,
     pub unmapped_handling: UnmappedHandling,
@@ -65,12 +63,24 @@ struct GroupSlot {
     insertion_order: u32,
 }
 
-struct GroupBuffer {
-    groups: BTreeMap<i64, BTreeMap<GroupKey, HashMap<Vec<u8>, GroupSlot>>>,
-    insertion_counters: BTreeMap<i64, BTreeMap<GroupKey, u32>>,
+type Drained<K> = BTreeMap<K, BTreeMap<GroupKey, HashMap<Vec<u8>, GroupSlot>>>;
+
+struct GroupBuffer<K: Ord = i64> {
+    groups: Drained<K>,
+    insertion_counters: BTreeMap<K, BTreeMap<GroupKey, u32>>,
 }
 
-impl GroupBuffer {
+impl GroupBuffer<i64> {
+    fn drain_up_to(&mut self, threshold: i64) -> Drained<i64> {
+        let rest = self.groups.split_off(&(threshold + 1));
+        let drained = std::mem::replace(&mut self.groups, rest);
+        let rest_counters = self.insertion_counters.split_off(&(threshold + 1));
+        let _ = std::mem::replace(&mut self.insertion_counters, rest_counters);
+        drained
+    }
+}
+
+impl<K: Ord + Clone> GroupBuffer<K> {
     const fn new() -> Self {
         Self {
             groups: BTreeMap::new(),
@@ -78,10 +88,10 @@ impl GroupBuffer {
         }
     }
 
-    fn add(&mut self, record: Record, pos: i64, key: GroupKey, umi: Vec<u8>) {
+    fn add(&mut self, record: Record, pos: K, key: GroupKey, umi: Vec<u8>) {
         let umi_map = self
             .groups
-            .entry(pos)
+            .entry(pos.clone())
             .or_default()
             .entry(key.clone())
             .or_default();
@@ -111,18 +121,15 @@ impl GroupBuffer {
         );
     }
 
-    fn drain_up_to(
-        &mut self,
-        threshold: i64,
-    ) -> BTreeMap<i64, BTreeMap<GroupKey, HashMap<Vec<u8>, GroupSlot>>> {
-        let rest = self.groups.split_off(&(threshold + 1));
-        let drained = std::mem::replace(&mut self.groups, rest);
-        let rest_counters = self.insertion_counters.split_off(&(threshold + 1));
-        let _ = std::mem::replace(&mut self.insertion_counters, rest_counters);
-        drained
+    fn drain_key(&mut self, key: &K) -> Drained<K> {
+        self.insertion_counters.remove(key);
+        self.groups
+            .remove(key)
+            .map(|key_map| BTreeMap::from([(key.clone(), key_map)]))
+            .unwrap_or_default()
     }
 
-    fn drain_all(&mut self) -> BTreeMap<i64, BTreeMap<GroupKey, HashMap<Vec<u8>, GroupSlot>>> {
+    fn drain_all(&mut self) -> Drained<K> {
         let drained = std::mem::take(&mut self.groups);
         self.insertion_counters.clear();
         drained
@@ -248,32 +255,17 @@ fn assign_groups(
 
 /// Process drained position groups: assign UMI groups, annotate records, write TSV rows.
 #[allow(clippy::cast_sign_loss)]
-fn process_drained(
-    drained: BTreeMap<i64, BTreeMap<GroupKey, HashMap<Vec<u8>, GroupSlot>>>,
+fn process_drained<K: Ord>(
+    drained: Drained<K>,
     config: &GroupConfig,
     unique_id: &mut u32,
     tsv_writer: &mut Option<BufWriter<File>>,
     header_view: &bam::HeaderView,
-    gene_labels: &HashMap<i64, String>,
+    assigner: Option<&GeneAssigner>,
 ) -> Result<Vec<Record>, GroupError> {
     let mut output_records = Vec::new();
 
-    // In per-gene mode, Python sorts genes alphabetically; replicate that order.
-    let entries: Vec<_> = if gene_labels.is_empty() {
-        drained.into_iter().collect()
-    } else {
-        let mut v: Vec<_> = drained.into_iter().collect();
-        v.sort_by(|(a, _), (b, _)| {
-            let la = gene_labels.get(a).map_or("", String::as_str);
-            let lb = gene_labels.get(b).map_or("", String::as_str);
-            la.cmp(lb)
-        });
-        v
-    };
-
-    for (pos, key_map) in entries {
-        let gene_label = gene_labels.get(&pos).map_or("NA", String::as_str);
-
+    for key_map in drained.into_values() {
         for (_, mut umi_map) in key_map {
             let groups = assign_groups(config.method, &umi_map, config.edit_distance_threshold);
 
@@ -293,6 +285,15 @@ fn process_drained(
                                     .unwrap_or("");
                             let umi_str = std::str::from_utf8(umi).unwrap_or("");
                             let read_pos = five_prime_position(&record);
+                            // umi_tools prints the contig, not the mapped gene, for --per-contig.
+                            let gene_label = match assigner {
+                                Some(assigner) if assigner.per_contig() => contig_name.to_string(),
+                                Some(assigner) => assigner
+                                    .gene(&record)
+                                    .map(|gene| String::from_utf8_lossy(&gene).into_owned())
+                                    .unwrap_or_default(),
+                                None => "NA".to_string(),
+                            };
 
                             writeln!(
                                 w,
@@ -342,13 +343,19 @@ fn process_drained(
 /// Returns `GroupError` on BAM I/O failures or unknown chromosome filter.
 #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
 pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, GroupError> {
-    if config.per_contig && !config.per_gene {
-        return Err(GroupError::PerContigRequiresPerGene);
-    }
-
-    let mut reader = alignment_io::open_reader(input_path, config.reference.as_deref())
+    let mut source = alignment_io::RecordSource::whole(input_path, config.reference.as_deref())
         .map_err(|e| GroupError::BamOpen(e.to_string()))?;
-    let header_view = reader.header().clone();
+    let assigner = GeneAssigner::new(&config.gene, source.header())?;
+    if let Some(map) = assigner.as_ref().and_then(GeneAssigner::transcript_map) {
+        source = alignment_io::RecordSource::by_contig(
+            input_path,
+            config.reference.as_deref(),
+            map.genes.clone(),
+        )
+        .map_err(|e| GroupError::BamOpen(e.to_string()))?;
+    }
+    let mut flusher = assigner.as_ref().map(GeneAssigner::flusher);
+    let header_view = source.header().clone();
 
     let mut writer = if config.output_bam {
         let header = if config.no_sort_output {
@@ -376,7 +383,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         .chrom
         .as_ref()
         .map(|c| {
-            let tid = reader
+            let tid = source
                 .header()
                 .tid(c.as_bytes())
                 .ok_or_else(|| GroupError::UnknownChrom(c.clone()))?;
@@ -402,16 +409,11 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         })
         .transpose()?;
 
-    let skip_regex = config
-        .skip_tags_regex
-        .as_ref()
-        .map(|s| regex::Regex::new(s).map_err(|e| GroupError::InvalidRegex(e.to_string())))
-        .transpose()?;
-
     let output_unmapped = config.unmapped_handling == UnmappedHandling::Output
         || config.unmapped_handling == UnmappedHandling::Use;
 
-    let mut buffer = GroupBuffer::new();
+    let mut buffer = GroupBuffer::<i64>::new();
+    let mut gene_buffer = GroupBuffer::<Vec<u8>>::new();
     let mut stats = GroupStats {
         input_reads: 0,
         output_reads: 0,
@@ -426,14 +428,10 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
     let mut last_start: i64 = 0;
     let mut last_chrom: i32 = -1;
 
-    // Per-gene state: map gene name → sequential ID, and reverse map for TSV labels
-    let mut gene_ids: HashMap<Vec<u8>, i64> = HashMap::new();
-    let mut gene_labels: HashMap<i64, String> = HashMap::new();
-    let mut next_gene_id: i64 = 0;
-
-    for result in reader.records() {
-        let record = result.map_err(|e| GroupError::BamRead(e.to_string()))?;
-
+    while let Some(record) = source
+        .read_next()
+        .map_err(|e| GroupError::BamRead(e.to_string()))?
+    {
         // R2 reads are passthrough (no grouping, no tags).
         if record.is_last_in_template() {
             if record.is_unmapped() {
@@ -505,49 +503,29 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             continue;
         };
 
-        if config.per_gene {
-            // Per-gene mode: group by gene tag value (or contig name) instead of position
-            let gene = if config.per_contig {
-                #[allow(clippy::cast_sign_loss)]
-                Some(header_view.tid2name(tid as u32).to_vec())
-            } else {
-                let gene_tag_name = config.gene_tag.as_deref().unwrap_or("XF");
-                extract_umi_from_tag(&record, gene_tag_name)
-            };
-
-            let Some(gene) = gene else {
+        if let (Some(assigner), Some(flusher)) = (&assigner, flusher.as_mut()) {
+            let Some(gene) = assigner.gene(&record) else {
                 continue;
             };
-
-            if skip_regex
-                .as_ref()
-                .is_some_and(|re| re.is_match(std::str::from_utf8(&gene).unwrap_or("")))
-            {
-                continue;
-            }
-
-            let gene_id = *gene_ids.entry(gene.clone()).or_insert_with(|| {
-                let id = next_gene_id;
-                gene_labels.insert(id, String::from_utf8_lossy(&gene).into_owned());
-                next_gene_id += 1;
-                id
-            });
-
-            // In per-gene mode, flush all when chromosome changes (no position-based flushing)
-            if tid != last_chrom && last_chrom >= 0 {
+            let done = match flusher.before_read(tid) {
+                Flush::None => None,
+                Flush::All => Some(gene_buffer.drain_all()),
+                Flush::Gene(done) => Some(gene_buffer.drain_key(&done)),
+            };
+            if let Some(drained) = done {
                 output_records.extend(process_drained(
-                    buffer.drain_all(),
+                    drained,
                     config,
                     &mut unique_id,
                     &mut tsv_writer,
                     &header_view,
-                    &gene_labels,
+                    Some(assigner),
                 )?);
             }
-            last_chrom = tid;
+            flusher.after_read(tid, &gene);
 
             let key: GroupKey = (false, 0, 0, 0, cell);
-            buffer.add(record, gene_id, key, umi);
+            gene_buffer.add(record, gene, key, umi);
         } else {
             // Standard coordinate mode
             let position = get_read_position(&record, config.position.soft_clip_threshold);
@@ -560,7 +538,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     &mut unique_id,
                     &mut tsv_writer,
                     &header_view,
-                    &gene_labels,
+                    assigner.as_ref(),
                 )?);
             } else if !config.buffer_whole_contig && start > last_start + 1000 {
                 let threshold = start - 1000;
@@ -570,7 +548,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                     &mut unique_id,
                     &mut tsv_writer,
                     &header_view,
-                    &gene_labels,
+                    assigner.as_ref(),
                 )?);
             }
 
@@ -599,7 +577,15 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         &mut unique_id,
         &mut tsv_writer,
         &header_view,
-        &gene_labels,
+        assigner.as_ref(),
+    )?);
+    output_records.extend(process_drained(
+        gene_buffer.drain_all(),
+        config,
+        &mut unique_id,
+        &mut tsv_writer,
+        &header_view,
+        assigner.as_ref(),
     )?);
 
     // Flush TSV
@@ -646,8 +632,8 @@ pub enum GroupError {
     UnknownChrom(String),
     #[error("invalid regex: {0}")]
     InvalidRegex(String),
-    #[error("--per-contig requires --per-gene")]
-    PerContigRequiresPerGene,
     #[error(transparent)]
     Barcode(#[from] BarcodeError),
+    #[error(transparent)]
+    Gene(#[from] GeneError),
 }
