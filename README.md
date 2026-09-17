@@ -82,6 +82,8 @@ umi-tools-rs dedup --stdin=aligned.cram --reference-filename=genome.fa --stdout=
 
 `mise run compat` runs the upstream UMI-tools test suite against the Rust binary (it expects a checkout of UMI-tools next to this repository, or `UMI_TOOLS_TESTS_DIR`). Flags the upstream suite does not exercise are covered by `tests/golden/cases.yaml`, whose references come from Python umi_tools; `mise run golden` regenerates them.
 
+Synthetic extraction tests also cover combinations of patterns, output destinations, filtering, and pair reconciliation, with expected outputs checked against Python umi_tools.
+
 ## Compatibility notes
 
 Optparse-style abbreviations work as in UMI-tools, for example `--unmapped` for `--unmapped-reads`. Flags UMI-tools accepts that umi-tools-rs does not implement are rejected with an error rather than silently ignored. Known differences:
