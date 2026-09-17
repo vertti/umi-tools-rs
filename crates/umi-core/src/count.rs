@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, BufRead, Write as IoWrite};
 
-use rust_htslib::bam::{Read as BamRead, record::Aux};
 use thiserror::Error;
 
-use crate::alignment_io;
+use crate::alignment_io::RecordSource;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
 use crate::dedup::{DedupMethod, count_umis};
+use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 
 #[derive(Error, Debug)]
 pub enum CountError {
@@ -14,18 +14,19 @@ pub enum CountError {
     BamOpen(String),
     #[error("BAM read error: {0}")]
     BamRead(String),
-    #[error("invalid regex: {0}")]
-    InvalidRegex(String),
+    #[error("count needs --gene-tag or --per-contig")]
+    NotPerGene,
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
     Barcode(#[from] BarcodeError),
+    #[error(transparent)]
+    Gene(#[from] GeneError),
 }
 
 pub struct CountConfig {
     pub method: DedupMethod,
-    pub gene_tag: String,
-    pub skip_tags_regex: Option<String>,
+    pub gene: GeneOptions,
     pub barcode: BarcodeExtractor,
     pub ignore_umi: bool,
     pub wide_format: bool,
@@ -49,31 +50,38 @@ pub struct CountTabConfig {
 /// UMI count map: `umi -> (count, insertion_order)`.
 type UmiCountMap = HashMap<Vec<u8>, (u32, u32)>;
 
-#[allow(clippy::missing_errors_doc)]
+/// Counts unique molecules per gene (and cell), one row per bundle in the
+/// order `get_bundles` yields them: genes flush when the contig changes.
+///
+/// # Errors
+///
+/// Returns BAM, option and I/O errors.
 pub fn run_count(
     config: &CountConfig,
     bam_path: &str,
     output: &mut dyn IoWrite,
 ) -> Result<CountStats, CountError> {
-    let mut reader = alignment_io::open_reader(bam_path, config.reference.as_deref())
+    let mut source = RecordSource::whole(bam_path, config.reference.as_deref())
         .map_err(|e| CountError::BamOpen(e.to_string()))?;
+    let assigner =
+        GeneAssigner::new(&config.gene, source.header())?.ok_or(CountError::NotPerGene)?;
+    if let Some(map) = assigner.transcript_map() {
+        source = RecordSource::by_contig(bam_path, config.reference.as_deref(), map.genes.clone())
+            .map_err(|e| CountError::BamOpen(e.to_string()))?;
+    }
+    let mut flusher = assigner.flusher();
 
-    let skip_regex = config
-        .skip_tags_regex
-        .as_ref()
-        .map(|s| regex::Regex::new(s).map_err(|e| CountError::InvalidRegex(e.to_string())))
-        .transpose()?;
-
-    // BTreeMap for genes so output is sorted
-    let mut data: BTreeMap<String, CellUmiMap> = BTreeMap::new();
+    let mut buffer: GeneBuffer = BTreeMap::new();
+    let mut rows: Vec<CountRow> = Vec::new();
     let mut stats = CountStats {
         input_reads: 0,
         counted_reads: 0,
     };
 
-    for result in reader.records() {
-        let record = result.map_err(|e| CountError::BamRead(e.to_string()))?;
-
+    while let Some(record) = source
+        .read_next()
+        .map_err(|e| CountError::BamRead(e.to_string()))?
+    {
         if record.is_unmapped() {
             continue;
         }
@@ -93,35 +101,106 @@ pub fn run_count(
             continue;
         };
 
-        let gene = match record.aux(config.gene_tag.as_bytes()) {
-            Ok(Aux::String(s)) => s.to_string(),
-            _ => continue,
+        let Some(gene) = assigner.gene(&record) else {
+            continue;
         };
 
-        if skip_regex.as_ref().is_some_and(|re| re.is_match(&gene)) {
-            continue;
+        let tid = record.tid();
+        match flusher.before_read(tid) {
+            Flush::None => {}
+            Flush::All => flush_genes(std::mem::take(&mut buffer), config, &mut rows),
+            Flush::Gene(done) => {
+                if let Some(cells) = buffer.remove(&done) {
+                    flush_genes(BTreeMap::from([(done, cells)]), config, &mut rows);
+                }
+            }
         }
-
-        let cell_key = config
-            .barcode
-            .per_cell
-            .then(|| String::from_utf8_lossy(&cell).into_owned());
+        flusher.after_read(tid, &gene);
 
         stats.counted_reads += 1;
-
-        let cell_map = data.entry(gene).or_default();
-        cell_map.add(cell_key, umi);
+        buffer
+            .entry(gene)
+            .or_default()
+            .entry(cell)
+            .or_default()
+            .add(umi);
     }
+    flush_genes(buffer, config, &mut rows);
 
-    if config.barcode.per_cell && config.wide_format {
-        write_wide_format(&data, config, output)?;
-    } else if config.barcode.per_cell {
-        write_long_format(&data, config, output)?;
+    if config.barcode.per_cell {
+        // A later bundle for the same gene and cell overwrites the earlier one, as umi_tools' dict does.
+        let mut table: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+        for row in rows {
+            table
+                .entry(row.gene)
+                .or_default()
+                .insert(row.cell, row.count);
+        }
+        if config.wide_format {
+            write_wide_format(&table, output)?;
+        } else {
+            write_long_format(&table, output)?;
+        }
     } else {
-        write_gene_counts(&data, config, output)?;
+        writeln!(output, "gene\tcount")?;
+        for row in rows {
+            writeln!(output, "{}\t{}", row.gene, row.count)?;
+        }
     }
 
     Ok(stats)
+}
+
+type GeneBuffer = BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, UmiCounts>>;
+
+struct CountRow {
+    gene: String,
+    cell: String,
+    count: usize,
+}
+
+/// One row per (gene, cell) bundle: genes in name order, cells in name order.
+fn flush_genes(buffer: GeneBuffer, config: &CountConfig, rows: &mut Vec<CountRow>) {
+    for (gene, cells) in buffer {
+        for (cell, umis) in cells {
+            rows.push(CountRow {
+                gene: String::from_utf8_lossy(&gene).into_owned(),
+                cell: String::from_utf8_lossy(&cell).into_owned(),
+                count: umis.dedup_count(config.method, config.edit_distance_threshold),
+            });
+        }
+    }
+}
+
+#[derive(Default)]
+struct UmiCounts {
+    counts: UmiCountMap,
+    next_order: u32,
+}
+
+impl UmiCounts {
+    fn add(&mut self, umi: Vec<u8>) {
+        let order = self.next_order;
+        let entry = self.counts.entry(umi).or_insert((0, order));
+        if entry.0 == 0 {
+            self.next_order += 1;
+        }
+        entry.0 += 1;
+    }
+
+    fn dedup_count(&self, method: DedupMethod, edit_threshold: u32) -> usize {
+        let counts: HashMap<Vec<u8>, u32> = self
+            .counts
+            .iter()
+            .map(|(k, &(c, _))| (k.clone(), c))
+            .collect();
+        let orders: HashMap<Vec<u8>, u32> = self
+            .counts
+            .iter()
+            .map(|(k, &(_, o))| (k.clone(), o))
+            .collect();
+        count_umis(method, &counts, &orders, edit_threshold)
+    }
 }
 
 #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
@@ -246,34 +325,13 @@ impl CellUmiMap {
     }
 }
 
-fn write_gene_counts(
-    data: &BTreeMap<String, CellUmiMap>,
-    config: &CountConfig,
-    output: &mut dyn IoWrite,
-) -> Result<(), CountError> {
-    writeln!(output, "gene\tcount")?;
-    for (gene, cell_map) in data {
-        let results = cell_map.dedup_count(config.method, config.edit_distance_threshold);
-        let total: usize = results.iter().map(|(_, n)| n).sum();
-        writeln!(output, "{gene}\t{total}")?;
-    }
-    Ok(())
-}
-
 fn write_long_format(
-    data: &BTreeMap<String, CellUmiMap>,
-    config: &CountConfig,
+    table: &BTreeMap<String, BTreeMap<String, usize>>,
     output: &mut dyn IoWrite,
 ) -> Result<(), CountError> {
     writeln!(output, "gene\tcell\tcount")?;
-    for (gene, cell_map) in data {
-        let results = cell_map.dedup_count(config.method, config.edit_distance_threshold);
-        let mut sorted: Vec<_> = results
-            .into_iter()
-            .filter_map(|(cell, n)| cell.as_ref().map(|c| (c.clone(), n)))
-            .collect();
-        sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        for (cell, count) in sorted {
+    for (gene, cells) in table {
+        for (cell, count) in cells {
             writeln!(output, "{gene}\t{cell}\t{count}")?;
         }
     }
@@ -281,36 +339,21 @@ fn write_long_format(
 }
 
 fn write_wide_format(
-    data: &BTreeMap<String, CellUmiMap>,
-    config: &CountConfig,
+    table: &BTreeMap<String, BTreeMap<String, usize>>,
     output: &mut dyn IoWrite,
 ) -> Result<(), CountError> {
-    let mut all_cells: BTreeSet<String> = BTreeSet::new();
-    for cell_map in data.values() {
-        for (cell, _) in &cell_map.cells {
-            if let Some(c) = cell {
-                all_cells.insert(c.clone());
-            }
-        }
-    }
-    let cell_list: Vec<&String> = all_cells.iter().collect();
+    let all_cells: BTreeSet<&String> = table.values().flat_map(BTreeMap::keys).collect();
 
     write!(output, "gene")?;
-    for cell in &cell_list {
+    for cell in &all_cells {
         write!(output, "\t{cell}")?;
     }
     writeln!(output)?;
 
-    for (gene, cell_map) in data {
-        let results = cell_map.dedup_count(config.method, config.edit_distance_threshold);
-        let cell_counts: HashMap<&str, usize> = results
-            .into_iter()
-            .filter_map(|(cell, n)| cell.as_ref().map(|c| (c.as_str(), n)))
-            .collect();
-
+    for (gene, cells) in table {
         write!(output, "{gene}")?;
-        for cell in &cell_list {
-            let count = cell_counts.get(cell.as_str()).copied().unwrap_or(0);
+        for cell in &all_cells {
+            let count = cells.get(*cell).copied().unwrap_or(0);
             write!(output, "\t{count}")?;
         }
         writeln!(output)?;

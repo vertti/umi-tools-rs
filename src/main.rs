@@ -21,6 +21,7 @@ use umi_core::extract::{
     ExtractConfig, QualityEncoding, extract_reads, extract_reads_either_read, extract_reads_paired,
     extract_reads_paired_r1_pattern,
 };
+use umi_core::gene::{DEFAULT_SKIP_REGEX, GeneOptions};
 use umi_core::group::{ChimericPairs, GroupConfig, UnmappedHandling, run_group};
 use umi_core::pattern::{BarcodePattern, PrimeEnd, RegexPattern, StringPattern};
 use umi_core::whitelist::{EdAboveThreshold, KneeMethod, WhitelistConfig, run_whitelist};
@@ -304,21 +305,8 @@ struct GroupArgs {
     #[arg(long = "unmapped-reads", default_value = "discard")]
     unmapped: String,
 
-    /// Deduplicate per gene (requires --gene-tag or --per-contig)
-    #[arg(long = "per-gene")]
-    per_gene: bool,
-
-    /// BAM tag containing gene assignment (default: XF)
-    #[arg(long = "gene-tag")]
-    gene_tag: Option<String>,
-
-    /// Skip reads with gene tag matching this regex
-    #[arg(long = "skip-tags-regex")]
-    skip_tags_regex: Option<String>,
-
-    /// Use contig name as gene (requires --per-gene)
-    #[arg(long = "per-contig")]
-    per_contig: bool,
+    #[command(flatten)]
+    gene: GeneArgs,
 
     #[command(flatten)]
     common: CommonArgs,
@@ -383,17 +371,8 @@ struct DedupArgs {
     #[arg(long = "subset")]
     subset: Option<f32>,
 
-    /// Deduplicate per gene (requires --gene-tag)
-    #[arg(long = "per-gene")]
-    per_gene: bool,
-
-    /// BAM tag containing gene assignment
-    #[arg(long = "gene-tag")]
-    gene_tag: Option<String>,
-
-    /// Skip reads with gene tag matching this regex
-    #[arg(long = "skip-tags-regex")]
-    skip_tags_regex: Option<String>,
+    #[command(flatten)]
+    gene: GeneArgs,
 
     /// Output stats file prefix
     #[arg(long = "output-stats")]
@@ -444,13 +423,8 @@ struct CountArgs {
     #[arg(long = "method", default_value = "directional")]
     method: String,
 
-    /// BAM tag containing gene assignment
-    #[arg(long = "gene-tag", default_value = "XF")]
-    gene_tag: String,
-
-    /// Skip reads with gene tag matching this regex
-    #[arg(long = "skip-tags-regex")]
-    skip_tags_regex: Option<String>,
+    #[command(flatten)]
+    gene: GeneArgs,
 
     #[command(flatten)]
     barcode: BarcodeArgs,
@@ -605,6 +579,50 @@ impl BarcodeArgs {
             source,
             per_cell: self.per_cell,
         })
+    }
+}
+
+/// Per-gene options shared by dedup, group and count.
+#[derive(clap::Args, Clone)]
+struct GeneArgs {
+    /// Group, deduplicate or count per gene; needs --gene-tag or --per-contig
+    #[arg(long = "per-gene", action = ArgAction::SetTrue, overrides_with = "per_gene")]
+    per_gene: bool,
+
+    /// Tag holding the assigned gene
+    #[arg(long = "gene-tag")]
+    gene_tag: Option<String>,
+
+    /// Tag holding the assignment status; defaults to --gene-tag
+    #[arg(long = "assigned-status-tag")]
+    assigned_status_tag: Option<String>,
+
+    /// Skip reads whose assignment status matches this regex
+    #[arg(long = "skip-tags-regex", default_value = DEFAULT_SKIP_REGEX)]
+    skip_tags_regex: String,
+
+    /// Use the contig (RNAME) as the gene, e.g. for transcriptome alignments
+    #[arg(long = "per-contig", action = ArgAction::SetTrue, overrides_with = "per_contig")]
+    per_contig: bool,
+
+    /// Tab-separated gene and transcript columns; reads are grouped per gene across its transcripts
+    #[arg(long = "gene-transcript-map")]
+    gene_transcript_map: Option<String>,
+}
+
+impl GeneArgs {
+    fn options(&self, always_per_gene: bool) -> GeneOptions {
+        GeneOptions {
+            per_gene: self.per_gene || always_per_gene,
+            per_contig: self.per_contig,
+            gene_tag: self.gene_tag.as_deref().map(|s| s.as_bytes().to_vec()),
+            assigned_tag: self
+                .assigned_status_tag
+                .as_deref()
+                .map(|s| s.as_bytes().to_vec()),
+            skip_regex: self.skip_tags_regex.clone(),
+            transcript_map: self.gene_transcript_map.clone(),
+        }
     }
 }
 
@@ -980,10 +998,7 @@ fn run(command: Commands) -> Result<String> {
             paired,
             chimeric_pairs,
             unmapped,
-            per_gene,
-            gene_tag,
-            skip_tags_regex,
-            per_contig,
+            gene,
             common: _,
         }) => run_group_cmd(
             input.as_deref(),
@@ -1008,10 +1023,7 @@ fn run(command: Commands) -> Result<String> {
             paired,
             chimeric_pairs.as_deref(),
             &unmapped,
-            per_gene,
-            gene_tag.as_deref(),
-            skip_tags_regex.as_deref(),
-            per_contig,
+            gene.options(false),
         ),
         Commands::Dedup(DedupArgs {
             input,
@@ -1029,9 +1041,7 @@ fn run(command: Commands) -> Result<String> {
             multimapping_detection_method,
             buffer_whole_contig,
             subset,
-            per_gene,
-            gene_tag,
-            skip_tags_regex,
+            gene,
             output_stats,
             paired,
             ignore_tlen,
@@ -1055,9 +1065,7 @@ fn run(command: Commands) -> Result<String> {
             multimapping_detection_method.as_deref(),
             buffer_whole_contig,
             subset,
-            per_gene,
-            gene_tag.as_deref(),
-            skip_tags_regex.as_deref(),
+            gene.options(false),
             output_stats.as_deref(),
             paired,
             ignore_tlen,
@@ -1071,8 +1079,7 @@ fn run(command: Commands) -> Result<String> {
             input_format,
             mapping_quality,
             method,
-            gene_tag,
-            skip_tags_regex,
+            gene,
             barcode,
             ignore_umi,
             wide_format,
@@ -1085,8 +1092,7 @@ fn run(command: Commands) -> Result<String> {
             &input_format,
             mapping_quality,
             &method,
-            &gene_tag,
-            skip_tags_regex.as_deref(),
+            gene.options(true),
             barcode.extractor()?,
             ignore_umi,
             wide_format,
@@ -1417,10 +1423,7 @@ fn run_group_cmd(
     paired: bool,
     chimeric_pairs: Option<&str>,
     unmapped: &str,
-    per_gene: bool,
-    gene_tag: Option<&str>,
-    skip_tags_regex: Option<&str>,
-    per_contig: bool,
+    gene: GeneOptions,
 ) -> Result<String> {
     let input = input_path.context("--stdin is required for group (BAM input path)")?;
     if output_path.is_some() && !output_bam {
@@ -1478,10 +1481,7 @@ fn run_group_cmd(
         subset,
         mapping_quality,
         buffer_whole_contig,
-        per_gene,
-        gene_tag: gene_tag.map(String::from),
-        skip_tags_regex: skip_tags_regex.map(String::from),
-        per_contig,
+        gene,
         paired,
         chimeric_pairs: chimeric,
         unmapped_handling,
@@ -1512,9 +1512,7 @@ fn run_dedup_cmd(
     multimapping_detection_method: Option<&str>,
     buffer_whole_contig: bool,
     subset: Option<f32>,
-    per_gene: bool,
-    gene_tag: Option<&str>,
-    skip_tags_regex: Option<&str>,
+    gene: GeneOptions,
     output_stats: Option<&str>,
     paired: bool,
     ignore_tlen: bool,
@@ -1565,9 +1563,7 @@ fn run_dedup_cmd(
         mapping_quality,
         multimapping_detection,
         buffer_whole_contig,
-        per_gene,
-        gene_tag: gene_tag.map(String::from),
-        skip_tags_regex: skip_tags_regex.map(String::from),
+        gene,
         output_stats: output_stats.map(String::from),
         paired,
         ignore_tlen,
@@ -1634,8 +1630,7 @@ fn run_count_cmd(
     input_format: &InputFormatArgs,
     mapping_quality: u8,
     method: &str,
-    gene_tag: &str,
-    skip_tags_regex: Option<&str>,
+    gene: GeneOptions,
     barcode: BarcodeExtractor,
     ignore_umi: bool,
     wide_format: bool,
@@ -1656,8 +1651,7 @@ fn run_count_cmd(
 
     let config = CountConfig {
         method: dedup_method,
-        gene_tag: gene_tag.to_string(),
-        skip_tags_regex: skip_tags_regex.map(String::from),
+        gene,
         barcode,
         ignore_umi,
         wide_format,
@@ -1886,6 +1880,24 @@ mod tests {
         let extractor = args.barcode.extractor().unwrap();
         assert!(extractor.per_cell);
         assert!(matches!(extractor.source, BarcodeSource::Tag { .. }));
+    }
+
+    #[test]
+    fn gene_options_validate_like_umi_tools() {
+        let cli = parse(&["count", "--stdin=in.bam"]);
+        let Commands::Count(args) = cli.command else {
+            panic!("expected count");
+        };
+        assert!(
+            args.gene.options(true).validate().is_err(),
+            "count needs a gene source"
+        );
+        let cli = parse(&["dedup", "--stdin=in.bam", "--per-contig"]);
+        let Commands::Dedup(args) = cli.command else {
+            panic!("expected dedup");
+        };
+        assert!(args.gene.options(false).validate().is_err());
+        assert_eq!(args.gene.skip_tags_regex, DEFAULT_SKIP_REGEX);
     }
 
     #[test]

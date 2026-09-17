@@ -7,6 +7,7 @@ use rust_htslib::bam::{Read as BamRead, Record};
 
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
+use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 
 /// Trait for RNG used in reservoir-sampling tie-breaks.
 ///
@@ -216,9 +217,7 @@ pub struct DedupConfig {
     pub multimapping_detection: Option<MultimappingDetection>,
     pub buffer_whole_contig: bool,
     pub barcode: BarcodeExtractor,
-    pub per_gene: bool,
-    pub gene_tag: Option<String>,
-    pub skip_tags_regex: Option<String>,
+    pub gene: GeneOptions,
     pub output_stats: Option<String>,
     pub paired: bool,
     pub ignore_tlen: bool,
@@ -457,13 +456,32 @@ pub(crate) struct UmiSlot {
 /// When flushing, positions are emitted in sorted order and keys within
 /// each position are emitted in sorted order (matching Python's
 /// `sorted(reads_dict[p].keys())`).
-struct ReadBuffer {
-    groups: BTreeMap<i64, BTreeMap<GroupKey, HashMap<Vec<u8>, UmiSlot>>>,
+struct ReadBuffer<K: Ord = i64> {
+    groups: BTreeMap<K, BTreeMap<GroupKey, HashMap<Vec<u8>, UmiSlot>>>,
     /// Per-(pos, key) insertion counters for deterministic ordering.
-    insertion_counters: BTreeMap<i64, BTreeMap<GroupKey, u32>>,
+    insertion_counters: BTreeMap<K, BTreeMap<GroupKey, u32>>,
 }
 
-impl ReadBuffer {
+impl ReadBuffer<i64> {
+    /// Drain all position groups with `pos <= threshold`, applying UMI dedup selection.
+    fn drain_up_to(
+        &mut self,
+        threshold: i64,
+        method: DedupMethod,
+        edit_threshold: u32,
+        stats_ctx: &mut Option<StatsContext>,
+        umi_whitelist: Option<&HashSet<Vec<u8>>>,
+    ) -> Vec<Record> {
+        let rest = self.groups.split_off(&(threshold + 1));
+        let drained = std::mem::replace(&mut self.groups, rest);
+        // Clean up insertion counters for drained positions
+        let rest_counters = self.insertion_counters.split_off(&(threshold + 1));
+        let _ = std::mem::replace(&mut self.insertion_counters, rest_counters);
+        Self::apply_selection(drained, method, edit_threshold, stats_ctx, umi_whitelist)
+    }
+}
+
+impl<K: Ord + Clone> ReadBuffer<K> {
     const fn new() -> Self {
         Self {
             groups: BTreeMap::new(),
@@ -475,7 +493,7 @@ impl ReadBuffer {
     fn add(
         &mut self,
         record: Record,
-        pos: i64,
+        pos: K,
         key: GroupKey,
         umi: Vec<u8>,
         rng: &mut impl TieBreakRng,
@@ -483,7 +501,7 @@ impl ReadBuffer {
     ) -> Result<(), DedupError> {
         let umi_map = self
             .groups
-            .entry(pos)
+            .entry(pos.clone())
             .or_default()
             .entry(key.clone())
             .or_default();
@@ -546,20 +564,20 @@ impl ReadBuffer {
         Ok(())
     }
 
-    /// Drain all position groups with `pos <= threshold`, applying UMI dedup selection.
-    fn drain_up_to(
+    /// Drain one group, applying UMI dedup selection.
+    fn drain_key(
         &mut self,
-        threshold: i64,
+        key: &K,
         method: DedupMethod,
         edit_threshold: u32,
         stats_ctx: &mut Option<StatsContext>,
         umi_whitelist: Option<&HashSet<Vec<u8>>>,
     ) -> Vec<Record> {
-        let rest = self.groups.split_off(&(threshold + 1));
-        let drained = std::mem::replace(&mut self.groups, rest);
-        // Clean up insertion counters for drained positions
-        let rest_counters = self.insertion_counters.split_off(&(threshold + 1));
-        let _ = std::mem::replace(&mut self.insertion_counters, rest_counters);
+        let Some(key_map) = self.groups.remove(key) else {
+            return Vec::new();
+        };
+        self.insertion_counters.remove(key);
+        let drained = BTreeMap::from([(key.clone(), key_map)]);
         Self::apply_selection(drained, method, edit_threshold, stats_ctx, umi_whitelist)
     }
 
@@ -578,7 +596,7 @@ impl ReadBuffer {
 
     /// Apply method-specific UMI selection to drained position groups.
     fn apply_selection(
-        groups: BTreeMap<i64, BTreeMap<GroupKey, HashMap<Vec<u8>, UmiSlot>>>,
+        groups: BTreeMap<K, BTreeMap<GroupKey, HashMap<Vec<u8>, UmiSlot>>>,
         method: DedupMethod,
         edit_threshold: u32,
         stats_ctx: &mut Option<StatsContext>,
@@ -1517,9 +1535,19 @@ impl StatsCollector {
 /// Returns `DedupError` on BAM I/O failures or unknown chromosome filter.
 #[allow(clippy::too_many_lines)]
 pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, DedupError> {
-    let mut reader = alignment_io::open_reader(input_path, config.reference.as_deref())
+    let mut source = alignment_io::RecordSource::whole(input_path, config.reference.as_deref())
         .map_err(|e| DedupError::BamOpen(e.to_string()))?;
-    let header = alignment_io::coordinate_sorted_header(reader.header());
+    let assigner = GeneAssigner::new(&config.gene, source.header())?;
+    if let Some(map) = assigner.as_ref().and_then(GeneAssigner::transcript_map) {
+        source = alignment_io::RecordSource::by_contig(
+            input_path,
+            config.reference.as_deref(),
+            map.genes.clone(),
+        )
+        .map_err(|e| DedupError::BamOpen(e.to_string()))?;
+    }
+    let mut flusher = assigner.as_ref().map(GeneAssigner::flusher);
+    let header = alignment_io::coordinate_sorted_header(source.header());
 
     let mut writer = alignment_io::open_writer(
         &header,
@@ -1536,7 +1564,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
         .chrom
         .as_ref()
         .map(|c| {
-            let tid = reader
+            let tid = source
                 .header()
                 .tid(c.as_bytes())
                 .ok_or_else(|| DedupError::UnknownChrom(c.clone()))?;
@@ -1547,7 +1575,8 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
 
     #[allow(clippy::cast_possible_truncation)]
     let mut rng = PythonRandom::new(config.random_seed as u32);
-    let mut buffer = ReadBuffer::new();
+    let mut buffer = ReadBuffer::<i64>::new();
+    let mut gene_buffer = ReadBuffer::<Vec<u8>>::new();
     let mut stats = DedupStats {
         input_reads: 0,
         output_reads: 0,
@@ -1560,15 +1589,6 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
 
     let mut last_start: i64 = 0;
     let mut last_chrom: i32 = -1;
-
-    // Per-gene mode: gene tag value → sequential i64 ID used as "position".
-    let skip_regex = config
-        .skip_tags_regex
-        .as_ref()
-        .map(|s| regex::Regex::new(s).map_err(|e| DedupError::InvalidRegex(e.to_string())))
-        .transpose()?;
-    let mut gene_ids: HashMap<Vec<u8>, i64> = HashMap::new();
-    let mut next_gene_id: i64 = 0;
 
     // Stats collection (optional, only when --output-stats is set)
     #[allow(clippy::cast_possible_truncation)]
@@ -1593,9 +1613,10 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
 
     let wl_ref = config.umi_whitelist.as_ref();
 
-    for result in reader.records() {
-        let record = result.map_err(|e| DedupError::BamRead(e.to_string()))?;
-
+    while let Some(record) = source
+        .read_next()
+        .map_err(|e| DedupError::BamRead(e.to_string()))?
+    {
         if record.is_unmapped() {
             continue;
         }
@@ -1634,26 +1655,30 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             continue;
         };
 
-        if config.per_gene {
-            // Per-gene mode: group by gene tag value instead of position.
-            let gene_tag_name = config.gene_tag.as_deref().unwrap_or("XF");
-            let Some(gene) = extract_umi_from_tag(&record, gene_tag_name) else {
+        if let (Some(assigner), Some(flusher)) = (&assigner, flusher.as_mut()) {
+            let Some(gene) = assigner.gene(&record) else {
                 continue;
             };
-            if skip_regex
-                .as_ref()
-                .is_some_and(|re| re.is_match(std::str::from_utf8(&gene).unwrap_or("")))
-            {
-                continue;
+            match flusher.before_read(tid) {
+                Flush::None => {}
+                Flush::All => output_records.extend(gene_buffer.drain_all(
+                    config.method,
+                    config.edit_distance_threshold,
+                    &mut stats_ctx,
+                    wl_ref,
+                )),
+                Flush::Gene(done) => output_records.extend(gene_buffer.drain_key(
+                    &done,
+                    config.method,
+                    config.edit_distance_threshold,
+                    &mut stats_ctx,
+                    wl_ref,
+                )),
             }
-            let gene_id = *gene_ids.entry(gene).or_insert_with(|| {
-                let id = next_gene_id;
-                next_gene_id += 1;
-                id
-            });
-            buffer.add(
+            flusher.after_read(tid, &gene);
+            gene_buffer.add(
                 record,
-                gene_id,
+                gene,
                 (false, 0, 0, 0, cell),
                 umi,
                 &mut rng,
@@ -1704,6 +1729,12 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
     }
 
     output_records.extend(buffer.drain_all(
+        config.method,
+        config.edit_distance_threshold,
+        &mut stats_ctx,
+        wl_ref,
+    ));
+    output_records.extend(gene_buffer.drain_all(
         config.method,
         config.edit_distance_threshold,
         &mut stats_ctx,
@@ -1760,13 +1791,6 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
     Ok(stats)
 }
 
-pub(crate) fn extract_umi_from_tag(record: &Record, tag: &str) -> Option<Vec<u8>> {
-    match record.aux(tag.as_bytes()) {
-        Ok(rust_htslib::bam::record::Aux::String(s)) => Some(s.as_bytes().to_vec()),
-        _ => None,
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum DedupError {
     #[error("failed to open BAM: {0}")]
@@ -1785,6 +1809,8 @@ pub enum DedupError {
     MissingTag(String, String),
     #[error(transparent)]
     Barcode(#[from] BarcodeError),
+    #[error(transparent)]
+    Gene(#[from] GeneError),
 }
 
 #[cfg(test)]

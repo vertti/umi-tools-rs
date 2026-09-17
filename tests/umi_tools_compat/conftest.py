@@ -120,6 +120,7 @@ def substitute_placeholders(options, input_dir, tmpdir):
     opts = options
     opts = opts.replace("<DIR>", str(input_dir))
     opts = opts.replace("%DIR%", str(input_dir))
+    opts = opts.replace("<INPUTS>", str(GOLDEN_DIR / "inputs"))
     opts = opts.replace("<TMP>", tmpdir)
     opts = opts.replace("%TMP%", tmpdir)
     opts = re.sub(r"\n", "", opts)
