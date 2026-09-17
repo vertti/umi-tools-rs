@@ -259,10 +259,11 @@ fn write_fastq_record<W: Write>(
     Ok(())
 }
 
-/// Extract UMIs from paired-end FASTQ reads (read2-only pattern mode).
+/// Extract UMIs from paired-end FASTQ reads with a read2 pattern.
 ///
-/// Pattern is applied to read2 only. UMI is appended to both read names.
-/// Read1 is written untrimmed to `output1`, read2 is written trimmed to `output2`.
+/// When a read1 pattern is also supplied, concatenate barcodes in read1/read2
+/// order and trim both reads. Otherwise, leave read1's sequence unchanged.
+/// Append the combined barcodes to both read names.
 ///
 /// # Errors
 /// Returns error on I/O failures, parse errors, or mismatched read counts.
@@ -302,27 +303,32 @@ where
                     break;
                 }
 
-                let r2_seq = r2.seq();
-                let r2_qual = r2.qual().ok_or_else(|| {
-                    ExtractError::FastqParse("missing quality scores in read2".into())
-                })?;
+                let (mut extraction1, extraction) =
+                    match process_paired_records(&r1, &r2, config.pattern.as_ref(), pattern2) {
+                        Ok(result) => result,
+                        Err(ExtractError::ReadTooShort { .. }) => {
+                            stats.too_short += 1;
+                            continue;
+                        }
+                        Err(ExtractError::RegexNoMatch) => {
+                            stats.no_match += 1;
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    };
 
-                let extraction = match pattern2.extract(&r2_seq, r2_qual) {
-                    Ok(result) => result,
-                    Err(ExtractError::ReadTooShort { .. }) => {
-                        stats.too_short += 1;
-                        continue;
-                    }
-                    Err(ExtractError::RegexNoMatch) => {
-                        stats.no_match += 1;
-                        continue;
-                    }
-                    Err(e) => return Err(e),
+                let (umi, umi_quality, cell_barcode) = if let Some(first) = extraction1.as_mut() {
+                    first.umi.extend_from_slice(&extraction.umi);
+                    first.umi_quality.extend_from_slice(&extraction.umi_quality);
+                    first.cell.extend_from_slice(&extraction.cell);
+                    (&first.umi, &first.umi_quality, &first.cell)
+                } else {
+                    (&extraction.umi, &extraction.umi_quality, &extraction.cell)
                 };
 
                 if let Some(threshold) = config.quality_filter_threshold
                     && fails_quality_filter(
-                        &extraction.umi_quality,
+                        umi_quality,
                         threshold,
                         config.quality_encoding.offset(),
                     )
@@ -331,36 +337,34 @@ where
                     continue;
                 }
 
-                let umi = config.final_umi(&extraction.umi, &extraction.umi_quality);
+                let umi = config.final_umi(umi, umi_quality);
                 let r1_id = build_read_name(
                     r1.id(),
-                    &extraction.cell_barcode,
+                    cell_barcode,
                     &umi,
                     config.umi_separator,
-                    false,
+                    config.ignore_read_pair_suffixes,
                 );
                 let r2_id = build_read_name(
                     r2.id(),
-                    &extraction.cell_barcode,
+                    cell_barcode,
                     &umi,
                     config.umi_separator,
-                    false,
+                    config.ignore_read_pair_suffixes,
                 );
 
-                // Read1: untrimmed, with new read name
-                let r1_seq = r1.seq();
-                let r1_qual = r1.qual().ok_or_else(|| {
-                    ExtractError::FastqParse("missing quality scores in read1".into())
-                })?;
-                write_fastq_record(&mut writer1, &r1_id, &r1_seq, r1_qual)?;
+                if let Some(first) = extraction1 {
+                    write_fastq_record(&mut writer1, &r1_id, &first.seq, &first.qual)?;
+                } else {
+                    let r1_seq = r1.seq();
+                    let r1_qual = r1.qual().ok_or_else(|| {
+                        ExtractError::FastqParse("missing quality scores in read1".into())
+                    })?;
+                    write_fastq_record(&mut writer1, &r1_id, &r1_seq, r1_qual)?;
+                }
 
                 // Read2: trimmed, with new read name
-                write_fastq_record(
-                    &mut writer2,
-                    &r2_id,
-                    &extraction.trimmed_sequence,
-                    &extraction.trimmed_quality,
-                )?;
+                write_fastq_record(&mut writer2, &r2_id, &extraction.seq, &extraction.qual)?;
 
                 stats.output_reads += 1;
             }
@@ -376,6 +380,19 @@ where
     writer1.flush()?;
     writer2.flush()?;
     Ok(stats)
+}
+
+fn process_paired_records(
+    r1: &SequenceRecord,
+    r2: &SequenceRecord,
+    pattern1: Option<&BarcodePattern>,
+    pattern2: &BarcodePattern,
+) -> Result<(Option<ProcessedRecord>, ProcessedRecord), ExtractError> {
+    let first = pattern1
+        .map(|pattern| process_record(r1, pattern))
+        .transpose()?;
+    let second = process_record(r2, pattern2)?;
+    Ok((first, second))
 }
 
 /// Process a single read pair in the r1-pattern extraction path.
