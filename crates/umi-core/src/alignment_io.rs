@@ -212,6 +212,18 @@ impl RecordSource {
     }
 }
 
+/// `samtools sort` order: contig, then position with forward before reverse
+/// at the same position, and reads without a contig last. Ties keep input order.
+#[must_use]
+pub fn coordinate_sort_key(record: &Record) -> (bool, i32, i64, bool) {
+    (
+        record.tid() < 0,
+        record.tid(),
+        record.pos(),
+        record.is_reverse(),
+    )
+}
+
 /// Header for coordinate-sorted output, rewritten the way `samtools sort` does it.
 #[must_use]
 pub fn coordinate_sorted_header(template: &HeaderView) -> bam::Header {

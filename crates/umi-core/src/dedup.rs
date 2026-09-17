@@ -8,6 +8,7 @@ use rust_htslib::bam::{Read as BamRead, Record};
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
+use crate::pairing::{PairingError, PairingOptions};
 
 /// Trait for RNG used in reservoir-sampling tie-breaks.
 ///
@@ -219,7 +220,7 @@ pub struct DedupConfig {
     pub barcode: BarcodeExtractor,
     pub gene: GeneOptions,
     pub output_stats: Option<String>,
-    pub paired: bool,
+    pub pairing: PairingOptions,
     pub ignore_tlen: bool,
     pub umi_whitelist: Option<HashSet<Vec<u8>>>,
 }
@@ -1535,6 +1536,7 @@ impl StatsCollector {
 /// Returns `DedupError` on BAM I/O failures or unknown chromosome filter.
 #[allow(clippy::too_many_lines)]
 pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, DedupError> {
+    config.pairing.validate(false)?;
     let mut source = alignment_io::RecordSource::whole(input_path, config.reference.as_deref())
         .map_err(|e| DedupError::BamOpen(e.to_string()))?;
     let assigner = GeneAssigner::new(&config.gene, source.header())?;
@@ -1617,28 +1619,19 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
         .read_next()
         .map_err(|e| DedupError::BamRead(e.to_string()))?
     {
-        if record.is_unmapped() {
-            continue;
-        }
-
-        // Paired mode: skip R2 reads and R1s with unmapped mates.
-        if config.paired {
-            if record.is_last_in_template() {
-                continue;
-            }
-            if record.is_mate_unmapped() {
-                continue;
-            }
-        }
-
         let tid = record.tid();
-
-        // Chromosome filter
         if chrom_filter.is_some_and(|filter_tid| tid != filter_tid) {
             continue;
         }
 
+        let triage = config.pairing.triage(&record, false);
+        if triage.is_read2 {
+            continue;
+        }
         stats.input_reads += 1;
+        if !triage.grouped {
+            continue;
+        }
 
         // Subset check consumes one RNG call per mapped read (before buffer.add)
         if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
@@ -1710,7 +1703,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             last_start = start;
             last_chrom = tid;
 
-            let tlen = if config.paired && !config.ignore_tlen {
+            let tlen = if config.pairing.paired && !config.ignore_tlen {
                 record.insert_size()
             } else {
                 0
@@ -1742,7 +1735,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
     ));
 
     // Paired mode: second pass to find R2 mates of surviving R1 reads.
-    if config.paired {
+    if config.pairing.paired {
         let mut mate_set: HashSet<(Vec<u8>, i32, i64)> = HashSet::new();
         for r1 in &output_records {
             mate_set.insert((r1.qname().to_vec(), r1.mtid(), r1.mpos()));
@@ -1754,7 +1747,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             if record.is_unmapped() || record.is_mate_unmapped() {
                 continue;
             }
-            if !record.is_last_in_template() {
+            if record.is_first_in_template() {
                 continue;
             }
             let key = (record.qname().to_vec(), record.tid(), record.pos());
@@ -1765,7 +1758,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
     }
 
     // Sort by coordinate (tid, pos) to match `pysam.sort()` / `samtools sort`.
-    output_records.sort_by(|a, b| a.tid().cmp(&b.tid()).then_with(|| a.pos().cmp(&b.pos())));
+    output_records.sort_by_key(alignment_io::coordinate_sort_key);
 
     stats.output_reads = output_records.len() as u64;
     for r in &output_records {
@@ -1811,6 +1804,8 @@ pub enum DedupError {
     Barcode(#[from] BarcodeError),
     #[error(transparent)]
     Gene(#[from] GeneError),
+    #[error(transparent)]
+    Pairing(#[from] PairingError),
 }
 
 #[cfg(test)]

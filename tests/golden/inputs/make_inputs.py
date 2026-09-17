@@ -102,6 +102,23 @@ def make_transcripts(target, source, map_target, bins=12):
             out.write(f"ENSG_S{i + 1:02d}\t{name}\n")
 
 
+def make_unpaired(target, source):
+    """Strip the pairing flags from roughly a tenth of the templates.
+
+    Gives --paired runs some read1s without the paired flag, which exercise
+    --unpaired-reads; upstream data has none.
+    """
+    with pysam.AlignmentFile(str(HERE / source)) as inp:
+        with pysam.AlignmentFile(str(HERE / target), "wb", template=inp) as out:
+            for read in inp:
+                if sum(read.query_name.encode()) % 10 == 0:
+                    read.flag &= ~(0x1 | 0x2 | 0x8 | 0x20 | 0x40 | 0x80)
+                    read.next_reference_id = -1
+                    read.next_reference_start = -1
+                    read.template_length = 0
+                out.write(read)
+
+
 def main():
     if not UPSTREAM.exists():
         sys.exit(f"upstream tests directory not found at {UPSTREAM}")
@@ -109,6 +126,7 @@ def main():
         subsample(target, source, fraction)
     make_tags("tags_sub.bam", "chr19_gene_tags.bam")
     make_transcripts("transcripts_sub.bam", "chr19_sub.bam", "gene_transcript_map.tsv")
+    make_unpaired("paired_mixed_sub.bam", "paired_sub.bam")
     for bam in sorted(HERE.glob("*.bam")):
         pysam.index(str(bam))
         print(f"{bam.name}: {pysam.AlignmentFile(str(bam)).count(until_eof=True)} reads")

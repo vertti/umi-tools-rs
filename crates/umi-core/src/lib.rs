@@ -6,5 +6,6 @@ pub mod error;
 pub mod extract;
 pub mod gene;
 pub mod group;
+pub mod pairing;
 pub mod pattern;
 pub mod whitelist;
