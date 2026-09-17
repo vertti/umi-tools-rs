@@ -47,6 +47,44 @@ pub struct ExtractConfig {
     pub blacklist: Option<HashSet<Vec<u8>>>,
     pub ignore_read_pair_suffixes: bool,
     pub reconcile_pairs: bool,
+    pub quality_filter_mask: Option<u8>,
+    pub either_read_resolve: EitherReadResolve,
+    pub subset_reads: Option<u64>,
+}
+
+/// What to do when both reads of a pair match in `--either-read` mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EitherReadResolve {
+    #[default]
+    Discard,
+    /// Keep the read whose UMI has the higher minimum base quality; read1 wins ties.
+    Quality,
+}
+
+impl ExtractConfig {
+    /// UMI as written to the read name: with `--quality-filter-mask`, bases below the
+    /// threshold become `N`.
+    fn final_umi(&self, umi: &[u8], quality: &[u8]) -> Vec<u8> {
+        let Some(mask) = self.quality_filter_mask else {
+            return umi.to_vec();
+        };
+        let offset = self.quality_encoding.offset();
+        umi.iter()
+            .zip(quality)
+            .map(|(&base, &q)| {
+                if q.saturating_sub(offset) < mask {
+                    b'N'
+                } else {
+                    base
+                }
+            })
+            .collect()
+    }
+
+    /// `--subset-reads`: `umi_tools` stops once the input count exceeds the limit.
+    fn past_subset(&self, input_reads: u64) -> bool {
+        self.subset_reads.is_some_and(|limit| input_reads > limit)
+    }
 }
 
 /// Statistics from an extraction run.
@@ -81,8 +119,11 @@ pub fn extract_reads<R: std::io::Read + Send, W: Write>(
     while let Some(result) = reader.next() {
         let record = result.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
         stats.input_reads += 1;
+        if config.past_subset(stats.input_reads) {
+            break;
+        }
 
-        match process_record(&record, pattern, config.umi_separator) {
+        match process_record(&record, pattern) {
             Ok(processed) => {
                 if let Some(threshold) = config.quality_filter_threshold
                     && fails_quality_filter(
@@ -94,7 +135,15 @@ pub fn extract_reads<R: std::io::Read + Send, W: Write>(
                     stats.quality_filtered += 1;
                     continue;
                 }
-                write_fastq_record(&mut writer, &processed.id, &processed.seq, &processed.qual)?;
+                let umi = config.final_umi(&processed.umi, &processed.umi_quality);
+                let id = build_read_name(
+                    record.id(),
+                    &processed.cell,
+                    &umi,
+                    config.umi_separator,
+                    false,
+                );
+                write_fastq_record(&mut writer, &id, &processed.seq, &processed.qual)?;
                 stats.output_reads += 1;
             }
             Err(ExtractError::ReadTooShort { .. }) => {
@@ -112,16 +161,16 @@ pub fn extract_reads<R: std::io::Read + Send, W: Write>(
 }
 
 struct ProcessedRecord {
-    id: Vec<u8>,
+    cell: Vec<u8>,
+    umi: Vec<u8>,
+    umi_quality: Vec<u8>,
     seq: Vec<u8>,
     qual: Vec<u8>,
-    umi_quality: Vec<u8>,
 }
 
 fn process_record(
     record: &SequenceRecord,
     pattern: &BarcodePattern,
-    umi_separator: u8,
 ) -> Result<ProcessedRecord, ExtractError> {
     let seq = record.seq();
     let qual = record
@@ -130,19 +179,12 @@ fn process_record(
 
     let result = pattern.extract(&seq, qual)?;
 
-    let id = build_read_name(
-        record.id(),
-        &result.cell_barcode,
-        &result.umi,
-        umi_separator,
-        false,
-    );
-
     Ok(ProcessedRecord {
-        id,
+        cell: result.cell_barcode,
+        umi: result.umi,
+        umi_quality: result.umi_quality,
         seq: result.trimmed_sequence,
         qual: result.trimmed_quality,
-        umi_quality: result.umi_quality,
     })
 }
 
@@ -256,6 +298,9 @@ where
                 let r1 = r1.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
                 let r2 = r2.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
                 stats.input_reads += 1;
+                if config.past_subset(stats.input_reads) {
+                    break;
+                }
 
                 let r2_seq = r2.seq();
                 let r2_qual = r2.qual().ok_or_else(|| {
@@ -286,17 +331,18 @@ where
                     continue;
                 }
 
+                let umi = config.final_umi(&extraction.umi, &extraction.umi_quality);
                 let r1_id = build_read_name(
                     r1.id(),
                     &extraction.cell_barcode,
-                    &extraction.umi,
+                    &umi,
                     config.umi_separator,
                     false,
                 );
                 let r2_id = build_read_name(
                     r2.id(),
                     &extraction.cell_barcode,
-                    &extraction.umi,
+                    &umi,
                     config.umi_separator,
                     false,
                 );
@@ -394,10 +440,11 @@ fn process_r1_pattern_pair<W: Write>(
         extraction.cell_barcode.clone()
     };
 
+    let umi = config.final_umi(&extraction.umi, &extraction.umi_quality);
     let r2_id = build_read_name(
         r2.id(),
         &cell_barcode,
-        &extraction.umi,
+        &umi,
         config.umi_separator,
         config.ignore_read_pair_suffixes,
     );
@@ -475,6 +522,9 @@ where
         while let Some(r1_result) = reader1.next() {
             let r1 = r1_result.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
             stats.input_reads += 1;
+            if config.past_subset(stats.input_reads) {
+                break;
+            }
             let r1_name = read_name(r1.id());
 
             loop {
@@ -521,6 +571,9 @@ where
                     let r1 = r1.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
                     let r2 = r2.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
                     stats.input_reads += 1;
+                    if config.past_subset(stats.input_reads) {
+                        break;
+                    }
                     let kept = process_r1_pattern_pair(
                         &r1,
                         &r2,
@@ -611,6 +664,9 @@ where
                 let r1 = r1.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
                 let r2 = r2.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
                 stats.input_reads += 1;
+                if config.past_subset(stats.input_reads) {
+                    break;
+                }
 
                 let r1_seq = r1.seq();
                 let r1_qual = r1.qual().ok_or_else(|| {
@@ -625,8 +681,44 @@ where
                 let r2_result = try_extract(pattern2, &r2_seq, r2_qual)?;
 
                 match (r1_result, r2_result) {
-                    (Some(_), Some(_)) => {
-                        stats.both_matched += 1;
+                    (Some(extraction1), Some(extraction2)) => {
+                        if config.either_read_resolve == EitherReadResolve::Discard {
+                            stats.both_matched += 1;
+                            continue;
+                        }
+                        let offset = config.quality_encoding.offset();
+                        let min_quality = |quality: &[u8]| {
+                            quality
+                                .iter()
+                                .map(|&q| q.saturating_sub(offset))
+                                .min()
+                                .unwrap_or(0)
+                        };
+                        let chosen = if min_quality(&extraction1.umi_quality)
+                            >= min_quality(&extraction2.umi_quality)
+                        {
+                            extraction1
+                        } else {
+                            extraction2
+                        };
+                        if let Some(threshold) = config.quality_filter_threshold
+                            && fails_quality_filter(&chosen.umi_quality, threshold, offset)
+                        {
+                            stats.quality_filtered += 1;
+                            continue;
+                        }
+                        let umi = config.final_umi(&chosen.umi, &chosen.umi_quality);
+                        let new_id = build_read_name(
+                            r1.id(),
+                            &chosen.cell_barcode,
+                            &umi,
+                            config.umi_separator,
+                            false,
+                        );
+                        // umi_tools leaves both sequences untrimmed when both reads match.
+                        write_fastq_record(&mut writer1, &new_id, &r1_seq, r1_qual)?;
+                        write_fastq_record(&mut writer2, &new_id, &r2_seq, r2_qual)?;
+                        stats.output_reads += 1;
                     }
                     (Some(extraction), None) => {
                         if let Some(threshold) = config.quality_filter_threshold
@@ -640,11 +732,12 @@ where
                             continue;
                         }
 
+                        let umi = config.final_umi(&extraction.umi, &extraction.umi_quality);
                         // Both headers built from read1 (matches Python umi-tools behavior)
                         let new_id = build_read_name(
                             r1.id(),
                             &extraction.cell_barcode,
-                            &extraction.umi,
+                            &umi,
                             config.umi_separator,
                             false,
                         );
@@ -673,11 +766,12 @@ where
                             continue;
                         }
 
+                        let umi = config.final_umi(&extraction.umi, &extraction.umi_quality);
                         // Both headers built from read1 (matches Python umi-tools behavior)
                         let new_id = build_read_name(
                             r1.id(),
                             &extraction.cell_barcode,
-                            &extraction.umi,
+                            &umi,
                             config.umi_separator,
                             false,
                         );

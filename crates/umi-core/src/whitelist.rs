@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
+use std::io::Read;
 use std::io::{BufWriter, Write};
 
-use needletail::parser::{FastqReader, FastxReader};
+use needletail::parser::{FastqReader, FastxReader, SequenceRecord};
 
 use crate::error::ExtractError;
 use crate::pattern::BarcodePattern;
@@ -23,9 +24,21 @@ pub enum EdAboveThreshold {
     Correct,
 }
 
+/// What is counted per cell barcode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WhitelistMethod {
+    #[default]
+    Reads,
+    /// Distinct UMIs per cell.
+    Umis,
+}
+
 /// Configuration for the whitelist subcommand.
 pub struct WhitelistConfig {
-    pub pattern: BarcodePattern,
+    pub pattern: Option<BarcodePattern>,
+    pub pattern2: Option<BarcodePattern>,
+    pub method: WhitelistMethod,
+    pub allow_threshold_error: bool,
     pub knee_method: KneeMethod,
     pub cell_number: Option<usize>,
     pub expect_cells: Option<usize>,
@@ -51,21 +64,18 @@ pub struct WhitelistStats {
 ///
 /// # Errors
 /// Returns error on I/O or pattern-matching failures.
-pub fn run_whitelist<R: std::io::Read + Send, W: Write, FW: Write>(
+pub fn run_whitelist<R: Read + Send, W: Write, FW: Write>(
     config: &WhitelistConfig,
     input: R,
+    input2: Option<Box<dyn Read + Send>>,
     output: W,
     filtered_out: Option<FW>,
+    filtered_out2: Option<Box<dyn Write>>,
 ) -> Result<WhitelistStats, ExtractError> {
     let (all_counts, first_seen, stats) =
-        count_barcodes(&config.pattern, input, config.subset_reads, filtered_out)?;
+        count_barcodes(config, input, input2, filtered_out, filtered_out2)?;
 
-    let whitelist = determine_whitelist(
-        &all_counts,
-        config.knee_method,
-        config.cell_number,
-        config.expect_cells,
-    );
+    let whitelist = determine_whitelist(&all_counts, config)?;
 
     let mut corrections =
         build_error_correction_map(&all_counts, &whitelist, config.error_correct_threshold);
@@ -105,65 +115,139 @@ pub fn run_whitelist<R: std::io::Read + Send, W: Write, FW: Write>(
     Ok(stats)
 }
 
-/// Read FASTQ, extract cell barcodes, count frequencies.
-/// Optionally writes non-matching reads to `filtered_out`.
+/// Read FASTQ (pairs), extract cell barcodes, count reads or distinct UMIs per cell.
+/// Non-matching reads go to the filtered-out files.
 #[allow(clippy::type_complexity)]
-fn count_barcodes<R: std::io::Read + Send, FW: Write>(
-    pattern: &BarcodePattern,
+fn count_barcodes<R: Read + Send, FW: Write>(
+    config: &WhitelistConfig,
     input: R,
-    subset_reads: usize,
+    input2: Option<Box<dyn Read + Send>>,
     filtered_out: Option<FW>,
+    filtered_out2: Option<Box<dyn Write>>,
 ) -> Result<(HashMap<String, u64>, HashMap<String, usize>, WhitelistStats), ExtractError> {
     let mut counts: HashMap<String, u64> = HashMap::new();
+    let mut umis: HashMap<String, HashSet<Vec<u8>>> = HashMap::new();
     let mut first_seen: HashMap<String, usize> = HashMap::new();
     let mut seen_order: usize = 0;
+    let mut matched: u64 = 0;
     let mut stats = WhitelistStats {
         input_reads: 0,
         no_match: 0,
     };
     let mut filt_writer = filtered_out.map(BufWriter::new);
+    let mut filt_writer2 = filtered_out2.map(BufWriter::new);
 
     let mut reader = FastqReader::new(input);
+    let mut reader2 = input2.map(FastqReader::new);
 
     while let Some(result) = reader.next() {
         let record = result.map_err(|e| ExtractError::FastqParse(e.to_string()))?;
+        // Like Python's izip, a shorter read2 file ends the loop.
+        let record2 = match reader2.as_mut().map(FastxReader::next) {
+            None => None,
+            Some(None) => break,
+            Some(Some(result2)) => {
+                Some(result2.map_err(|e| ExtractError::FastqParse(e.to_string()))?)
+            }
+        };
         stats.input_reads += 1;
 
-        if stats.input_reads > subset_reads as u64 {
-            break;
+        let Some((cell, umi)) = extract_pair(config, &record, record2.as_ref())? else {
+            stats.no_match += 1;
+            if let Some(fw) = filt_writer.as_mut() {
+                write_record(fw, &record)?;
+            }
+            if let (Some(fw), Some(record2)) = (filt_writer2.as_mut(), record2.as_ref()) {
+                write_record(fw, record2)?;
+            }
+            continue;
+        };
+        matched += 1;
+
+        let cell = String::from_utf8_lossy(&cell).into_owned();
+        if !cell.is_empty() {
+            if !counts.contains_key(&cell) {
+                first_seen.insert(cell.clone(), seen_order);
+                seen_order += 1;
+            }
+            match config.method {
+                WhitelistMethod::Reads => *counts.entry(cell).or_insert(0) += 1,
+                WhitelistMethod::Umis => {
+                    counts.entry(cell.clone()).or_insert(0);
+                    umis.entry(cell).or_default().insert(umi);
+                }
+            }
         }
 
-        let seq = record.seq();
-        let qual = record
-            .qual()
-            .ok_or_else(|| ExtractError::FastqParse("missing quality scores".into()))?;
+        // umi_tools compares the matched-read count for single-end input and the
+        // total read count for paired input.
+        let processed = if reader2.is_some() {
+            stats.input_reads
+        } else {
+            matched
+        };
+        if processed > config.subset_reads as u64 {
+            break;
+        }
+    }
 
-        match pattern.extract(&seq, qual) {
-            Ok(extraction) => {
-                let cell = String::from_utf8_lossy(&extraction.cell_barcode).into_owned();
-                if !cell.is_empty() {
-                    if !counts.contains_key(&cell) {
-                        first_seen.insert(cell.clone(), seen_order);
-                        seen_order += 1;
-                    }
-                    *counts.entry(cell).or_insert(0) += 1;
-                }
-            }
-            Err(ExtractError::ReadTooShort { .. } | ExtractError::RegexNoMatch) => {
-                stats.no_match += 1;
-                if let Some(fw) = filt_writer.as_mut() {
-                    write_fastq_record(fw, record.id(), &seq, qual)?;
-                }
-            }
-            Err(e) => return Err(e),
+    if config.method == WhitelistMethod::Umis {
+        for (cell, set) in &umis {
+            counts.insert(cell.clone(), set.len() as u64);
         }
     }
 
     if let Some(fw) = filt_writer.as_mut() {
         fw.flush()?;
     }
+    if let Some(fw) = filt_writer2.as_mut() {
+        fw.flush()?;
+    }
 
     Ok((counts, first_seen, stats))
+}
+
+/// Cell barcode and UMI bytes.
+type CellAndUmi = (Vec<u8>, Vec<u8>);
+
+/// Cell barcode and UMI of a read (pair): read1's followed by read2's, as
+/// `umi_tools` concatenates them. `None` when either pattern does not match.
+fn extract_pair(
+    config: &WhitelistConfig,
+    record: &SequenceRecord,
+    record2: Option<&SequenceRecord>,
+) -> Result<Option<CellAndUmi>, ExtractError> {
+    let mut cell = Vec::new();
+    let mut umi = Vec::new();
+    let sources = [
+        (config.pattern.as_ref(), Some(record)),
+        (config.pattern2.as_ref(), record2),
+    ];
+    for (pattern, record) in sources {
+        let (Some(pattern), Some(record)) = (pattern, record) else {
+            continue;
+        };
+        let seq = record.seq();
+        let qual = record
+            .qual()
+            .ok_or_else(|| ExtractError::FastqParse("missing quality scores".into()))?;
+        match pattern.extract(&seq, qual) {
+            Ok(extraction) => {
+                cell.extend(extraction.cell_barcode);
+                umi.extend(extraction.umi);
+            }
+            Err(ExtractError::ReadTooShort { .. } | ExtractError::RegexNoMatch) => return Ok(None),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(Some((cell, umi)))
+}
+
+fn write_record<W: Write>(writer: &mut W, record: &SequenceRecord) -> Result<(), ExtractError> {
+    let qual = record
+        .qual()
+        .ok_or_else(|| ExtractError::FastqParse("missing quality scores".into()))?;
+    write_fastq_record(writer, record.id(), &record.seq(), qual)
 }
 
 /// Write a FASTQ record (used for filtered-out output).
@@ -186,39 +270,40 @@ fn write_fastq_record<W: Write>(
 /// Determine which barcodes to whitelist based on knee detection or explicit cell number.
 fn determine_whitelist(
     all_counts: &HashMap<String, u64>,
-    knee_method: KneeMethod,
-    cell_number: Option<usize>,
-    expect_cells: Option<usize>,
-) -> Vec<String> {
+    config: &WhitelistConfig,
+) -> Result<Vec<String>, ExtractError> {
     let mut sorted_barcodes: Vec<(&String, &u64)> = all_counts.iter().collect();
     sorted_barcodes.sort_by(|a, b| b.1.cmp(a.1));
 
-    if let Some(n) = cell_number {
+    if let Some(n) = config.cell_number {
         if n == 0 || sorted_barcodes.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let threshold_idx = n.min(sorted_barcodes.len()) - 1;
         let threshold = *sorted_barcodes[threshold_idx].1;
-        sorted_barcodes
+        return Ok(sorted_barcodes
             .iter()
             .filter(|(_, count)| **count > threshold)
             .map(|(bc, _)| (*bc).clone())
-            .collect()
-    } else {
-        match knee_method {
-            KneeMethod::Distance => {
-                let counts: Vec<u64> = sorted_barcodes.iter().map(|(_, c)| **c).collect();
-                if counts.is_empty() {
-                    return Vec::new();
-                }
-                let knee = knee_distance(&counts);
-                sorted_barcodes[..=knee]
-                    .iter()
-                    .map(|(bc, _)| (*bc).clone())
-                    .collect()
+            .collect());
+    }
+    match config.knee_method {
+        KneeMethod::Distance => {
+            let counts: Vec<u64> = sorted_barcodes.iter().map(|(_, c)| **c).collect();
+            if counts.is_empty() {
+                return Ok(Vec::new());
             }
-            KneeMethod::Density => knee_density(&sorted_barcodes, expect_cells),
+            let knee = knee_distance(&counts);
+            Ok(sorted_barcodes[..=knee]
+                .iter()
+                .map(|(bc, _)| (*bc).clone())
+                .collect())
         }
+        KneeMethod::Density => match knee_density(&sorted_barcodes, config.expect_cells) {
+            Some(whitelist) => Ok(whitelist),
+            None if config.allow_threshold_error => Ok(Vec::new()),
+            None => Err(ExtractError::NoThreshold),
+        },
     }
 }
 
@@ -288,9 +373,12 @@ fn cumulative_sum(counts: &[u64]) -> Vec<f64> {
 /// Density-based knee detection using Gaussian KDE on log10-transformed counts.
 /// Matches scipy's `gaussian_kde(data, bw_method=0.1)` behavior.
 #[allow(clippy::cast_precision_loss)]
-fn knee_density(sorted_barcodes: &[(&String, &u64)], expect_cells: Option<usize>) -> Vec<String> {
+fn knee_density(
+    sorted_barcodes: &[(&String, &u64)],
+    expect_cells: Option<usize>,
+) -> Option<Vec<String>> {
     if sorted_barcodes.is_empty() {
-        return Vec::new();
+        return None;
     }
 
     let max_count = *sorted_barcodes[0].1 as f64;
@@ -305,12 +393,12 @@ fn knee_density(sorted_barcodes: &[(&String, &u64)], expect_cells: Option<usize>
         .collect();
 
     if log_counts.is_empty() {
-        return Vec::new();
+        return None;
     }
 
     let bw = sample_std(&log_counts) * 0.1;
     if bw <= 0.0 {
-        return Vec::new();
+        return None;
     }
 
     let log_min = log_counts.iter().copied().fold(f64::INFINITY, f64::min);
@@ -329,7 +417,7 @@ fn knee_density(sorted_barcodes: &[(&String, &u64)], expect_cells: Option<usize>
         .collect();
 
     if local_mins.is_empty() {
-        return Vec::new();
+        return None;
     }
 
     // Select the appropriate local minimum by iterating in reverse
@@ -361,16 +449,16 @@ fn knee_density(sorted_barcodes: &[(&String, &u64)], expect_cells: Option<usize>
         }
     }
 
-    let Some(min_idx) = selected_min else {
-        return Vec::new();
-    };
+    let min_idx = selected_min?;
 
     let threshold = 10.0_f64.powf(xx[min_idx]);
-    sorted_barcodes
-        .iter()
-        .filter(|(_, c)| **c as f64 > threshold)
-        .map(|(bc, _)| (*bc).clone())
-        .collect()
+    Some(
+        sorted_barcodes
+            .iter()
+            .filter(|(_, c)| **c as f64 > threshold)
+            .map(|(bc, _)| (*bc).clone())
+            .collect(),
+    )
 }
 
 /// Gaussian KDE evaluation matching scipy's `gaussian_kde` behavior.

@@ -303,3 +303,75 @@ count_no_sort_output:
   outputs: [stdout]
   references: [count_no_sort_output.tsv.gz]
   options: count --random-seed=123456789 --method=directional --per-gene --per-contig --no-sort-output
+
+extract_quality_filter_mask:
+  stdin: slim.fastq.gz
+  outputs: [stdout]
+  references: [extract_quality_filter_mask.fastq.gz]
+  options: extract --extract-method=regex --bc-pattern="^(?P<umi_1>.{3}).{4}(?P<umi_2>.{2})" --quality-filter-mask=30 --quality-encoding=phred33 --subset-reads=2000
+
+extract_subset_reads:
+  stdin: slim.fastq.gz
+  outputs: [stdout]
+  references: [extract_subset_reads.fastq.gz]
+  options: extract --bc-pattern=NNNXXXXNN --subset-reads=100
+
+extract_reads_subset_alias:
+  stdin: slim.fastq.gz
+  outputs: [stdout]
+  references: [extract_reads_subset_alias.fastq.gz]
+  options: extract --bc-pattern=NNNXXXXNN --reads-subset=50
+
+extract_either_read_resolve_quality:
+  stdin: either_both_sub.fastq.1.gz
+  outputs: [stdout, either_both_quality.2.fastq]
+  references: [extract_either_read_resolve_quality.1.fastq.gz, extract_either_read_resolve_quality.2.fastq.gz]
+  options: extract --extract-method=regex --read2-in=<INPUTS>/either_both_sub.fastq.2.gz --bc-pattern="(?P<discard_1>.{8,12})(?P<discard_2>GAGTGATTGCTTGTGACGCCTT{s<=2})(?P<discard_3>.{8})(?P<umi_1>.{6})T{3}.*" --bc-pattern2="(?P<discard_1>.{8,12})(?P<discard_2>GAGTGATTGCTTGTGACGCCTT{s<=2})(?P<discard_3>.{8})(?P<umi_1>.{6})T{3}.*" --either-read --either-read-resolve=quality --quality-encoding=phred33 --read2-out=either_both_quality.2.fastq
+
+extract_either_read_resolve_discard:
+  stdin: either_both_sub.fastq.1.gz
+  outputs: [stdout, either_both_discard.2.fastq]
+  references: [extract_either_read_resolve_discard.1.fastq.gz, extract_either_read_resolve_discard.2.fastq.gz]
+  options: extract --extract-method=regex --read2-in=<INPUTS>/either_both_sub.fastq.2.gz --bc-pattern="(?P<discard_1>.{8,12})(?P<discard_2>GAGTGATTGCTTGTGACGCCTT{s<=2})(?P<discard_3>.{8})(?P<umi_1>.{6})T{3}.*" --bc-pattern2="(?P<discard_1>.{8,12})(?P<discard_2>GAGTGATTGCTTGTGACGCCTT{s<=2})(?P<discard_3>.{8})(?P<umi_1>.{6})T{3}.*" --either-read --read2-out=either_both_discard.2.fastq
+
+extract_read2_only:
+  stdin: scrb_seq_fastq.1.gz
+  outputs: [read2_only.1.fastq]
+  references: [extract_read2_only.1.fastq.gz]
+  options: extract --extract-method=string --read2-in=<DIR>/scrb_seq_fastq.2.gz --bc-pattern2=NNNNNNNNNN --read2-only --read2-out=read2_only.1.fastq --subset-reads=1000
+
+whitelist_method_umis:
+  stdin: scrb_seq_fastq.1.gz
+  outputs: [stdout]
+  references: [whitelist_method_umis.tsv.gz]
+  options: whitelist --bc-pattern=CCCCCCNNNNNNNNNN --method=umis
+
+whitelist_paired:
+  stdin: scrb_seq_fastq.1.gz
+  outputs: [stdout]
+  references: [whitelist_paired.tsv.gz]
+  options: whitelist --bc-pattern=CCCCCCNNNNNNNNNN --bc-pattern2=CCCC --read2-in=<DIR>/scrb_seq_fastq.2.gz
+
+whitelist_read2_only:
+  stdin: scrb_seq_fastq.2.gz
+  outputs: [stdout]
+  references: [whitelist_read2_only.tsv.gz]
+  options: whitelist --bc-pattern2=CCCCCCNNNNNNNNNN --read2-only --read2-in=<DIR>/scrb_seq_fastq.1.gz
+
+whitelist_subset_reads:
+  stdin: scrb_seq_fastq.1.gz
+  outputs: [stdout]
+  references: [whitelist_subset_reads.tsv.gz]
+  options: whitelist --bc-pattern=CCCCCCNNNNNNNNNN --subset-reads=2000
+
+whitelist_paired_subset_reads:
+  stdin: scrb_seq_fastq.1.gz
+  outputs: [stdout, whitelist_paired_filtered.1.fastq, whitelist_paired_filtered.2.fastq]
+  references: [whitelist_paired_subset_reads.tsv.gz, whitelist_paired_subset_reads_filtered.1.fastq.gz, whitelist_paired_subset_reads_filtered.2.fastq.gz]
+  options: whitelist --extract-method=regex --bc-pattern="^(?P<cell_1>.{6})(?P<umi_1>.{10})" --bc-pattern2="^(?P<cell_2>CC.{2}).*" --read2-in=<DIR>/scrb_seq_fastq.2.gz --subset-reads=2000 --filtered-out=whitelist_paired_filtered.1.fastq --filtered-out2=whitelist_paired_filtered.2.fastq
+
+count_tab_inert_flags:
+  stdin: chr19_gene_assigned.tsv
+  outputs: [stdout]
+  references: [count_tab_inert_flags.tsv.gz]
+  options: count_tab --read-length --spliced-is-unique --soft-clip-threshold=2

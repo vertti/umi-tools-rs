@@ -7,6 +7,7 @@ cell and UMI encodings the upstream data lacks (a separator-delimited read
 name, RX/CB tags with delimiters and a 10x-style GEM suffix).
 """
 
+import gzip
 import os
 import subprocess
 import sys
@@ -119,6 +120,32 @@ def make_unpaired(target, source):
                 out.write(read)
 
 
+def make_either_both(target1, target2, source1, source2, limit=3000):
+    """Pairs whose reads both carry the barcode, for --either-read-resolve.
+
+    Every third read2 becomes a copy of read1's sequence; its qualities are all
+    high or all low in turn, so the quality resolution picks read2 or read1.
+    The upstream either-read data never has both reads matching.
+    """
+    def records(path):
+        with gzip.open(UPSTREAM / path, "rt") as handle:
+            while True:
+                lines = [handle.readline() for _ in range(4)]
+                if not lines[0]:
+                    return
+                yield lines
+
+    with gzip.open(HERE / target1, "wt") as out1, gzip.open(HERE / target2, "wt") as out2:
+        for i, (read1, read2) in enumerate(zip(records(source1), records(source2))):
+            if i >= limit:
+                break
+            if i % 3 == 0:
+                quality = "I" if i % 2 == 0 else "#"
+                read2 = [read2[0], read1[1], read2[2], quality * (len(read1[1]) - 1) + "\n"]
+            out1.writelines(read1)
+            out2.writelines(read2)
+
+
 def main():
     if not UPSTREAM.exists():
         sys.exit(f"upstream tests directory not found at {UPSTREAM}")
@@ -127,6 +154,12 @@ def main():
     make_tags("tags_sub.bam", "chr19_gene_tags.bam")
     make_transcripts("transcripts_sub.bam", "chr19_sub.bam", "gene_transcript_map.tsv")
     make_unpaired("paired_mixed_sub.bam", "paired_sub.bam")
+    make_either_both(
+        "either_both_sub.fastq.1.gz",
+        "either_both_sub.fastq.2.gz",
+        "either_read.fastq.1.gz",
+        "either_read.fastq.2.gz",
+    )
     for bam in sorted(HERE.glob("*.bam")):
         pysam.index(str(bam))
         print(f"{bam.name}: {pysam.AlignmentFile(str(bam)).count(until_eof=True)} reads")

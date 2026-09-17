@@ -91,7 +91,7 @@ Optparse-style abbreviations work as in UMI-tools, for example `--unmapped` for 
 - `--error` captures umi-tools-rs notes and errors; htslib messages still go to stderr.
 - `--compresslevel` defaults to 3 rather than 6.
 - `--reference-filename` takes a local path; URL references are not fetched.
-- `--input-options`, `--output-options`, `--temp-dir`, `--timeit`, `--timeit-name` and `--timeit-header` print a note and have no effect. `--plot-prefix` prints a note and no plots are generated. `group --multimapping-detection-method` prints a note because group keeps every read.
+- `--input-options`, `--output-options`, `--temp-dir`, `--timeit`, `--timeit-name` and `--timeit-header` print a note and have no effect. `--plot-prefix` prints a note and no plots are generated. `group --multimapping-detection-method` prints a note because group keeps every read. `whitelist --ignore-read-pair-suffixes` and the alignment and position flags `count_tab` inherits from UMI-tools print a note because they cannot apply to a table.
 - `--in-format` and `--in-sam` have no effect because the input format is detected from the file content.
 - `--gene-transcript-map` reads a gene's transcripts in file order. UMI-tools iterates a set, so which read represents a UMI group there varies with the Python hash seed; counts agree.
 - `count` needs `--gene-tag` or `--per-contig`, as UMI-tools does; earlier releases defaulted to `XF`.
