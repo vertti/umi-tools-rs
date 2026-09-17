@@ -1,5 +1,12 @@
 # umi-tools-rs
 
+## Workflow
+
+- Work in small, focused commits throughout the task.
+- Use TDD for behavior changes: add a regression test, observe it fail for the expected reason, then implement the fix and verify it passes.
+- Keep each commit passing its relevant checks; commit the regression test with its fix.
+- Separate bug fixes, refactors, and tooling changes into independently reviewable commits.
+
 ## Toolchain
 
 All tools are managed by [mise](https://mise.jdx.dev/) — see `mise.toml` for versions.

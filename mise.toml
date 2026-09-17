@@ -35,6 +35,10 @@ run = "uv run --group test pytest tests/umi_tools_compat -v"
 description = "Run umi-tools compatibility tests"
 depends = ["build"]
 
+[tasks.duplicates]
+run = "uvx --from jscpd==5.2.1 jscpd --config .jscpd.json --baseline .jscpd-baseline.json --fail-on-new-clones=0 --fail-on-empty src crates"
+description = "Reject new duplicated Rust blocks (existing clones are baselined)"
+
 [tasks.golden]
 run = "uv run --group bench python tests/golden/generate.py"
 description = "Regenerate tests/golden references with Python umi_tools"

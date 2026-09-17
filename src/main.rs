@@ -18,8 +18,8 @@ use umi_core::dedup::{
     DedupConfig, DedupMethod, MultimappingDetection, PositionOptions, run_dedup,
 };
 use umi_core::extract::{
-    EitherReadResolve, ExtractConfig, QualityEncoding, extract_reads, extract_reads_either_read,
-    extract_reads_paired, extract_reads_paired_r1_pattern,
+    EitherReadResolve, ExtractConfig, ExtractMode, ExtractOutputs, QualityEncoding,
+    extract_with_outputs,
 };
 use umi_core::gene::{DEFAULT_SKIP_REGEX, GeneOptions};
 use umi_core::group::{GroupConfig, run_group};
@@ -1449,38 +1449,35 @@ fn run_extract(
     };
 
     let reader1 = open_input(input_path)?;
-
-    let stats = if let Some(r2_path) = read2_in_path {
-        let reader2 = open_input(Some(r2_path))?;
-        if either_read {
-            let writer1 = open_output(output_path, compresslevel)?;
-            let writer2 = open_output(read2_out_path, compresslevel)
-                .context("--read2-out is required when --either-read is specified")?;
-            extract_reads_either_read(&config, reader1, reader2, writer1, writer2)
-                .context("either-read extraction failed")?
-        } else if read2_stdout {
-            let writer = open_output(output_path, compresslevel)?;
-            let filt1 = filtered_out_path
-                .map(|p| open_output(Some(p), compresslevel))
-                .transpose()
-                .context("failed to open --filtered-out")?;
-            let filt2 = filtered_out2_path
-                .map(|p| open_output(Some(p), compresslevel))
-                .transpose()
-                .context("failed to open --filtered-out2")?;
-            extract_reads_paired_r1_pattern(&config, reader1, reader2, writer, filt1, filt2)
-                .context("paired-end extraction failed")?
-        } else {
-            let writer1 = open_output(output_path, compresslevel)?;
-            let writer2 = open_output(read2_out_path, compresslevel)
-                .context("--read2-out is required when --read2-in is specified")?;
-            extract_reads_paired(&config, reader1, reader2, writer1, writer2)
-                .context("paired-end extraction failed")?
-        }
+    let reader2 = read2_in_path
+        .map(|path| open_input(Some(path)))
+        .transpose()?;
+    let primary = open_output(output_path, compresslevel)?;
+    let secondary = read2_out_path
+        .map(|path| open_output(Some(path), compresslevel))
+        .transpose()?;
+    let (read1, read2) = if read2_stdout && reader2.is_some() {
+        (None, Some(primary))
     } else {
-        let writer1 = open_output(output_path, compresslevel)?;
-        extract_reads(&config, reader1, writer1).context("extraction failed")?
+        (Some(primary), secondary)
     };
+    let outputs = ExtractOutputs {
+        read1,
+        read2,
+        filtered1: filtered_out_path
+            .map(|path| open_output(Some(path), compresslevel))
+            .transpose()?,
+        filtered2: filtered_out2_path
+            .map(|path| open_output(Some(path), compresslevel))
+            .transpose()?,
+    };
+    let mode = if either_read {
+        ExtractMode::EitherRead
+    } else {
+        ExtractMode::Combine
+    };
+    let stats = extract_with_outputs(&config, mode, reader1, reader2, outputs)
+        .context("extraction failed")?;
 
     Ok(format!(
         "Reads input: {}, output: {}, too short: {}, no match: {}, quality filtered: {}, whitelist filtered: {}",
