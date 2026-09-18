@@ -331,7 +331,11 @@ fn preprocess_fuzzy(pattern_str: &str) -> Result<String, ExtractError> {
             let max_subs: usize = std::str::from_utf8(&bytes[num_start..num_end])
                 .expect("ASCII digits validated above")
                 .parse()
-                .expect("ASCII digits validated above");
+                .map_err(|_| {
+                    ExtractError::InvalidPattern(format!(
+                        "fuzzy quantifier at position {i} exceeds the supported integer range"
+                    ))
+                })?;
 
             if result.is_empty() {
                 return Err(ExtractError::InvalidPattern(format!(
@@ -472,6 +476,14 @@ mod tests {
     #[test]
     fn regex_parse_invalid_regex() {
         assert!(RegexPattern::parse(r"^(?P<umi_1>.{3").is_err());
+    }
+
+    #[test]
+    fn oversized_fuzzy_quantifier_returns_an_error() {
+        assert!(matches!(
+            RegexPattern::parse("(?P<umi_1>A{s<=9999999999999999999999999999999})"),
+            Err(ExtractError::InvalidPattern(_))
+        ));
     }
 
     #[test]
