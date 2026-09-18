@@ -4,7 +4,7 @@ use std::io::{self, BufRead, Write as IoWrite};
 use thiserror::Error;
 
 use crate::alignment_io::RecordSource;
-use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
+use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor, split_all};
 use crate::dedup::{DedupMethod, PythonRandom, TieBreakRng, count_umis};
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 use crate::pairing::{PairingError, PairingOptions};
@@ -52,7 +52,7 @@ pub struct CountStats {
 pub struct CountTabConfig {
     pub method: DedupMethod,
     pub per_cell: bool,
-    pub separator: u8,
+    pub separator: Vec<u8>,
     pub edit_distance_threshold: u32,
 }
 
@@ -290,14 +290,11 @@ pub fn run_count_tab(
         }
         current_gene = Some(gene);
 
-        let sep = config.separator;
-        let parts: Vec<&str> = read_name.split(|c: char| c as u8 == sep).collect();
-        let umi = parts
-            .last()
-            .map_or_else(Vec::new, |s| s.as_bytes().to_vec());
+        let parts = split_all(read_name.as_bytes(), &config.separator);
+        let umi = parts.last().map_or_else(Vec::new, |s| s.to_vec());
 
         let cell_key = if config.per_cell && parts.len() >= 2 {
-            Some(parts[parts.len() - 2].to_string())
+            Some(String::from_utf8_lossy(parts[parts.len() - 2]).into_owned())
         } else {
             None
         };

@@ -19,7 +19,7 @@ fn extract_string_matches_umi_tools_reference() {
     let config = ExtractConfig {
         pattern: Some(pattern),
         pattern2: None,
-        umi_separator: b'_',
+        umi_separator: b"_".to_vec(),
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
         whitelist: None,
@@ -62,7 +62,7 @@ fn extract_regex_matches_string_method() {
     let string_config = ExtractConfig {
         pattern: Some(string_pattern),
         pattern2: None,
-        umi_separator: b'_',
+        umi_separator: b"_".to_vec(),
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
         whitelist: None,
@@ -77,7 +77,7 @@ fn extract_regex_matches_string_method() {
     let regex_config = ExtractConfig {
         pattern: Some(regex_pattern),
         pattern2: None,
-        umi_separator: b'_',
+        umi_separator: b"_".to_vec(),
         quality_filter_threshold: None,
         quality_encoding: QualityEncoding::default(),
         whitelist: None,
