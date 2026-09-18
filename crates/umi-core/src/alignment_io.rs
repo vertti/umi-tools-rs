@@ -6,6 +6,15 @@ use rust_htslib::bam::record::Aux;
 use rust_htslib::bam::{self, HeaderView, Read as _, Record};
 use rust_htslib::errors::Error as HtsError;
 
+/// Assign an auxiliary field, replacing an existing value as pysam's `set_tag` does.
+pub(crate) fn set_aux(record: &mut Record, tag: &[u8], value: Aux<'_>) -> Result<(), HtsError> {
+    match record.remove_aux(tag) {
+        Ok(()) | Err(HtsError::BamAuxTagNotFound) => {}
+        Err(error) => return Err(error),
+    }
+    record.push_aux(tag, value)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlignmentFormat {
     Sam,
