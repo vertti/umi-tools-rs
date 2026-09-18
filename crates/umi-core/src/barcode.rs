@@ -169,7 +169,7 @@ fn string_tag(record: &Record, tag: &[u8]) -> Result<Vec<u8>, BarcodeError> {
 }
 
 /// Python's `str.split(sep)`: every field, including empty ones.
-fn split_all<'a>(haystack: &'a [u8], needle: &[u8]) -> Vec<&'a [u8]> {
+pub(crate) fn split_all<'a>(haystack: &'a [u8], needle: &[u8]) -> Vec<&'a [u8]> {
     if needle.is_empty() {
         return vec![haystack];
     }
