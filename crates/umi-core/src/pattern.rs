@@ -229,6 +229,7 @@ impl RegexPattern {
         let caps = self
             .pattern
             .captures(seq_str)
+            .filter(|captures| captures.get(0).is_some_and(|matched| matched.start() == 0))
             .ok_or(ExtractError::RegexNoMatch)?;
 
         // Collect named group spans into (name, start, end) sorted by name
@@ -443,6 +444,19 @@ mod tests {
     }
 
     // --- RegexPattern tests ---
+
+    #[test]
+    fn regex_matching_starts_at_the_beginning_of_the_read() {
+        let pattern = RegexPattern::parse("(?P<umi_1>AA)").unwrap();
+        assert!(matches!(
+            pattern.extract(b"TTAA", b"IIII"),
+            Err(ExtractError::RegexNoMatch)
+        ));
+        assert_eq!(pattern.extract(b"AATT", b"IIII").unwrap().umi, b"AA");
+
+        let pattern = RegexPattern::parse(".*(?P<umi_1>AA)").unwrap();
+        assert_eq!(pattern.extract(b"TTAA", b"IIII").unwrap().umi, b"AA");
+    }
 
     #[test]
     fn regex_parse_valid() {
