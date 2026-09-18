@@ -11,6 +11,11 @@ pub enum ExtractError {
     #[error("regex did not match read sequence")]
     RegexNoMatch,
 
+    #[error(
+        "--set-cell-number ({requested}) must be smaller than the number of observed cell barcodes ({observed})"
+    )]
+    InvalidCellNumber { requested: usize, observed: usize },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
