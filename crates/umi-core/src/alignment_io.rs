@@ -203,7 +203,7 @@ impl RecordSource {
                 match reader.read(&mut record) {
                     Some(Ok(())) => {
                         let name = String::from_utf8_lossy(name);
-                        record.push_aux(b"MC", Aux::String(&name))?;
+                        set_aux(&mut record, b"MC", Aux::String(&name))?;
                         return Ok(Some(record));
                     }
                     Some(Err(e)) => return Err(e),

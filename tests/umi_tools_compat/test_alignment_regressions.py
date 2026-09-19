@@ -40,3 +40,26 @@ def test_group_replaces_existing_annotations(rust_binary, tmp_path, tag):
     assert read.get_tag(tag) == fields[6] == "AAAA"
     assert [name for name, _ in read.tags].count("UG") == 1
     assert [name for name, _ in read.tags].count(tag) == 1
+
+
+@pytest.mark.parametrize("command", ["count", "dedup", "group"])
+def test_transcript_map_replaces_an_existing_mc_tag(rust_binary, tmp_path, command):
+    source, output = tmp_path / "in.bam", tmp_path / "out.bam"
+    write_bam(source, [("MC", "4M")])
+    mapping = tmp_path / "genes.tsv"
+    mapping.write_text("GENE1\tchr1\n")
+    args = [str(rust_binary), command, "--stdin", str(source), "--per-gene",
+            "--per-contig", "--gene-transcript-map", str(mapping)]
+    if command != "count":
+        args += ["--stdout", str(output)]
+    if command == "group":
+        args += ["--output-bam"]
+    result = subprocess.run(args, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    if command == "count":
+        assert result.stdout == "gene\tcount\nGENE1\t1\n"
+    else:
+        with pysam.AlignmentFile(output) as stream:
+            read, = list(stream)
+        assert read.get_tag("MC") == "GENE1"
+        assert [name for name, _ in read.tags].count("MC") == 1
