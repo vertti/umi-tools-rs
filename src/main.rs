@@ -1,16 +1,16 @@
+mod text_io;
+
+use text_io::{Output, finish_outputs, open_input, open_output};
+
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, Read, Write};
-use std::path::Path;
+use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Parser, Subcommand};
-use flate2::Compression;
-use flate2::read::MultiGzDecoder;
-use flate2::write::GzEncoder;
 use umi_core::alignment_io::{AlignmentFormat, determine_format};
 use umi_core::barcode::{BarcodeExtractor, BarcodeSource};
 use umi_core::count::{CountConfig, CountTabConfig, run_count, run_count_tab};
@@ -1340,38 +1340,6 @@ fn parse_pattern(raw: &str, extract_method: &str, prime3: bool) -> Result<Barcod
     }
 }
 
-fn open_input(path: Option<&str>) -> Result<Box<dyn Read + Send>> {
-    match path {
-        Some(p) => {
-            let file = File::open(p).with_context(|| format!("failed to open input file: {p}"))?;
-            if is_gzipped(p) {
-                Ok(Box::new(MultiGzDecoder::new(file)))
-            } else {
-                Ok(Box::new(file))
-            }
-        }
-        None => Ok(Box::new(io::stdin())),
-    }
-}
-
-fn open_output(path: Option<&str>, compresslevel: u32) -> Result<Box<dyn Write>> {
-    match path {
-        Some(p) => {
-            let file =
-                File::create(p).with_context(|| format!("failed to create output file: {p}"))?;
-            if is_gzipped(p) {
-                Ok(Box::new(GzEncoder::new(
-                    file,
-                    Compression::new(compresslevel),
-                )))
-            } else {
-                Ok(Box::new(file))
-            }
-        }
-        None => Ok(Box::new(io::stdout().lock())),
-    }
-}
-
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn run_extract(
     bc_pattern: Option<&str>,
@@ -1450,24 +1418,29 @@ fn run_extract(
     let reader2 = read2_in_path
         .map(|path| open_input(Some(path)))
         .transpose()?;
-    let primary = open_output(output_path, compresslevel)?;
-    let secondary = read2_out_path
+    let mut primary = open_output(output_path, compresslevel)?;
+    let mut secondary = read2_out_path
         .map(|path| open_output(Some(path), compresslevel))
         .transpose()?;
     let (read1, read2) = if read2_stdout && reader2.is_some() {
-        (None, Some(primary))
+        (None, Some(primary.borrowed()))
     } else {
-        (Some(primary), secondary)
+        (
+            Some(primary.borrowed()),
+            secondary.as_mut().map(Output::borrowed),
+        )
     };
+    let mut filtered1 = filtered_out_path
+        .map(|path| open_output(Some(path), compresslevel))
+        .transpose()?;
+    let mut filtered2 = filtered_out2_path
+        .map(|path| open_output(Some(path), compresslevel))
+        .transpose()?;
     let outputs = ExtractOutputs {
         read1,
         read2,
-        filtered1: filtered_out_path
-            .map(|path| open_output(Some(path), compresslevel))
-            .transpose()?,
-        filtered2: filtered_out2_path
-            .map(|path| open_output(Some(path), compresslevel))
-            .transpose()?,
+        filtered1: filtered1.as_mut().map(Output::borrowed),
+        filtered2: filtered2.as_mut().map(Output::borrowed),
     };
     let mode = if either_read {
         ExtractMode::EitherRead
@@ -1476,6 +1449,7 @@ fn run_extract(
     };
     let stats = extract_with_outputs(&config, mode, reader1, reader2, outputs)
         .context("extraction failed")?;
+    finish_outputs([Some(primary), secondary, filtered1, filtered2])?;
 
     Ok(format!(
         "Reads input: {}, output: {}, too short: {}, no match: {}, quality filtered: {}, whitelist filtered: {}",
@@ -1622,18 +1596,26 @@ fn run_whitelist_cmd(
 
     let reader = open_input(input_path)?;
     let reader2 = read2_in.map(|p| open_input(Some(p))).transpose()?;
-    let writer = open_output(output_path, compresslevel)?;
-    let filt_out = filtered_out_path
+    let mut writer = open_output(output_path, compresslevel)?;
+    let mut filt_out = filtered_out_path
         .map(|p| open_output(Some(p), compresslevel))
         .transpose()
         .context("failed to open --filtered-out")?;
-    let filt_out2 = filtered_out2_path
+    let mut filt_out2 = filtered_out2_path
         .map(|p| open_output(Some(p), compresslevel))
         .transpose()
         .context("failed to open --filtered-out2")?;
 
-    let stats = run_whitelist(&config, reader, reader2, writer, filt_out, filt_out2)
-        .context("whitelist command failed")?;
+    let stats = run_whitelist(
+        &config,
+        reader,
+        reader2,
+        &mut writer,
+        filt_out.as_mut(),
+        filt_out2.as_mut().map(Output::borrowed),
+    )
+    .context("whitelist command failed")?;
+    finish_outputs([Some(writer), filt_out, filt_out2])?;
 
     Ok(format!(
         "Reads input: {}, no barcode match: {}",
@@ -1887,6 +1869,7 @@ fn run_count_cmd(
 
     let mut output = open_output(output_path, compresslevel)?;
     let stats = run_count(&config, input, &mut output).context("count failed")?;
+    finish_outputs([Some(output)])?;
 
     Ok(format!(
         "Reads input: {}, counted: {}",
@@ -1923,17 +1906,12 @@ fn run_count_tab_cmd(
     let mut reader = io::BufReader::new(input);
     let mut output = open_output(output_path, compresslevel)?;
     let stats = run_count_tab(&config, &mut reader, &mut output).context("count_tab failed")?;
+    finish_outputs([Some(output)])?;
 
     Ok(format!(
         "Reads input: {}, counted: {}",
         stats.input_reads, stats.counted_reads,
     ))
-}
-
-fn is_gzipped(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
 }
 
 #[cfg(test)]
