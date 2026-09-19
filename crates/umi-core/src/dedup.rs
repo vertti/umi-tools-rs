@@ -1108,7 +1108,7 @@ fn select_umis_with_cluster_counts(
                 } else {
                     let lead_umis = min_set_cover(&component, &adj_list, &counts);
                     // Each lead UMI's cluster: itself + its unobserved neighbors
-                    let mut observed: HashSet<&[u8]> = HashSet::new();
+                    let mut observed: HashSet<&[u8]> = lead_umis.iter().copied().collect();
                     for &lead in &lead_umis {
                         let mut cluster_count = counts[lead];
                         observed.insert(lead);
