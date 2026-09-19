@@ -1469,7 +1469,7 @@ fn load_whitelist_with_correction(
     error_correct: bool,
 ) -> Result<WhitelistWithCorrection> {
     let file =
-        File::open(path).with_context(|| format!("failed to open whitelist file: {path}"))?;
+        open_input(Some(path)).with_context(|| format!("failed to open whitelist file: {path}"))?;
     let reader = io::BufReader::new(file);
     let mut whitelist = HashSet::new();
     let mut correction_map = HashMap::new();
@@ -1507,7 +1507,7 @@ fn load_whitelist_with_correction(
 
 fn load_blacklist(path: &str) -> Result<HashSet<Vec<u8>>> {
     let file =
-        File::open(path).with_context(|| format!("failed to open blacklist file: {path}"))?;
+        open_input(Some(path)).with_context(|| format!("failed to open blacklist file: {path}"))?;
     let reader = io::BufReader::new(file);
     let mut set = HashSet::new();
     for line in reader.lines() {
@@ -1779,7 +1779,8 @@ fn run_dedup_cmd(
 
 fn load_umi_whitelist(path: &str, paired_path: Option<&str>) -> Result<HashSet<Vec<u8>>> {
     let load_barcodes = |p: &str| -> Result<Vec<Vec<u8>>> {
-        let file = File::open(p).with_context(|| format!("failed to open UMI whitelist: {p}"))?;
+        let file =
+            open_input(Some(p)).with_context(|| format!("failed to open UMI whitelist: {p}"))?;
         let reader = io::BufReader::new(file);
         let mut barcodes = Vec::new();
         for line in reader.lines() {
