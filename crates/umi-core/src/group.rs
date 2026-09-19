@@ -298,19 +298,18 @@ fn process_drained<K: Ord>(
                         }
 
                         let mut tagged = record;
-                        tagged
-                            .push_aux(
-                                b"UG",
-                                #[allow(clippy::cast_possible_wrap)]
-                                rust_htslib::bam::record::Aux::I32(*unique_id as i32),
-                            )
-                            .ok();
-                        tagged
-                            .push_aux(
-                                &config.umi_group_tag,
-                                rust_htslib::bam::record::Aux::String(top_umi_str),
-                            )
-                            .ok();
+                        alignment_io::set_aux(
+                            &mut tagged,
+                            b"UG",
+                            rust_htslib::bam::record::Aux::U32(*unique_id),
+                        )
+                        .map_err(|e| GroupError::BamWrite(e.to_string()))?;
+                        alignment_io::set_aux(
+                            &mut tagged,
+                            &config.umi_group_tag,
+                            rust_htslib::bam::record::Aux::String(top_umi_str),
+                        )
+                        .map_err(|e| GroupError::BamWrite(e.to_string()))?;
 
                         output_records.push(tagged);
                     }
