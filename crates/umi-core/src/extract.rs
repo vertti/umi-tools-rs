@@ -4,6 +4,7 @@ use std::io::{BufWriter, Write};
 use needletail::parser::{FastqReader, FastxReader, SequenceRecord};
 
 use crate::error::ExtractError;
+use crate::fastq::write_fastq_record;
 use crate::pattern::{BarcodePattern, ExtractionResult};
 
 /// Returns `true` if any base in `umi_quality` falls below the threshold after
@@ -161,22 +162,6 @@ fn build_read_name(
         out.extend_from_slice(c);
     }
     out
-}
-
-fn write_fastq_record<W: Write>(
-    writer: &mut W,
-    id: &[u8],
-    seq: &[u8],
-    qual: &[u8],
-) -> Result<(), ExtractError> {
-    writer.write_all(b"@")?;
-    writer.write_all(id)?;
-    writer.write_all(b"\n")?;
-    writer.write_all(seq)?;
-    writer.write_all(b"\n+\n")?;
-    writer.write_all(qual)?;
-    writer.write_all(b"\n")?;
-    Ok(())
 }
 
 /// Whether to combine barcodes from the supplied patterns or choose either read.

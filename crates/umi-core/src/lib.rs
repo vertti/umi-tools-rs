@@ -4,6 +4,7 @@ pub mod count;
 pub mod dedup;
 pub mod error;
 pub mod extract;
+mod fastq;
 pub mod gene;
 pub mod group;
 pub mod pairing;
