@@ -6,6 +6,7 @@ use std::io::{BufWriter, Write};
 use needletail::parser::{FastqReader, FastxReader, SequenceRecord};
 
 use crate::error::ExtractError;
+use crate::fastq::write_fastq_record;
 use crate::pattern::BarcodePattern;
 
 /// Method for detecting the knee point in the barcode frequency distribution.
@@ -248,23 +249,6 @@ fn write_record<W: Write>(writer: &mut W, record: &SequenceRecord) -> Result<(),
         .qual()
         .ok_or_else(|| ExtractError::FastqParse("missing quality scores".into()))?;
     write_fastq_record(writer, record.id(), &record.seq(), qual)
-}
-
-/// Write a FASTQ record (used for filtered-out output).
-fn write_fastq_record<W: Write>(
-    writer: &mut W,
-    id: &[u8],
-    seq: &[u8],
-    qual: &[u8],
-) -> Result<(), ExtractError> {
-    writer.write_all(b"@")?;
-    writer.write_all(id)?;
-    writer.write_all(b"\n")?;
-    writer.write_all(seq)?;
-    writer.write_all(b"\n+\n")?;
-    writer.write_all(qual)?;
-    writer.write_all(b"\n")?;
-    Ok(())
 }
 
 /// Determine which barcodes to whitelist based on knee detection or explicit cell number.
