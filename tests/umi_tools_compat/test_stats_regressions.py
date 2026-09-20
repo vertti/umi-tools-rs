@@ -29,3 +29,9 @@ def test_adjacency_cluster_totals_conserve_reads(rust_binary, tmp_path):
     totals = {row["UMI"]: int(row["total_counts_post"]) for row in rows}
     assert totals == {"AAAA": 10, "AAAT": 10, "AATT": 0}
     assert sum(totals.values()) == 20
+
+
+def test_empty_input_produces_empty_statistics(rust_binary, tmp_path):
+    assert run_stats(rust_binary, tmp_path, {}) == []
+    for suffix in ("per_umi_per_position", "edit_distance"):
+        assert (tmp_path / f"stats_{suffix}.tsv").read_text().strip()

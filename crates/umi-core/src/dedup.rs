@@ -1266,6 +1266,9 @@ impl RandomReadGenerator {
 
     fn refill(&mut self) {
         self.random_umis.clear();
+        if self.keys.is_empty() {
+            return;
+        }
         self.random_umis.reserve(self.fill_size);
         for _ in 0..self.fill_size {
             let r = self.rng.random();
@@ -1279,6 +1282,9 @@ impl RandomReadGenerator {
     }
 
     fn get_umis(&mut self, n: usize) -> Vec<Vec<u8>> {
+        if self.keys.is_empty() {
+            return Vec::new();
+        }
         if n >= self.fill_size - self.random_ix {
             if n > self.fill_size {
                 self.fill_size = n * 2;
