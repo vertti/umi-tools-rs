@@ -7,6 +7,7 @@ use needletail::parser::{FastqReader, FastxReader, SequenceRecord};
 
 use crate::error::ExtractError;
 use crate::fastq::write_fastq_record;
+use crate::neighbors::NeighborIndex;
 use crate::pattern::BarcodePattern;
 
 /// Method for detecting the knee point in the barcode frequency distribution.
@@ -588,22 +589,19 @@ fn build_error_correction_map(
     threshold: usize,
 ) -> HashMap<String, Vec<(String, u64)>> {
     let mut corrections: HashMap<String, Vec<(String, u64)>> = HashMap::new();
+    let whitelist_set: HashSet<&String> = whitelist.iter().collect();
+    let index = NeighborIndex::new(whitelist.iter().map(String::as_bytes).collect(), threshold);
 
     for (barcode, &count) in all_counts {
-        if whitelist.contains(barcode) {
+        if whitelist_set.contains(barcode) {
             continue;
         }
 
-        let mut matches: Vec<&String> = Vec::new();
-        for wl_bc in whitelist {
-            if hamming_distance(barcode.as_bytes(), wl_bc.as_bytes()) <= threshold {
-                matches.push(wl_bc);
-            }
-        }
+        let matches = index.matches(barcode.as_bytes(), 2);
 
         if matches.len() == 1 {
             corrections
-                .entry(matches[0].clone())
+                .entry(whitelist[matches[0]].clone())
                 .or_default()
                 .push((barcode.clone(), count));
         }

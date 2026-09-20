@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::neighbors::NeighborIndex;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DedupMethod {
     Unique,
@@ -25,23 +27,7 @@ pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
 /// Build undirected adjacency list (for cluster + adjacency methods).
 /// Edge between A and B iff `hamming_distance(A, B) <= threshold`.
 fn build_adjacency_list<'a>(umis: &[&'a [u8]], threshold: u32) -> HashMap<&'a [u8], Vec<&'a [u8]>> {
-    let mut adj: HashMap<&'a [u8], Vec<&'a [u8]>> = HashMap::new();
-    for umi in umis {
-        adj.entry(umi).or_default();
-    }
-    for i in 0..umis.len() {
-        for j in (i + 1)..umis.len() {
-            if hamming_distance(umis[i], umis[j]) <= threshold {
-                adj.get_mut(umis[i])
-                    .expect("UMI pre-inserted")
-                    .push(umis[j]);
-                adj.get_mut(umis[j])
-                    .expect("UMI pre-inserted")
-                    .push(umis[i]);
-            }
-        }
-    }
-    adj
+    indexed_adjacency(umis, threshold, |_, _| true)
 }
 
 /// Build directed adjacency list (for directional method).
@@ -51,29 +37,31 @@ fn build_directional_adjacency_list<'a>(
     counts: &HashMap<&[u8], u32>,
     threshold: u32,
 ) -> HashMap<&'a [u8], Vec<&'a [u8]>> {
-    let mut adj: HashMap<&'a [u8], Vec<&'a [u8]>> = HashMap::new();
-    for umi in umis {
-        adj.entry(umi).or_default();
-    }
-    for i in 0..umis.len() {
-        for j in (i + 1)..umis.len() {
-            if hamming_distance(umis[i], umis[j]) <= threshold {
-                let ca = counts[umis[i]];
-                let cb = counts[umis[j]];
-                if ca >= (2 * cb).saturating_sub(1) {
-                    adj.get_mut(umis[i])
-                        .expect("UMI pre-inserted")
-                        .push(umis[j]);
-                }
-                if cb >= (2 * ca).saturating_sub(1) {
-                    adj.get_mut(umis[j])
-                        .expect("UMI pre-inserted")
-                        .push(umis[i]);
-                }
-            }
-        }
-    }
-    adj
+    indexed_adjacency(umis, threshold, |left, right| {
+        counts[left] >= (2 * counts[right]).saturating_sub(1)
+    })
+}
+
+fn indexed_adjacency<'a>(
+    umis: &[&'a [u8]],
+    threshold: u32,
+    accepts: impl Fn(&[u8], &[u8]) -> bool,
+) -> HashMap<&'a [u8], Vec<&'a [u8]>> {
+    let index = NeighborIndex::new(umis.to_vec(), threshold as usize);
+    umis.iter()
+        .enumerate()
+        .map(|(i, &umi)| {
+            let mut neighbors = index.matches(umi, usize::MAX);
+            // Preserve input order, including adjacency-method assignment ties.
+            neighbors.sort_unstable();
+            let neighbors = neighbors
+                .into_iter()
+                .filter(|&j| j != i && accepts(umi, umis[j]))
+                .map(|j| umis[j])
+                .collect();
+            (umi, neighbors)
+        })
+        .collect()
 }
 
 /// Nodes reachable from `start`, following edges in `adj_list`. Returns the connected component.
