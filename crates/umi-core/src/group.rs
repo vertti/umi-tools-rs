@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
@@ -6,10 +6,10 @@ use rust_htslib::bam::{self, Record};
 
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
+use crate::clustering::cluster_umis;
 use crate::dedup::{
-    DedupMethod, GroupKey, PositionOptions, PythonRandom, TieBreakRng, build_adjacency_list,
-    build_directional_adjacency_list, connected_components, five_prime_position, get_read_position,
-    median, min_set_cover,
+    DedupMethod, GroupKey, PositionOptions, PythonRandom, TieBreakRng, five_prime_position,
+    get_read_position,
 };
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 use crate::pairing::PairingOptions;
@@ -122,121 +122,21 @@ impl<K: Ord + Clone> GroupBuffer<K> {
     }
 }
 
-/// Assign UMIs to groups. Returns groups where each group is a list of UMIs
-/// sorted by count descending, lex ascending. First UMI is the representative.
-#[allow(clippy::too_many_lines)]
 fn assign_groups(
     method: DedupMethod,
     umi_map: &HashMap<Vec<u8>, GroupSlot>,
     edit_threshold: u32,
 ) -> Vec<Vec<Vec<u8>>> {
-    let counts: HashMap<&[u8], u32> = umi_map
-        .iter()
-        .map(|(k, v)| (k.as_slice(), v.count))
-        .collect();
-    let orders: HashMap<&[u8], u32> = umi_map
-        .iter()
-        .map(|(k, v)| (k.as_slice(), v.insertion_order))
-        .collect();
-
-    let lex_sort = |a: &[u8], b: &[u8]| -> std::cmp::Ordering {
-        counts[b].cmp(&counts[a]).then_with(|| a.cmp(b))
-    };
-
-    match method {
-        DedupMethod::Unique => {
-            let mut umis: Vec<Vec<u8>> = umi_map.keys().cloned().collect();
-            umis.sort_by(|a, b| orders[a.as_slice()].cmp(&orders[b.as_slice()]));
-            umis.into_iter().map(|u| vec![u]).collect()
-        }
-
-        DedupMethod::Percentile => {
-            if counts.len() <= 1 {
-                return umi_map.keys().cloned().map(|u| vec![u]).collect();
-            }
-            let all_counts: Vec<u32> = counts.values().copied().collect();
-            let threshold = median(&all_counts) / 100.0;
-            let mut umis: Vec<Vec<u8>> = umi_map
-                .iter()
-                .filter(|(_, slot)| f64::from(slot.count) > threshold)
-                .map(|(umi, _)| umi.clone())
-                .collect();
-            umis.sort_by(|a, b| orders[a.as_slice()].cmp(&orders[b.as_slice()]));
-            umis.into_iter().map(|u| vec![u]).collect()
-        }
-
-        DedupMethod::Cluster => {
-            let umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
-            let adj_list = build_adjacency_list(&umis, edit_threshold);
-            let components = connected_components(&umis, &counts, &orders, &adj_list);
-            components
-                .into_iter()
-                .map(|mut comp| {
-                    comp.sort_by(|a, b| lex_sort(a, b));
-                    comp.into_iter().map(<[u8]>::to_vec).collect()
-                })
-                .collect()
-        }
-
-        DedupMethod::Adjacency => {
-            let umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
-            let adj_list = build_adjacency_list(&umis, edit_threshold);
-            let components = connected_components(&umis, &counts, &orders, &adj_list);
-            // Adjacency splits components via min_set_cover, grouping
-            // connected nodes around each lead UMI.
-            let mut groups = Vec::new();
-            for component in components {
-                if component.len() == 1 {
-                    groups.push(component.into_iter().map(<[u8]>::to_vec).collect());
-                } else {
-                    let lead_umis = min_set_cover(&component, &adj_list, &counts);
-                    let mut observed: HashSet<&[u8]> = lead_umis.iter().copied().collect();
-                    for &lead in &lead_umis {
-                        let connected: HashSet<&[u8]> = adj_list
-                            .get(lead)
-                            .map_or_else(HashSet::new, |ns| ns.iter().copied().collect());
-                        let mut group = vec![lead.to_vec()];
-                        for node in connected {
-                            if observed.insert(node) {
-                                group.push(node.to_vec());
-                            }
-                        }
-                        groups.push(group);
-                    }
-                }
-            }
-            groups
-        }
-
-        DedupMethod::Directional => {
-            let umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
-            let adj_list = build_directional_adjacency_list(&umis, &counts, edit_threshold);
-            let components = connected_components(&umis, &counts, &orders, &adj_list);
-            // Directed BFS can produce overlapping components. Filter already-
-            // observed UMIs so each UMI is assigned to exactly one group,
-            // matching Python's _group_directional logic.
-            let mut observed: HashSet<&[u8]> = HashSet::new();
-            let mut groups = Vec::new();
-            for mut comp in components {
-                comp.sort_by(|a, b| lex_sort(a, b));
-                if comp.len() == 1 {
-                    observed.insert(comp[0]);
-                    groups.push(comp.into_iter().map(<[u8]>::to_vec).collect());
-                } else {
-                    let mut filtered: Vec<Vec<u8>> = Vec::new();
-                    for node in comp {
-                        if observed.insert(node) {
-                            filtered.push(node.to_vec());
-                        }
-                    }
-                    if !filtered.is_empty() {
-                        groups.push(filtered);
-                    }
-                }
-            }
-            groups
-        }
-    }
+    cluster_umis(
+        method,
+        umi_map
+            .iter()
+            .map(|(umi, slot)| (umi.as_slice(), slot.count, slot.insertion_order)),
+        edit_threshold,
+    )
+    .into_iter()
+    .map(|group| group.into_iter().map(<[u8]>::to_vec).collect())
+    .collect()
 }
 
 /// Process drained position groups: assign UMI groups, annotate records, write TSV rows.

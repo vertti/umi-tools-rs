@@ -3,6 +3,8 @@
 import csv
 import subprocess
 
+import pytest
+
 
 def write_counts(path, counts):
     header = "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000\n"
@@ -35,3 +37,29 @@ def test_empty_input_produces_empty_statistics(rust_binary, tmp_path):
     assert run_stats(rust_binary, tmp_path, {}) == []
     for suffix in ("per_umi_per_position", "edit_distance"):
         assert (tmp_path / f"stats_{suffix}.tsv").read_text().strip()
+
+
+@pytest.mark.parametrize("method,expected", [
+    ("unique", 3), ("percentile", 3), ("cluster", 1), ("adjacency", 2), ("directional", 2),
+])
+def test_clustering_agrees_across_commands(rust_binary, tmp_path, method, expected):
+    rows = run_stats(rust_binary, tmp_path, {"AAAA": 10, "AAAT": 9, "AATT": 1}, method)
+    assert sum(int(row["times_observed_post"]) for row in rows) == expected
+    assert sum(int(row["total_counts_post"]) for row in rows) == 20
+    source = tmp_path / "in.sam"
+    tsv = tmp_path / "groups.tsv"
+    grouped = subprocess.run(
+        [str(rust_binary), "group", "--stdin", str(source), "--group-out", str(tsv),
+         f"--method={method}"], capture_output=True, text=True,
+    )
+    assert grouped.returncode == 0, grouped.stderr
+    with tsv.open() as stream:
+        groups = list(csv.DictReader(stream, delimiter="\t"))
+    assert len({row["unique_id"] for row in groups}) == expected
+    assert len(groups) == 20
+    counted = subprocess.run(
+        [str(rust_binary), "count", "--stdin", str(source), "--per-contig", f"--method={method}"],
+        capture_output=True, text=True,
+    )
+    assert counted.returncode == 0, counted.stderr
+    assert counted.stdout == f"gene\tcount\nchr1\t{expected}\n"
