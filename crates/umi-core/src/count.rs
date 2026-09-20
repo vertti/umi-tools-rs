@@ -5,7 +5,8 @@ use thiserror::Error;
 
 use crate::alignment_io::RecordSource;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor, split_all};
-use crate::dedup::{DedupMethod, PythonRandom, TieBreakRng, count_umis};
+use crate::clustering::cluster_umis;
+use crate::dedup::{DedupMethod, PythonRandom, TieBreakRng};
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 use crate::pairing::{PairingError, PairingOptions};
 
@@ -221,17 +222,14 @@ impl UmiCounts {
     }
 
     fn dedup_count(&self, method: DedupMethod, edit_threshold: u32) -> usize {
-        let counts: HashMap<Vec<u8>, u32> = self
-            .counts
-            .iter()
-            .map(|(k, &(c, _))| (k.clone(), c))
-            .collect();
-        let orders: HashMap<Vec<u8>, u32> = self
-            .counts
-            .iter()
-            .map(|(k, &(_, o))| (k.clone(), o))
-            .collect();
-        count_umis(method, &counts, &orders, edit_threshold)
+        cluster_umis(
+            method,
+            self.counts
+                .iter()
+                .map(|(umi, &(count, order))| (umi.as_slice(), count, order)),
+            edit_threshold,
+        )
+        .len()
     }
 }
 
@@ -343,11 +341,14 @@ impl CellUmiMap {
         self.cells
             .iter()
             .map(|(cell, umi_map)| {
-                let counts: HashMap<Vec<u8>, u32> =
-                    umi_map.iter().map(|(k, &(c, _))| (k.clone(), c)).collect();
-                let orders: HashMap<Vec<u8>, u32> =
-                    umi_map.iter().map(|(k, &(_, o))| (k.clone(), o)).collect();
-                let n = count_umis(method, &counts, &orders, edit_threshold);
+                let n = cluster_umis(
+                    method,
+                    umi_map
+                        .iter()
+                        .map(|(umi, &(count, order))| (umi.as_slice(), count, order)),
+                    edit_threshold,
+                )
+                .len();
                 (cell, n)
             })
             .collect()
