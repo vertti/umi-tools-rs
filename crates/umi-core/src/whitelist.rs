@@ -275,12 +275,14 @@ fn determine_whitelist(
     let mut sorted_barcodes: Vec<(&String, &u64)> = all_counts.iter().collect();
     sorted_barcodes.sort_by(|a, b| b.1.cmp(a.1));
 
-    if let Some(n) = config.cell_number {
-        if n == 0 || sorted_barcodes.is_empty() {
-            return Ok(Vec::new());
-        }
-        let threshold_idx = n.min(sorted_barcodes.len()) - 1;
-        let threshold = *sorted_barcodes[threshold_idx].1;
+    if let Some(n) = config.cell_number.filter(|&n| n != 0) {
+        let threshold = *sorted_barcodes
+            .get(n)
+            .ok_or(ExtractError::InvalidCellNumber {
+                requested: n,
+                observed: sorted_barcodes.len(),
+            })?
+            .1;
         return Ok(sorted_barcodes
             .iter()
             .filter(|(_, count)| **count > threshold)
@@ -673,6 +675,45 @@ fn write_whitelist_tsv<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_cell_number_uses_the_first_excluded_count_as_threshold() {
+        let counts = HashMap::from([
+            ("AA".to_string(), 10),
+            ("CC".to_string(), 5),
+            ("GG".to_string(), 5),
+            ("TT".to_string(), 1),
+        ]);
+        let mut config = WhitelistConfig {
+            pattern: None,
+            pattern2: None,
+            method: WhitelistMethod::Reads,
+            allow_threshold_error: false,
+            knee_method: KneeMethod::Distance,
+            cell_number: Some(1),
+            expect_cells: None,
+            error_correct_threshold: 1,
+            ed_above_threshold: None,
+            subset_reads: 100,
+        };
+        assert_eq!(determine_whitelist(&counts, &config).unwrap(), ["AA"]);
+        // Counts tied with the first excluded barcode are excluded as well.
+        config.cell_number = Some(2);
+        assert_eq!(determine_whitelist(&counts, &config).unwrap(), ["AA"]);
+        config.cell_number = Some(3);
+        let mut actual = determine_whitelist(&counts, &config).unwrap();
+        actual.sort();
+        assert_eq!(actual, ["AA", "CC", "GG"]);
+        config.cell_number = None;
+        let automatic = determine_whitelist(&counts, &config).unwrap();
+        config.cell_number = Some(0);
+        assert_eq!(determine_whitelist(&counts, &config).unwrap(), automatic);
+        for n in [4, usize::MAX] {
+            config.cell_number = Some(n);
+            assert!(determine_whitelist(&counts, &config).is_err());
+        }
+        assert!(determine_whitelist(&HashMap::new(), &config).is_err());
+    }
 
     #[test]
     fn test_hamming_distance_same() {

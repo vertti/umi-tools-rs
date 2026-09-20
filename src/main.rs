@@ -67,7 +67,7 @@ enum Commands {
 #[derive(clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 struct ExtractArgs {
-    /// Barcode pattern for read1 (e.g. NNNXXXXNN). N=UMI, C=cell, X=discard.
+    /// Barcode pattern for read1 (e.g. NNNXXXXNN). N=UMI, C=cell, X=retained sequence.
     #[arg(long = "bc-pattern")]
     bc_pattern: Option<String>,
 
@@ -107,7 +107,7 @@ struct ExtractArgs {
     #[arg(long = "3prime")]
     prime3: bool,
 
-    /// UMI separator character in read name
+    /// UMI separator string in read name
     #[arg(long = "umi-separator", default_value = "_")]
     umi_separator: String,
 
@@ -174,7 +174,7 @@ struct ExtractArgs {
 #[derive(clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 struct WhitelistArgs {
-    /// Barcode pattern (e.g. CCCCCCNNNNNNNNNN). N=UMI, C=cell, X=discard.
+    /// Barcode pattern (e.g. CCCCCCNNNNNNNNNN). N=UMI, C=cell, X=retained sequence.
     #[arg(long = "bc-pattern")]
     bc_pattern: Option<String>,
 
@@ -1406,8 +1406,6 @@ fn run_extract(
         .map(|p| parse_pattern(p, extract_method, prime3))
         .transpose()?;
 
-    let sep_byte = umi_separator.as_bytes().first().copied().unwrap_or(b'_');
-
     let qe = match quality_encoding {
         "phred33" => QualityEncoding::Phred33,
         "phred64" => QualityEncoding::Phred64,
@@ -1435,7 +1433,7 @@ fn run_extract(
     let config = ExtractConfig {
         pattern,
         pattern2,
-        umi_separator: sep_byte,
+        umi_separator: umi_separator.as_bytes().to_vec(),
         quality_filter_threshold,
         quality_encoding: qe,
         whitelist,
@@ -1914,12 +1912,10 @@ fn run_count_tab_cmd(
         other => bail!("unknown method '{other}'"),
     };
 
-    let sep_byte = separator.as_bytes().first().copied().unwrap_or(b'_');
-
     let config = CountTabConfig {
         method: dedup_method,
         per_cell,
-        separator: sep_byte,
+        separator: separator.as_bytes().to_vec(),
         edit_distance_threshold,
     };
 

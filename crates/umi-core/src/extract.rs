@@ -39,7 +39,7 @@ impl QualityEncoding {
 pub struct ExtractConfig {
     pub pattern: Option<BarcodePattern>,
     pub pattern2: Option<BarcodePattern>,
-    pub umi_separator: u8,
+    pub umi_separator: Vec<u8>,
     pub quality_filter_threshold: Option<u8>,
     pub quality_encoding: QualityEncoding,
     pub whitelist: Option<HashSet<Vec<u8>>>,
@@ -135,7 +135,7 @@ fn build_read_name(
     header: &[u8],
     cell: &[u8],
     umi: &[u8],
-    separator: u8,
+    separator: &[u8],
     strip_suffixes: bool,
 ) -> Vec<u8> {
     let (name, comment) = header
@@ -149,13 +149,13 @@ fn build_read_name(
         name
     };
 
-    let mut out = Vec::with_capacity(header.len() + 1 + cell.len() + 1 + umi.len());
+    let mut out = Vec::with_capacity(header.len() + 2 * separator.len() + cell.len() + umi.len());
     out.extend_from_slice(name);
     if !cell.is_empty() {
-        out.push(separator);
+        out.extend_from_slice(separator);
         out.extend_from_slice(cell);
     }
-    out.push(separator);
+    out.extend_from_slice(separator);
     out.extend_from_slice(umi);
     if let Some(c) = comment {
         out.extend_from_slice(c);
@@ -527,7 +527,7 @@ fn process_records(
             record.id(),
             &extraction.barcodes.cell,
             &extraction.barcodes.umi,
-            config.umi_separator,
+            &config.umi_separator,
             config.ignore_read_pair_suffixes,
         )
     };

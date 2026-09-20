@@ -229,6 +229,7 @@ impl RegexPattern {
         let caps = self
             .pattern
             .captures(seq_str)
+            .filter(|captures| captures.get(0).is_some_and(|matched| matched.start() == 0))
             .ok_or(ExtractError::RegexNoMatch)?;
 
         // Collect named group spans into (name, start, end) sorted by name
@@ -330,7 +331,11 @@ fn preprocess_fuzzy(pattern_str: &str) -> Result<String, ExtractError> {
             let max_subs: usize = std::str::from_utf8(&bytes[num_start..num_end])
                 .expect("ASCII digits validated above")
                 .parse()
-                .expect("ASCII digits validated above");
+                .map_err(|_| {
+                    ExtractError::InvalidPattern(format!(
+                        "fuzzy quantifier at position {i} exceeds the supported integer range"
+                    ))
+                })?;
 
             if result.is_empty() {
                 return Err(ExtractError::InvalidPattern(format!(
@@ -445,6 +450,19 @@ mod tests {
     // --- RegexPattern tests ---
 
     #[test]
+    fn regex_matching_starts_at_the_beginning_of_the_read() {
+        let pattern = RegexPattern::parse("(?P<umi_1>AA)").unwrap();
+        assert!(matches!(
+            pattern.extract(b"TTAA", b"IIII"),
+            Err(ExtractError::RegexNoMatch)
+        ));
+        assert_eq!(pattern.extract(b"AATT", b"IIII").unwrap().umi, b"AA");
+
+        let pattern = RegexPattern::parse(".*(?P<umi_1>AA)").unwrap();
+        assert_eq!(pattern.extract(b"TTAA", b"IIII").unwrap().umi, b"AA");
+    }
+
+    #[test]
     fn regex_parse_valid() {
         let pat = RegexPattern::parse(r"^(?P<umi_1>.{3}).{4}(?P<umi_2>.{2})").unwrap();
         assert!(pat.pattern.is_match("CAGGTTCAATCTCGGTGGGACCTC"));
@@ -458,6 +476,14 @@ mod tests {
     #[test]
     fn regex_parse_invalid_regex() {
         assert!(RegexPattern::parse(r"^(?P<umi_1>.{3").is_err());
+    }
+
+    #[test]
+    fn oversized_fuzzy_quantifier_returns_an_error() {
+        assert!(matches!(
+            RegexPattern::parse("(?P<umi_1>A{s<=9999999999999999999999999999999})"),
+            Err(ExtractError::InvalidPattern(_))
+        ));
     }
 
     #[test]
