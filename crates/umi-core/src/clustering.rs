@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::neighbors::NeighborIndex;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DedupMethod {
     Unique,
@@ -25,23 +27,7 @@ pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
 /// Build undirected adjacency list (for cluster + adjacency methods).
 /// Edge between A and B iff `hamming_distance(A, B) <= threshold`.
 fn build_adjacency_list<'a>(umis: &[&'a [u8]], threshold: u32) -> HashMap<&'a [u8], Vec<&'a [u8]>> {
-    let mut adj: HashMap<&'a [u8], Vec<&'a [u8]>> = HashMap::new();
-    for umi in umis {
-        adj.entry(umi).or_default();
-    }
-    for i in 0..umis.len() {
-        for j in (i + 1)..umis.len() {
-            if hamming_distance(umis[i], umis[j]) <= threshold {
-                adj.get_mut(umis[i])
-                    .expect("UMI pre-inserted")
-                    .push(umis[j]);
-                adj.get_mut(umis[j])
-                    .expect("UMI pre-inserted")
-                    .push(umis[i]);
-            }
-        }
-    }
-    adj
+    indexed_adjacency(umis, threshold, |_, _| true)
 }
 
 /// Build directed adjacency list (for directional method).
@@ -51,29 +37,31 @@ fn build_directional_adjacency_list<'a>(
     counts: &HashMap<&[u8], u32>,
     threshold: u32,
 ) -> HashMap<&'a [u8], Vec<&'a [u8]>> {
-    let mut adj: HashMap<&'a [u8], Vec<&'a [u8]>> = HashMap::new();
-    for umi in umis {
-        adj.entry(umi).or_default();
-    }
-    for i in 0..umis.len() {
-        for j in (i + 1)..umis.len() {
-            if hamming_distance(umis[i], umis[j]) <= threshold {
-                let ca = counts[umis[i]];
-                let cb = counts[umis[j]];
-                if ca >= (2 * cb).saturating_sub(1) {
-                    adj.get_mut(umis[i])
-                        .expect("UMI pre-inserted")
-                        .push(umis[j]);
-                }
-                if cb >= (2 * ca).saturating_sub(1) {
-                    adj.get_mut(umis[j])
-                        .expect("UMI pre-inserted")
-                        .push(umis[i]);
-                }
-            }
-        }
-    }
-    adj
+    indexed_adjacency(umis, threshold, |left, right| {
+        counts[left] >= (2 * counts[right]).saturating_sub(1)
+    })
+}
+
+fn indexed_adjacency<'a>(
+    umis: &[&'a [u8]],
+    threshold: u32,
+    accepts: impl Fn(&[u8], &[u8]) -> bool,
+) -> HashMap<&'a [u8], Vec<&'a [u8]>> {
+    let index = NeighborIndex::new(umis.to_vec(), threshold as usize);
+    umis.iter()
+        .enumerate()
+        .map(|(i, &umi)| {
+            let mut neighbors = index.matches(umi, usize::MAX);
+            // Preserve input order, including adjacency-method assignment ties.
+            neighbors.sort_unstable();
+            let neighbors = neighbors
+                .into_iter()
+                .filter(|&j| j != i && accepts(umi, umis[j]))
+                .map(|j| umis[j])
+                .collect();
+            (umi, neighbors)
+        })
+        .collect()
 }
 
 /// Nodes reachable from `start`, following edges in `adj_list`. Returns the connected component.
@@ -235,4 +223,53 @@ pub fn cluster_umis<'a>(
         }
     }
     groups
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adjacency_matches_exhaustive_search_for_mixed_barcodes() {
+        let mut sequences = std::collections::BTreeSet::from([Vec::new(), b"AAAAA".to_vec()]);
+        for mut code in 0..125 {
+            let mut sequence = Vec::new();
+            for _ in 0..3 {
+                sequence.push(b"ACGTN"[code % 5]);
+                code /= 5;
+            }
+            sequences.insert(sequence);
+        }
+        let umis: Vec<&[u8]> = sequences.iter().map(Vec::as_slice).collect();
+        let counts: HashMap<&[u8], u32> = umis
+            .iter()
+            .enumerate()
+            .map(|(index, &umi)| (umi, u32::try_from(index % 7 + 1).unwrap()))
+            .collect();
+        for threshold in 0..=5 {
+            let undirected = build_adjacency_list(&umis, threshold);
+            let directed = build_directional_adjacency_list(&umis, &counts, threshold);
+            for &umi in &umis {
+                let expected: Vec<_> = umis
+                    .iter()
+                    .copied()
+                    .filter(|&other| {
+                        other != umi
+                            && other.len() == umi.len()
+                            && hamming_distance(umi, other) <= threshold
+                    })
+                    .collect();
+                let mut actual = undirected[umi].clone();
+                actual.sort_unstable();
+                assert_eq!(actual, expected);
+                let expected: Vec<_> = expected
+                    .into_iter()
+                    .filter(|other| counts[umi] >= 2 * counts[other] - 1)
+                    .collect();
+                let mut actual = directed[umi].clone();
+                actual.sort_unstable();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
 }

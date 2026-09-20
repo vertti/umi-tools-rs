@@ -8,6 +8,7 @@ pub mod extract;
 mod fastq;
 pub mod gene;
 pub mod group;
+mod neighbors;
 pub mod pairing;
 pub mod pattern;
 pub mod whitelist;

@@ -7,6 +7,7 @@ use needletail::parser::{FastqReader, FastxReader, SequenceRecord};
 
 use crate::error::ExtractError;
 use crate::fastq::write_fastq_record;
+use crate::neighbors::NeighborIndex;
 use crate::pattern::BarcodePattern;
 
 /// Method for detecting the knee point in the barcode frequency distribution.
@@ -588,22 +589,19 @@ fn build_error_correction_map(
     threshold: usize,
 ) -> HashMap<String, Vec<(String, u64)>> {
     let mut corrections: HashMap<String, Vec<(String, u64)>> = HashMap::new();
+    let whitelist_set: HashSet<&String> = whitelist.iter().collect();
+    let index = NeighborIndex::new(whitelist.iter().map(String::as_bytes).collect(), threshold);
 
     for (barcode, &count) in all_counts {
-        if whitelist.contains(barcode) {
+        if whitelist_set.contains(barcode) {
             continue;
         }
 
-        let mut matches: Vec<&String> = Vec::new();
-        for wl_bc in whitelist {
-            if hamming_distance(barcode.as_bytes(), wl_bc.as_bytes()) <= threshold {
-                matches.push(wl_bc);
-            }
-        }
+        let matches = index.matches(barcode.as_bytes(), 2);
 
         if matches.len() == 1 {
             corrections
-                .entry(matches[0].clone())
+                .entry(whitelist[matches[0]].clone())
                 .or_default()
                 .push((barcode.clone(), count));
         }
@@ -697,6 +695,57 @@ mod tests {
             assert!(determine_whitelist(&counts, &config).is_err());
         }
         assert!(determine_whitelist(&HashMap::new(), &config).is_err());
+    }
+
+    #[test]
+    fn correction_map_matches_exhaustive_search() {
+        let barcodes: Vec<String> = (0..125)
+            .map(|mut code| {
+                (0..3)
+                    .map(|_| {
+                        let base = char::from(b"ACGTN"[code % 5]);
+                        code /= 5;
+                        base
+                    })
+                    .collect()
+            })
+            .chain([String::new(), "AAAA".to_owned()])
+            .collect();
+        let counts = barcodes
+            .iter()
+            .cloned()
+            .map(|barcode| (barcode, 1))
+            .collect();
+        let whitelist: Vec<_> = barcodes.iter().step_by(4).cloned().collect();
+        for threshold in 0..=4 {
+            let mut expected: HashMap<String, Vec<(String, u64)>> = HashMap::new();
+            for barcode in &barcodes {
+                if whitelist.contains(barcode) {
+                    continue;
+                }
+                let matches: Vec<_> = whitelist
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.len() == barcode.len()
+                            && hamming_distance(barcode.as_bytes(), candidate.as_bytes())
+                                <= threshold
+                    })
+                    .collect();
+                if let [matched] = matches.as_slice() {
+                    expected
+                        .entry((*matched).clone())
+                        .or_default()
+                        .push((barcode.clone(), 1));
+                }
+            }
+            for matches in expected.values_mut() {
+                matches.sort();
+            }
+            assert_eq!(
+                build_error_correction_map(&counts, &whitelist, threshold),
+                expected
+            );
+        }
     }
 
     #[test]
