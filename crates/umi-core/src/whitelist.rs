@@ -6,6 +6,7 @@ use std::io::{BufWriter, Write};
 use needletail::parser::{FastqReader, FastxReader, SequenceRecord};
 
 use crate::error::ExtractError;
+use crate::fastq::write_fastq_record;
 use crate::pattern::BarcodePattern;
 
 /// Method for detecting the knee point in the barcode frequency distribution.
@@ -70,7 +71,7 @@ pub fn run_whitelist<R: Read + Send, W: Write, FW: Write>(
     input2: Option<Box<dyn Read + Send>>,
     output: W,
     filtered_out: Option<FW>,
-    filtered_out2: Option<Box<dyn Write>>,
+    filtered_out2: Option<Box<dyn Write + '_>>,
 ) -> Result<WhitelistStats, ExtractError> {
     let (all_counts, first_seen, stats) =
         count_barcodes(config, input, input2, filtered_out, filtered_out2)?;
@@ -123,7 +124,7 @@ fn count_barcodes<R: Read + Send, FW: Write>(
     input: R,
     input2: Option<Box<dyn Read + Send>>,
     filtered_out: Option<FW>,
-    filtered_out2: Option<Box<dyn Write>>,
+    filtered_out2: Option<Box<dyn Write + '_>>,
 ) -> Result<(HashMap<String, u64>, HashMap<String, usize>, WhitelistStats), ExtractError> {
     let mut counts: HashMap<String, u64> = HashMap::new();
     let mut umis: HashMap<String, HashSet<Vec<u8>>> = HashMap::new();
@@ -248,23 +249,6 @@ fn write_record<W: Write>(writer: &mut W, record: &SequenceRecord) -> Result<(),
         .qual()
         .ok_or_else(|| ExtractError::FastqParse("missing quality scores".into()))?;
     write_fastq_record(writer, record.id(), &record.seq(), qual)
-}
-
-/// Write a FASTQ record (used for filtered-out output).
-fn write_fastq_record<W: Write>(
-    writer: &mut W,
-    id: &[u8],
-    seq: &[u8],
-    qual: &[u8],
-) -> Result<(), ExtractError> {
-    writer.write_all(b"@")?;
-    writer.write_all(id)?;
-    writer.write_all(b"\n")?;
-    writer.write_all(seq)?;
-    writer.write_all(b"\n+\n")?;
-    writer.write_all(qual)?;
-    writer.write_all(b"\n")?;
-    Ok(())
 }
 
 /// Determine which barcodes to whitelist based on knee detection or explicit cell number.
