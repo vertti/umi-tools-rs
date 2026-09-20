@@ -700,6 +700,57 @@ mod tests {
     }
 
     #[test]
+    fn correction_map_matches_exhaustive_search() {
+        let barcodes: Vec<String> = (0..125)
+            .map(|mut code| {
+                (0..3)
+                    .map(|_| {
+                        let base = char::from(b"ACGTN"[code % 5]);
+                        code /= 5;
+                        base
+                    })
+                    .collect()
+            })
+            .chain([String::new(), "AAAA".to_owned()])
+            .collect();
+        let counts = barcodes
+            .iter()
+            .cloned()
+            .map(|barcode| (barcode, 1))
+            .collect();
+        let whitelist: Vec<_> = barcodes.iter().step_by(4).cloned().collect();
+        for threshold in 0..=4 {
+            let mut expected: HashMap<String, Vec<(String, u64)>> = HashMap::new();
+            for barcode in &barcodes {
+                if whitelist.contains(barcode) {
+                    continue;
+                }
+                let matches: Vec<_> = whitelist
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.len() == barcode.len()
+                            && hamming_distance(barcode.as_bytes(), candidate.as_bytes())
+                                <= threshold
+                    })
+                    .collect();
+                if let [matched] = matches.as_slice() {
+                    expected
+                        .entry((*matched).clone())
+                        .or_default()
+                        .push((barcode.clone(), 1));
+                }
+            }
+            for matches in expected.values_mut() {
+                matches.sort();
+            }
+            assert_eq!(
+                build_error_correction_map(&counts, &whitelist, threshold),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn test_hamming_distance_same() {
         assert_eq!(hamming_distance(b"ACGT", b"ACGT"), 0);
     }

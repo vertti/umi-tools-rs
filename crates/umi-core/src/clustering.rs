@@ -236,3 +236,52 @@ pub fn cluster_umis<'a>(
     }
     groups
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adjacency_matches_exhaustive_search_for_mixed_barcodes() {
+        let mut sequences = std::collections::BTreeSet::from([Vec::new(), b"AAAAA".to_vec()]);
+        for mut code in 0..125 {
+            let mut sequence = Vec::new();
+            for _ in 0..3 {
+                sequence.push(b"ACGTN"[code % 5]);
+                code /= 5;
+            }
+            sequences.insert(sequence);
+        }
+        let umis: Vec<&[u8]> = sequences.iter().map(Vec::as_slice).collect();
+        let counts: HashMap<&[u8], u32> = umis
+            .iter()
+            .enumerate()
+            .map(|(index, &umi)| (umi, u32::try_from(index % 7 + 1).unwrap()))
+            .collect();
+        for threshold in 0..=5 {
+            let undirected = build_adjacency_list(&umis, threshold);
+            let directed = build_directional_adjacency_list(&umis, &counts, threshold);
+            for &umi in &umis {
+                let expected: Vec<_> = umis
+                    .iter()
+                    .copied()
+                    .filter(|&other| {
+                        other != umi
+                            && other.len() == umi.len()
+                            && hamming_distance(umi, other) <= threshold
+                    })
+                    .collect();
+                let mut actual = undirected[umi].clone();
+                actual.sort_unstable();
+                assert_eq!(actual, expected);
+                let expected: Vec<_> = expected
+                    .into_iter()
+                    .filter(|other| counts[umi] >= 2 * counts[other] - 1)
+                    .collect();
+                let mut actual = directed[umi].clone();
+                actual.sort_unstable();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+}
