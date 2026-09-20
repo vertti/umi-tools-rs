@@ -222,6 +222,7 @@ pub struct DedupConfig {
 pub struct DedupStats {
     pub input_reads: u64,
     pub output_reads: u64,
+    /// Positional bundles processed, or gene bundles in per-gene mode.
     pub positions: u64,
 }
 
@@ -452,6 +453,7 @@ pub(crate) struct UmiSlot {
 /// each position are emitted in sorted order (matching Python's
 /// `sorted(reads_dict[p].keys())`).
 struct ReadBuffer<K: Ord = i64> {
+    positions: u64,
     groups: BTreeMap<K, BTreeMap<GroupKey, HashMap<Vec<u8>, UmiSlot>>>,
     /// Per-(pos, key) insertion counters for deterministic ordering.
     insertion_counters: BTreeMap<K, BTreeMap<GroupKey, u32>>,
@@ -479,6 +481,7 @@ impl ReadBuffer<i64> {
 impl<K: Ord + Clone> ReadBuffer<K> {
     const fn new() -> Self {
         Self {
+            positions: 0,
             groups: BTreeMap::new(),
             insertion_counters: BTreeMap::new(),
         }
@@ -497,7 +500,10 @@ impl<K: Ord + Clone> ReadBuffer<K> {
         let umi_map = self
             .groups
             .entry(pos.clone())
-            .or_default()
+            .or_insert_with(|| {
+                self.positions += 1;
+                BTreeMap::new()
+            })
             .entry(key.clone())
             .or_default();
 
@@ -1326,6 +1332,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
     output_records.sort_by_key(alignment_io::coordinate_sort_key);
 
     stats.output_reads = output_records.len() as u64;
+    stats.positions = buffer.positions + gene_buffer.positions;
     for r in &output_records {
         writer
             .write(r)

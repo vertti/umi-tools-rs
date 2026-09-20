@@ -39,6 +39,18 @@ def test_empty_input_produces_empty_statistics(rust_binary, tmp_path):
         assert (tmp_path / f"stats_{suffix}.tsv").read_text().strip()
 
 
+def test_dedup_reports_processed_positions(rust_binary, tmp_path):
+    source = tmp_path / "positions.sam"
+    write_counts(source, {"AAAA": 2, "AAAT": 1})
+    source.write_text(source.read_text().replace("r0_AAAT\t0\tchr1\t101", "r0_AAAT\t0\tchr1\t201"))
+    result = subprocess.run(
+        [str(rust_binary), "dedup", "--stdin", str(source), "--stdout", str(tmp_path / "out.bam")],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "positions: 2" in result.stderr
+
+
 @pytest.mark.parametrize("method,expected", [
     ("unique", 3), ("percentile", 3), ("cluster", 1), ("adjacency", 2), ("directional", 2),
 ])
