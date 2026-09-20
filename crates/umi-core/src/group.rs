@@ -5,6 +5,7 @@ use std::io::{BufWriter, Write};
 use rust_htslib::bam::{self, Record};
 
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
+use crate::alignment_sort::RecordOutput;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
 use crate::clustering::cluster_umis;
 use crate::dedup::{
@@ -148,9 +149,8 @@ fn process_drained<K: Ord>(
     tsv_writer: &mut Option<BufWriter<File>>,
     header_view: &bam::HeaderView,
     assigner: Option<&GeneAssigner>,
-) -> Result<Vec<Record>, GroupError> {
-    let mut output_records = Vec::new();
-
+    output: &mut RecordOutput,
+) -> Result<(), GroupError> {
     for key_map in drained.into_values() {
         for (_, mut umi_map) in key_map {
             let groups = assign_groups(config.method, &umi_map, config.edit_distance_threshold);
@@ -198,20 +198,23 @@ fn process_drained<K: Ord>(
                         }
 
                         let mut tagged = record;
-                        alignment_io::set_aux(
-                            &mut tagged,
-                            b"UG",
-                            rust_htslib::bam::record::Aux::U32(*unique_id),
-                        )
-                        .map_err(|e| GroupError::BamWrite(e.to_string()))?;
-                        alignment_io::set_aux(
-                            &mut tagged,
-                            &config.umi_group_tag,
-                            rust_htslib::bam::record::Aux::String(top_umi_str),
-                        )
-                        .map_err(|e| GroupError::BamWrite(e.to_string()))?;
-
-                        output_records.push(tagged);
+                        if config.output_bam {
+                            alignment_io::set_aux(
+                                &mut tagged,
+                                b"UG",
+                                rust_htslib::bam::record::Aux::U32(*unique_id),
+                            )
+                            .map_err(|e| GroupError::BamWrite(e.to_string()))?;
+                            alignment_io::set_aux(
+                                &mut tagged,
+                                &config.umi_group_tag,
+                                rust_htslib::bam::record::Aux::String(top_umi_str),
+                            )
+                            .map_err(|e| GroupError::BamWrite(e.to_string()))?;
+                        }
+                        output
+                            .push(tagged)
+                            .map_err(|e| GroupError::BamWrite(e.to_string()))?;
                     }
                 }
 
@@ -220,7 +223,7 @@ fn process_drained<K: Ord>(
         }
     }
 
-    Ok(output_records)
+    Ok(())
 }
 
 /// # Errors
@@ -242,7 +245,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
     let mut flusher = assigner.as_ref().map(GeneAssigner::flusher);
     let header_view = source.header().clone();
 
-    let mut writer = if config.output_bam {
+    let writer = if config.output_bam {
         let header = if config.no_sort_output {
             bam::Header::from_template(&header_view)
         } else {
@@ -304,7 +307,10 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
     #[allow(clippy::cast_possible_truncation)]
     let mut rng = PythonRandom::new(config.random_seed as u32);
 
-    let mut output_records: Vec<Record> = Vec::new();
+    let mut output = RecordOutput::new(
+        writer,
+        (!config.no_sort_output).then(|| alignment_io::coordinate_sorted_header(&header_view)),
+    );
     let mut unique_id: u32 = 0;
 
     let mut last_start: i64 = 0;
@@ -321,7 +327,9 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
 
         let triage = config.pairing.triage(&record, true);
         for _ in 0..triage.copies {
-            output_records.push(record.clone());
+            output
+                .push(record.clone())
+                .map_err(|e| GroupError::BamWrite(e.to_string()))?;
         }
         if triage.is_read2 {
             continue;
@@ -356,14 +364,15 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
                 Flush::Gene(done) => Some(gene_buffer.drain_key(&done)),
             };
             if let Some(drained) = done {
-                output_records.extend(process_drained(
+                process_drained(
                     drained,
                     config,
                     &mut unique_id,
                     &mut tsv_writer,
                     &header_view,
                     Some(assigner),
-                )?);
+                    &mut output,
+                )?;
             }
             flusher.after_read(tid, &gene);
 
@@ -375,24 +384,26 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             let start = position.start;
 
             if tid != last_chrom {
-                output_records.extend(process_drained(
+                process_drained(
                     buffer.drain_all(),
                     config,
                     &mut unique_id,
                     &mut tsv_writer,
                     &header_view,
                     assigner.as_ref(),
-                )?);
+                    &mut output,
+                )?;
             } else if !config.buffer_whole_contig && start > last_start + 1000 {
                 let threshold = start - 1000;
-                output_records.extend(process_drained(
+                process_drained(
                     buffer.drain_up_to(threshold),
                     config,
                     &mut unique_id,
                     &mut tsv_writer,
                     &header_view,
                     assigner.as_ref(),
-                )?);
+                    &mut output,
+                )?;
             }
 
             last_start = start;
@@ -410,43 +421,33 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         }
     }
 
-    output_records.extend(process_drained(
+    process_drained(
         buffer.drain_all(),
         config,
         &mut unique_id,
         &mut tsv_writer,
         &header_view,
         assigner.as_ref(),
-    )?);
-    output_records.extend(process_drained(
+        &mut output,
+    )?;
+    process_drained(
         gene_buffer.drain_all(),
         config,
         &mut unique_id,
         &mut tsv_writer,
         &header_view,
         assigner.as_ref(),
-    )?);
+        &mut output,
+    )?;
 
     // Flush TSV
     if let Some(w) = tsv_writer.as_mut() {
         w.flush().map_err(|e| GroupError::TsvWrite(e.to_string()))?;
     }
 
-    if !config.no_sort_output {
-        output_records.sort_by_key(alignment_io::coordinate_sort_key);
-    }
-
-    stats.output_reads = output_records.len() as u64;
-
-    if let Some(writer) = writer.as_mut() {
-        for r in &output_records {
-            writer
-                .write(r)
-                .map_err(|e| GroupError::BamWrite(e.to_string()))?;
-        }
-    }
-
-    drop(writer);
+    stats.output_reads = output
+        .finish()
+        .map_err(|e| GroupError::BamWrite(e.to_string()))?;
 
     Ok(stats)
 }

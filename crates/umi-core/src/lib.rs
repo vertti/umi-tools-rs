@@ -1,4 +1,5 @@
 pub mod alignment_io;
+mod alignment_sort;
 pub mod barcode;
 mod clustering;
 pub mod count;
