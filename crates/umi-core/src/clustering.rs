@@ -13,6 +13,21 @@ pub enum DedupMethod {
     Directional,
 }
 
+impl DedupMethod {
+    /// Parse a method name shared by deduplication, grouping, and counting.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "unique" => Some(Self::Unique),
+            "percentile" => Some(Self::Percentile),
+            "cluster" => Some(Self::Cluster),
+            "adjacency" => Some(Self::Adjacency),
+            "directional" => Some(Self::Directional),
+            _ => None,
+        }
+    }
+}
+
 /// Hamming distance between two byte slices of equal length.
 /// Returns `u32::MAX` if lengths differ (matching Python's `np.inf` return).
 #[allow(clippy::cast_possible_truncation)]

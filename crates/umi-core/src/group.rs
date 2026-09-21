@@ -376,7 +376,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             }
             flusher.after_read(tid, &gene);
 
-            let key: GroupKey = (false, 0, 0, 0, cell);
+            let key: GroupKey = GroupKey::for_gene(cell);
             gene_buffer.add(record, gene, key, umi);
         } else {
             // Standard coordinate mode
@@ -409,13 +409,13 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             last_start = start;
             last_chrom = tid;
 
-            let tlen = if config.pairing.paired && !config.ignore_tlen {
-                record.insert_size()
-            } else {
-                0
-            };
-            let (splice, length) = config.position.key_parts(&position, &record);
-            let key: GroupKey = (record.is_reverse(), splice, tlen, length, cell);
+            let key = GroupKey::for_position(
+                &record,
+                &position,
+                &config.position,
+                config.pairing.paired && !config.ignore_tlen,
+                cell,
+            );
 
             buffer.add(record, position.pos, key, umi);
         }
