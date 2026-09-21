@@ -133,65 +133,15 @@ impl TieBreakRng for PythonRandom {
 ///
 /// `NumPy` seeds with `init_genrand(seed)` directly (unlike `CPython` which uses
 /// `init_by_array`). Output generation (`genrand_res53`) is identical.
-struct NumpyRandom {
-    mt: [u32; 624],
-    index: usize,
-}
+struct NumpyRandom(PythonRandom);
 
 impl NumpyRandom {
-    const N: usize = 624;
-
     fn new(seed: u32) -> Self {
-        PythonRandom::init_genrand(seed).into()
+        Self(PythonRandom::init_genrand(seed))
     }
 
     fn random(&mut self) -> f64 {
-        let a = self.next_u32() >> 5;
-        let b = self.next_u32() >> 6;
-        (f64::from(a) * 67_108_864.0 + f64::from(b)) * (1.0 / 9_007_199_254_740_992.0)
-    }
-
-    fn next_u32(&mut self) -> u32 {
-        if self.index >= Self::N {
-            self.generate();
-        }
-        let mut y = self.mt[self.index];
-        self.index += 1;
-        y ^= y >> 11;
-        y ^= (y << 7) & 0x9d2c_5680;
-        y ^= (y << 15) & 0xefc6_0000;
-        y ^= y >> 18;
-        y
-    }
-
-    fn generate(&mut self) {
-        static MAG01: [u32; 2] = [0, PythonRandom::MATRIX_A];
-        for kk in 0..PythonRandom::N - PythonRandom::M {
-            let y = (self.mt[kk] & PythonRandom::UPPER_MASK)
-                | (self.mt[kk + 1] & PythonRandom::LOWER_MASK);
-            self.mt[kk] = self.mt[kk + PythonRandom::M] ^ (y >> 1) ^ MAG01[(y & 1) as usize];
-        }
-        for kk in PythonRandom::N - PythonRandom::M..PythonRandom::N - 1 {
-            let y = (self.mt[kk] & PythonRandom::UPPER_MASK)
-                | (self.mt[kk + 1] & PythonRandom::LOWER_MASK);
-            self.mt[kk] = self.mt[kk + PythonRandom::M - PythonRandom::N]
-                ^ (y >> 1)
-                ^ MAG01[(y & 1) as usize];
-        }
-        let y = (self.mt[PythonRandom::N - 1] & PythonRandom::UPPER_MASK)
-            | (self.mt[0] & PythonRandom::LOWER_MASK);
-        self.mt[PythonRandom::N - 1] =
-            self.mt[PythonRandom::M - 1] ^ (y >> 1) ^ MAG01[(y & 1) as usize];
-        self.index = 0;
-    }
-}
-
-impl From<PythonRandom> for NumpyRandom {
-    fn from(pr: PythonRandom) -> Self {
-        Self {
-            mt: pr.mt,
-            index: pr.index,
-        }
+        self.0.random()
     }
 }
 
@@ -1386,6 +1336,25 @@ mod tests {
     use rust_htslib::bam::HeaderView;
 
     use super::*;
+
+    #[test]
+    fn numpy_random_matches_across_state_refreshes() {
+        // np.random.RandomState(42).random_sample(1248), including refresh boundaries.
+        let expected = [
+            (0, 0.374_540_118_847_362_5_f64),
+            (1, 0.950_714_306_409_916_2),
+            (311, 0.078_456_381_342_265_96),
+            (312, 0.025_350_743_415_457_51),
+            (623, 0.484_522_985_191_021_3),
+            (624, 0.618_254_771_530_296),
+            (1247, 0.032_526_179_491_251_916),
+        ];
+        let mut rng = NumpyRandom::new(42);
+        let actual: Vec<_> = (0..1248).map(|_| rng.random()).collect();
+        for (index, value) in expected {
+            assert_eq!(actual[index].to_bits(), value.to_bits());
+        }
+    }
 
     fn record(flag: u16, cigar: &str) -> Record {
         let header = HeaderView::from_bytes(b"@SQ\tSN:chr1\tLN:100000\n");
