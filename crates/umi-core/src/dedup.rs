@@ -6,6 +6,7 @@ use rust_htslib::bam::record::{Aux, Cigar};
 use rust_htslib::bam::{Read as BamRead, Record};
 
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
+use crate::alignment_sort::RecordOutput;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
 use crate::clustering::{cluster_umis, hamming_distance, median};
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
@@ -1122,7 +1123,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
     let mut flusher = assigner.as_ref().map(GeneAssigner::flusher);
     let header = alignment_io::coordinate_sorted_header(source.header());
 
-    let mut writer = alignment_io::open_writer(
+    let writer = alignment_io::open_writer(
         &header,
         AlignmentOutput {
             path: config.output_path.as_deref(),
@@ -1156,9 +1157,19 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
         positions: 0,
     };
 
-    // Collect all selected records, then sort by coordinate before writing.
-    // Matches Python umi_tools which calls `pysam.sort()` after processing.
-    let mut output_records: Vec<Record> = Vec::new();
+    let mut output = RecordOutput::new(Some(writer), Some(header));
+    let mut mate_set: HashSet<(Vec<u8>, i32, i64)> = HashSet::new();
+    let mut emit_selected = |records: Vec<Record>| -> Result<(), DedupError> {
+        for record in records {
+            if config.pairing.paired {
+                mate_set.insert((record.qname().to_vec(), record.mtid(), record.mpos()));
+            }
+            output
+                .push(record)
+                .map_err(|e| DedupError::BamWrite(e.to_string()))?;
+        }
+        Ok(())
+    };
 
     let mut last_start: i64 = 0;
     let mut last_chrom: i32 = -1;
@@ -1225,19 +1236,19 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             };
             match flusher.before_read(tid) {
                 Flush::None => {}
-                Flush::All => output_records.extend(gene_buffer.drain_all(
+                Flush::All => emit_selected(gene_buffer.drain_all(
                     config.method,
                     config.edit_distance_threshold,
                     &mut stats_ctx,
                     wl_ref,
-                )),
-                Flush::Gene(done) => output_records.extend(gene_buffer.drain_key(
+                ))?,
+                Flush::Gene(done) => emit_selected(gene_buffer.drain_key(
                     &done,
                     config.method,
                     config.edit_distance_threshold,
                     &mut stats_ctx,
                     wl_ref,
-                )),
+                ))?,
             }
             flusher.after_read(tid, &gene);
             gene_buffer.add(
@@ -1254,21 +1265,21 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
 
             // Flush buffer when moving far enough or changing chromosome.
             if tid != last_chrom {
-                output_records.extend(buffer.drain_all(
+                emit_selected(buffer.drain_all(
                     config.method,
                     config.edit_distance_threshold,
                     &mut stats_ctx,
                     wl_ref,
-                ));
+                ))?;
             } else if !config.buffer_whole_contig && start > last_start + 1000 {
                 let threshold = start - 1000;
-                output_records.extend(buffer.drain_up_to(
+                emit_selected(buffer.drain_up_to(
                     threshold,
                     config.method,
                     config.edit_distance_threshold,
                     &mut stats_ctx,
                     wl_ref,
-                ));
+                ))?;
             }
 
             last_start = start;
@@ -1292,25 +1303,21 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
         }
     }
 
-    output_records.extend(buffer.drain_all(
+    emit_selected(buffer.drain_all(
         config.method,
         config.edit_distance_threshold,
         &mut stats_ctx,
         wl_ref,
-    ));
-    output_records.extend(gene_buffer.drain_all(
+    ))?;
+    emit_selected(gene_buffer.drain_all(
         config.method,
         config.edit_distance_threshold,
         &mut stats_ctx,
         wl_ref,
-    ));
+    ))?;
 
     // Paired mode: second pass to find R2 mates of surviving R1 reads.
     if config.pairing.paired {
-        let mut mate_set: HashSet<(Vec<u8>, i32, i64)> = HashSet::new();
-        for r1 in &output_records {
-            mate_set.insert((r1.qname().to_vec(), r1.mtid(), r1.mpos()));
-        }
         let mut reader2 = alignment_io::open_reader(input_path, config.reference.as_deref())
             .map_err(|e| DedupError::BamOpen(e.to_string()))?;
         for result in reader2.records() {
@@ -1323,23 +1330,17 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             }
             let key = (record.qname().to_vec(), record.tid(), record.pos());
             if mate_set.remove(&key) {
-                output_records.push(record);
+                output
+                    .push(record)
+                    .map_err(|e| DedupError::BamWrite(e.to_string()))?;
             }
         }
     }
 
-    // Sort by coordinate (tid, pos) to match `pysam.sort()` / `samtools sort`.
-    output_records.sort_by_key(alignment_io::coordinate_sort_key);
-
-    stats.output_reads = output_records.len() as u64;
+    stats.output_reads = output
+        .finish()
+        .map_err(|e| DedupError::BamWrite(e.to_string()))?;
     stats.positions = buffer.positions + gene_buffer.positions;
-    for r in &output_records {
-        writer
-            .write(r)
-            .map_err(|e| DedupError::BamWrite(e.to_string()))?;
-    }
-
-    drop(writer);
 
     // Write stats files if requested
     if let (Some(prefix), Some(ctx)) = (&config.output_stats, &stats_ctx) {

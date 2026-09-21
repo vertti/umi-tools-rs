@@ -15,3 +15,4 @@ flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
 regex = "1"
 rust-htslib = { version = "1", default-features = false }
 thiserror = "2"
+tempfile = "3.27.0"
