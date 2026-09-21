@@ -1037,270 +1037,14 @@ fn run_logged(command: Commands, common: &CommonArgs, args: &[String]) -> Result
     log.finish(&summary)
 }
 
-#[allow(clippy::too_many_lines)]
 fn run(command: Commands) -> Result<String> {
     match command {
-        Commands::Extract(ExtractArgs {
-            bc_pattern,
-            bc_pattern2,
-            extract_method,
-            input,
-            output,
-            read2_in,
-            read2_out,
-            read2_stdout,
-            whitelist,
-            prime3,
-            umi_separator,
-            quality_filter_threshold,
-            quality_encoding,
-            ignore_read_pair_suffixes,
-            reconcile_pairs,
-            error_correct_cell,
-            blacklist,
-            filtered_out,
-            filtered_out2,
-            either_read,
-            either_read_resolve,
-            quality_filter_mask,
-            read2_only,
-            subset_reads,
-            _random_seed: _,
-            common,
-        }) => {
-            let is_paired = read2_in.is_some();
-            validate_read2_only(read2_only, bc_pattern.as_deref(), bc_pattern2.as_deref())?;
-            if !is_paired && bc_pattern.is_none() {
-                bail!("--bc-pattern is required for single-end extraction");
-            }
-            if is_paired && bc_pattern.is_none() && bc_pattern2.is_none() {
-                bail!("at least one of --bc-pattern or --bc-pattern2 is required");
-            }
-
-            run_extract(
-                bc_pattern.as_deref(),
-                bc_pattern2.as_deref(),
-                &extract_method,
-                input.as_deref(),
-                output.as_deref(),
-                read2_in.as_deref(),
-                read2_out.as_deref(),
-                read2_stdout,
-                whitelist.as_deref(),
-                prime3,
-                &umi_separator,
-                quality_filter_threshold,
-                &quality_encoding,
-                ignore_read_pair_suffixes,
-                reconcile_pairs,
-                error_correct_cell,
-                blacklist.as_deref(),
-                filtered_out.as_deref(),
-                filtered_out2.as_deref(),
-                either_read,
-                &either_read_resolve,
-                quality_filter_mask,
-                subset_reads,
-                common.compresslevel,
-            )
-        }
-        Commands::Whitelist(WhitelistArgs {
-            bc_pattern,
-            bc_pattern2,
-            read2_in,
-            read2_only,
-            filtered_out2,
-            ignore_read_pair_suffixes: _,
-            method,
-            allow_threshold_error,
-            extract_method,
-            input,
-            output,
-            prime3,
-            knee_method,
-            set_cell_number,
-            expect_cells,
-            error_correct_threshold,
-            ed_above_threshold,
-            plot_prefix: _,
-            filtered_out,
-            subset_reads,
-            _random_seed: _,
-            common,
-        }) => run_whitelist_cmd(
-            bc_pattern.as_deref(),
-            bc_pattern2.as_deref(),
-            read2_in.as_deref(),
-            read2_only,
-            filtered_out2.as_deref(),
-            &method,
-            allow_threshold_error,
-            &extract_method,
-            input.as_deref(),
-            output.as_deref(),
-            prime3,
-            &knee_method,
-            set_cell_number,
-            expect_cells,
-            error_correct_threshold,
-            ed_above_threshold.as_deref(),
-            filtered_out.as_deref(),
-            subset_reads,
-            common.compresslevel,
-        ),
-        Commands::Group(GroupArgs {
-            input,
-            method,
-            edit_distance_threshold,
-            ignore_umi,
-            output,
-            input_format,
-            output_format,
-            random_seed,
-            barcode,
-            umi_group_tag,
-            chrom,
-            group_out,
-            output_bam,
-            no_sort_output,
-            subset,
-            position,
-            mapping_quality,
-            multimapping_detection_method: _,
-            buffer_whole_contig,
-            output_unmapped,
-            pairing,
-            gene,
-            common: _,
-        }) => run_group_cmd(
-            input.as_deref(),
-            &method,
-            edit_distance_threshold,
-            ignore_umi,
-            output.as_deref(),
-            &input_format,
-            &output_format,
-            random_seed,
-            barcode.extractor()?,
-            &umi_group_tag,
-            chrom.as_deref(),
-            group_out.as_deref(),
-            output_bam,
-            no_sort_output,
-            subset,
-            position.options(),
-            mapping_quality,
-            buffer_whole_contig,
-            pairing.options(output_unmapped),
-            pairing.ignore_tlen,
-            gene.options(false),
-        ),
-        Commands::Dedup(DedupArgs {
-            input,
-            method,
-            ignore_umi,
-            output,
-            input_format,
-            output_format,
-            random_seed,
-            barcode,
-            chrom,
-            edit_distance_threshold,
-            position,
-            mapping_quality,
-            multimapping_detection_method,
-            buffer_whole_contig,
-            subset,
-            gene,
-            output_stats,
-            pairing,
-            filter_umi,
-            umi_whitelist,
-            umi_whitelist_paired,
-            common: _,
-        }) => run_dedup_cmd(
-            input.as_deref(),
-            &method,
-            ignore_umi,
-            output.as_deref(),
-            &input_format,
-            &output_format,
-            random_seed,
-            barcode.extractor()?,
-            chrom.as_deref(),
-            edit_distance_threshold,
-            position.options(),
-            mapping_quality,
-            multimapping_detection_method.as_deref(),
-            buffer_whole_contig,
-            subset,
-            gene.options(false),
-            output_stats.as_deref(),
-            pairing.options(false),
-            pairing.ignore_tlen,
-            filter_umi,
-            umi_whitelist.as_deref(),
-            umi_whitelist_paired.as_deref(),
-        ),
-        Commands::Count(CountArgs {
-            input,
-            output,
-            input_format,
-            mapping_quality,
-            method,
-            gene,
-            barcode,
-            ignore_umi,
-            wide_format,
-            edit_distance_threshold,
-            random_seed,
-            chrom,
-            subset,
-            no_sort_output: _,
-            pairing,
-            common,
-        }) => run_count_cmd(
-            input.as_deref(),
-            output.as_deref(),
-            &input_format,
-            mapping_quality,
-            &method,
-            gene.options(true),
-            barcode.extractor()?,
-            ignore_umi,
-            pairing.options(false),
-            chrom.as_deref(),
-            subset,
-            random_seed,
-            wide_format,
-            edit_distance_threshold,
-            common.compresslevel,
-        ),
-        Commands::CountTab(CountTabArgs {
-            input,
-            output,
-            per_cell,
-            separator,
-            method,
-            edit_distance_threshold,
-            _random_seed: _,
-            in_format: _,
-            in_sam: _,
-            input_options: _,
-            reference_filename: _,
-            read_length: _,
-            soft_clip_threshold: _,
-            spliced_is_unique: _,
-            common,
-        }) => run_count_tab_cmd(
-            input.as_deref(),
-            output.as_deref(),
-            per_cell,
-            &separator,
-            &method,
-            edit_distance_threshold,
-            common.compresslevel,
-        ),
+        Commands::Extract(args) => run_extract(&args),
+        Commands::Whitelist(args) => run_whitelist_cmd(&args),
+        Commands::Group(args) => run_group_cmd(&args),
+        Commands::Dedup(args) => run_dedup_cmd(&args),
+        Commands::Count(args) => run_count_cmd(&args),
+        Commands::CountTab(args) => run_count_tab_cmd(&args),
     }
 }
 
@@ -1340,41 +1084,32 @@ fn parse_pattern(raw: &str, extract_method: &str, prime3: bool) -> Result<Barcod
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-fn run_extract(
-    bc_pattern: Option<&str>,
-    bc_pattern2: Option<&str>,
-    extract_method: &str,
-    input_path: Option<&str>,
-    output_path: Option<&str>,
-    read2_in_path: Option<&str>,
-    read2_out_path: Option<&str>,
-    read2_stdout: bool,
-    whitelist_path: Option<&str>,
-    prime3: bool,
-    umi_separator: &str,
-    quality_filter_threshold: Option<u8>,
-    quality_encoding: &str,
-    ignore_read_pair_suffixes: bool,
-    reconcile_pairs: bool,
-    error_correct_cell: bool,
-    blacklist_path: Option<&str>,
-    filtered_out_path: Option<&str>,
-    filtered_out2_path: Option<&str>,
-    either_read: bool,
-    either_read_resolve: &str,
-    quality_filter_mask: Option<u8>,
-    subset_reads: Option<u64>,
-    compresslevel: u32,
-) -> Result<String> {
-    let pattern = bc_pattern
-        .map(|p| parse_pattern(p, extract_method, prime3))
+fn extract_config(args: &ExtractArgs) -> Result<ExtractConfig> {
+    let is_paired = args.read2_in.is_some();
+    validate_read2_only(
+        args.read2_only,
+        args.bc_pattern.as_deref(),
+        args.bc_pattern2.as_deref(),
+    )?;
+    if !is_paired && args.bc_pattern.is_none() {
+        bail!("--bc-pattern is required for single-end extraction");
+    }
+    if is_paired && args.bc_pattern.is_none() && args.bc_pattern2.is_none() {
+        bail!("at least one of --bc-pattern or --bc-pattern2 is required");
+    }
+
+    let pattern = args
+        .bc_pattern
+        .as_deref()
+        .map(|p| parse_pattern(p, args.extract_method.as_str(), args.prime3))
         .transpose()?;
-    let pattern2 = bc_pattern2
-        .map(|p| parse_pattern(p, extract_method, prime3))
+    let pattern2 = args
+        .bc_pattern2
+        .as_deref()
+        .map(|p| parse_pattern(p, args.extract_method.as_str(), args.prime3))
         .transpose()?;
 
-    let qe = match quality_encoding {
+    let qe = match args.quality_encoding.as_str() {
         "phred33" => QualityEncoding::Phred33,
         "phred64" => QualityEncoding::Phred64,
         "solexa" => QualityEncoding::Solexa,
@@ -1383,46 +1118,50 @@ fn run_extract(
         }
     };
 
-    let (whitelist, correction_map) = if let Some(wl_path) = whitelist_path {
-        let (wl, cm) = load_whitelist_with_correction(wl_path, error_correct_cell)?;
+    let (whitelist, correction_map) = if let Some(wl_path) = args.whitelist.as_deref() {
+        let (wl, cm) = load_whitelist_with_correction(wl_path, args.error_correct_cell)?;
         (Some(wl), cm)
     } else {
         (None, None)
     };
 
-    let blacklist = blacklist_path.map(load_blacklist).transpose()?;
+    let blacklist = args.blacklist.as_deref().map(load_blacklist).transpose()?;
 
-    let either_read_resolve = match either_read_resolve {
+    let either_read_resolve = match args.either_read_resolve.as_str() {
         "discard" => EitherReadResolve::Discard,
         "quality" => EitherReadResolve::Quality,
         other => bail!("unknown --either-read-resolve '{other}'; expected 'discard' or 'quality'"),
     };
 
-    let config = ExtractConfig {
+    Ok(ExtractConfig {
         pattern,
         pattern2,
-        umi_separator: umi_separator.as_bytes().to_vec(),
-        quality_filter_threshold,
+        umi_separator: args.umi_separator.as_bytes().to_vec(),
+        quality_filter_threshold: args.quality_filter_threshold,
         quality_encoding: qe,
         whitelist,
         correction_map,
         blacklist,
-        ignore_read_pair_suffixes,
-        reconcile_pairs,
-        quality_filter_mask,
+        ignore_read_pair_suffixes: args.ignore_read_pair_suffixes,
+        reconcile_pairs: args.reconcile_pairs,
+        quality_filter_mask: args.quality_filter_mask,
         either_read_resolve,
-        subset_reads,
-    };
+        subset_reads: args.subset_reads,
+    })
+}
 
-    let reader1 = open_input(input_path)?;
-    let reader2 = read2_in_path
-        .map(|path| open_input(Some(path)))
+fn run_extract(args: &ExtractArgs) -> Result<String> {
+    let config = extract_config(args)?;
+
+    let reader1 = open_input(args.input.as_deref())?;
+    let reader2 = text_io::open_optional_input(args.read2_in.as_deref())?;
+    let mut primary = open_output(args.output.as_deref(), args.common.compresslevel)?;
+    let mut secondary = args
+        .read2_out
+        .as_deref()
+        .map(|path| open_output(Some(path), args.common.compresslevel))
         .transpose()?;
-    let mut primary = open_output(output_path, compresslevel)?;
-    let mut secondary = read2_out_path
-        .map(|path| open_output(Some(path), compresslevel))
-        .transpose()?;
-    let (read1, read2) = if read2_stdout && reader2.is_some() {
+    let (read1, read2) = if args.read2_stdout && reader2.is_some() {
         (None, Some(primary.borrowed()))
     } else {
         (
@@ -1430,11 +1169,15 @@ fn run_extract(
             secondary.as_mut().map(Output::borrowed),
         )
     };
-    let mut filtered1 = filtered_out_path
-        .map(|path| open_output(Some(path), compresslevel))
+    let mut filtered1 = args
+        .filtered_out
+        .as_deref()
+        .map(|path| open_output(Some(path), args.common.compresslevel))
         .transpose()?;
-    let mut filtered2 = filtered_out2_path
-        .map(|path| open_output(Some(path), compresslevel))
+    let mut filtered2 = args
+        .filtered_out2
+        .as_deref()
+        .map(|path| open_output(Some(path), args.common.compresslevel))
         .transpose()?;
     let outputs = ExtractOutputs {
         read1,
@@ -1442,7 +1185,7 @@ fn run_extract(
         filtered1: filtered1.as_mut().map(Output::borrowed),
         filtered2: filtered2.as_mut().map(Output::borrowed),
     };
-    let mode = if either_read {
+    let mode = if args.either_read {
         ExtractMode::EitherRead
     } else {
         ExtractMode::Combine
@@ -1521,57 +1264,46 @@ fn load_blacklist(path: &str) -> Result<HashSet<Vec<u8>>> {
     Ok(set)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_whitelist_cmd(
-    bc_pattern: Option<&str>,
-    bc_pattern2: Option<&str>,
-    read2_in: Option<&str>,
-    read2_only: bool,
-    filtered_out2_path: Option<&str>,
-    method: &str,
-    allow_threshold_error: bool,
-    extract_method: &str,
-    input_path: Option<&str>,
-    output_path: Option<&str>,
-    prime3: bool,
-    knee_method: &str,
-    set_cell_number: Option<usize>,
-    expect_cells: Option<usize>,
-    error_correct_threshold: usize,
-    ed_above_threshold: Option<&str>,
-    filtered_out_path: Option<&str>,
-    subset_reads: usize,
-    compresslevel: u32,
-) -> Result<String> {
-    validate_read2_only(read2_only, bc_pattern, bc_pattern2)?;
-    if bc_pattern.is_none() && bc_pattern2.is_none() {
+fn run_whitelist_cmd(args: &WhitelistArgs) -> Result<String> {
+    validate_read2_only(
+        args.read2_only,
+        args.bc_pattern.as_deref(),
+        args.bc_pattern2.as_deref(),
+    )?;
+    if args.bc_pattern.is_none() && args.bc_pattern2.is_none() {
         bail!("Must supply --bc-pattern for single-end");
     }
-    if bc_pattern2.is_some() && read2_in.is_none() {
+    if args.bc_pattern2.is_some() && args.read2_in.is_none() {
         bail!("must specify a paired fastq --read2-in");
     }
-    if filtered_out2_path.is_some() && read2_in.is_none() {
+    if args.filtered_out2.is_some() && args.read2_in.is_none() {
         bail!("Cannot use --filtered-out2 without read2 input (--read2-in)");
     }
-    let pattern = bc_pattern
-        .map(|p| parse_pattern(p, extract_method, prime3))
+    let pattern = args
+        .bc_pattern
+        .as_deref()
+        .map(|p| parse_pattern(p, args.extract_method.as_str(), args.prime3))
         .transpose()?;
-    let pattern2 = bc_pattern2
-        .map(|p| parse_pattern(p, extract_method, prime3))
+    let pattern2 = args
+        .bc_pattern2
+        .as_deref()
+        .map(|p| parse_pattern(p, args.extract_method.as_str(), args.prime3))
         .transpose()?;
-    let method = match method {
+    let method = match args.method.as_str() {
         "reads" => WhitelistMethod::Reads,
         "umis" => WhitelistMethod::Umis,
         other => bail!("unknown --method '{other}'; expected 'reads' or 'umis'"),
     };
 
-    let km = match knee_method {
+    let km = match args.knee_method.as_str() {
         "distance" => KneeMethod::Distance,
         "density" => KneeMethod::Density,
         other => bail!("unknown knee method '{other}'; expected 'distance' or 'density'"),
     };
 
-    let ed_above = ed_above_threshold
+    let ed_above = args
+        .ed_above_threshold
+        .as_deref()
         .map(|s| match s {
             "discard" => Ok(EdAboveThreshold::Discard),
             "correct" => Ok(EdAboveThreshold::Correct),
@@ -1585,24 +1317,28 @@ fn run_whitelist_cmd(
         pattern,
         pattern2,
         method,
-        allow_threshold_error,
+        allow_threshold_error: args.allow_threshold_error,
         knee_method: km,
-        cell_number: set_cell_number,
-        expect_cells,
-        error_correct_threshold,
+        cell_number: args.set_cell_number,
+        expect_cells: args.expect_cells,
+        error_correct_threshold: args.error_correct_threshold,
         ed_above_threshold: ed_above,
-        subset_reads,
+        subset_reads: args.subset_reads,
     };
 
-    let reader = open_input(input_path)?;
-    let reader2 = read2_in.map(|p| open_input(Some(p))).transpose()?;
-    let mut writer = open_output(output_path, compresslevel)?;
-    let mut filt_out = filtered_out_path
-        .map(|p| open_output(Some(p), compresslevel))
+    let reader = open_input(args.input.as_deref())?;
+    let reader2 = text_io::open_optional_input(args.read2_in.as_deref())?;
+    let mut writer = open_output(args.output.as_deref(), args.common.compresslevel)?;
+    let mut filt_out = args
+        .filtered_out
+        .as_deref()
+        .map(|p| open_output(Some(p), args.common.compresslevel))
         .transpose()
         .context("failed to open --filtered-out")?;
-    let mut filt_out2 = filtered_out2_path
-        .map(|p| open_output(Some(p), compresslevel))
+    let mut filt_out2 = args
+        .filtered_out2
+        .as_deref()
+        .map(|p| open_output(Some(p), args.common.compresslevel))
         .transpose()
         .context("failed to open --filtered-out2")?;
 
@@ -1623,67 +1359,46 @@ fn run_whitelist_cmd(
     ))
 }
 
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-fn run_group_cmd(
-    input_path: Option<&str>,
-    method: &str,
-    edit_distance_threshold: u32,
-    ignore_umi: bool,
-    output_path: Option<&str>,
-    input_format: &InputFormatArgs,
-    output_format: &OutputFormatArgs,
-    random_seed: u64,
-    barcode: BarcodeExtractor,
-    umi_group_tag: &str,
-    chrom: Option<&str>,
-    group_out: Option<&str>,
-    output_bam: bool,
-    no_sort_output: bool,
-    subset: Option<f32>,
-    position: PositionOptions,
-    mapping_quality: u8,
-    buffer_whole_contig: bool,
-    pairing: PairingOptions,
-    ignore_tlen: bool,
-    gene: GeneOptions,
-) -> Result<String> {
-    let input = input_path.context("--stdin is required for group (BAM input path)")?;
-    if output_path.is_some() && !output_bam {
+fn run_group_cmd(args: &GroupArgs) -> Result<String> {
+    let barcode = args.barcode.extractor()?;
+    let position = args.position.options();
+    let pairing = args.pairing.options(args.output_unmapped);
+    let gene = args.gene.options(false);
+
+    let input = args
+        .input
+        .as_deref()
+        .context("--stdin is required for group (BAM input path)")?;
+    if args.output.is_some() && !args.output_bam {
         bail!("--stdout requires --output-bam");
     }
-    input_format.note_ignored_flags();
-    output_format.note_ignored_flags();
+    args.input_format.note_ignored_flags();
+    args.output_format.note_ignored_flags();
 
-    let dedup_method = match method {
-        "unique" => DedupMethod::Unique,
-        "percentile" => DedupMethod::Percentile,
-        "cluster" => DedupMethod::Cluster,
-        "adjacency" => DedupMethod::Adjacency,
-        "directional" => DedupMethod::Directional,
-        other => bail!("unknown method '{other}'"),
-    };
+    let dedup_method = DedupMethod::parse(&args.method)
+        .with_context(|| format!("unknown method '{}'", args.method))?;
 
     let config = GroupConfig {
         method: dedup_method,
-        ignore_umi,
+        ignore_umi: args.ignore_umi,
         barcode,
-        umi_group_tag: umi_group_tag.as_bytes().to_vec(),
-        random_seed,
-        output_path: output_path.map(String::from),
-        output_format: output_format.resolve(output_path)?,
-        reference: input_format.reference_filename.clone(),
-        output_bam,
-        no_sort_output,
-        chrom: chrom.map(String::from),
-        group_out: group_out.map(String::from),
-        edit_distance_threshold,
+        umi_group_tag: args.umi_group_tag.as_bytes().to_vec(),
+        random_seed: args.random_seed,
+        output_path: args.output.clone(),
+        output_format: args.output_format.resolve(args.output.as_deref())?,
+        reference: args.input_format.reference_filename.clone(),
+        output_bam: args.output_bam,
+        no_sort_output: args.no_sort_output,
+        chrom: args.chrom.clone(),
+        group_out: args.group_out.clone(),
+        edit_distance_threshold: args.edit_distance_threshold,
         position,
-        subset,
-        mapping_quality,
-        buffer_whole_contig,
+        subset: args.subset,
+        mapping_quality: args.mapping_quality,
+        buffer_whole_contig: args.buffer_whole_contig,
         gene,
         pairing,
-        ignore_tlen,
+        ignore_tlen: args.pairing.ignore_tlen,
     };
 
     let stats = run_group(&config, input).context("group failed")?;
@@ -1694,78 +1409,63 @@ fn run_group_cmd(
     ))
 }
 
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-fn run_dedup_cmd(
-    input_path: Option<&str>,
-    method: &str,
-    ignore_umi: bool,
-    output_path: Option<&str>,
-    input_format: &InputFormatArgs,
-    output_format: &OutputFormatArgs,
-    random_seed: u64,
-    barcode: BarcodeExtractor,
-    chrom: Option<&str>,
-    edit_distance_threshold: u32,
-    position: PositionOptions,
-    mapping_quality: u8,
-    multimapping_detection_method: Option<&str>,
-    buffer_whole_contig: bool,
-    subset: Option<f32>,
-    gene: GeneOptions,
-    output_stats: Option<&str>,
-    pairing: PairingOptions,
-    ignore_tlen: bool,
-    filter_umi: bool,
-    umi_whitelist_path: Option<&str>,
-    umi_whitelist_paired_path: Option<&str>,
-) -> Result<String> {
-    let input = input_path.context("--stdin is required for dedup (BAM input path)")?;
-    input_format.note_ignored_flags();
-    output_format.note_ignored_flags();
+fn run_dedup_cmd(args: &DedupArgs) -> Result<String> {
+    let barcode = args.barcode.extractor()?;
+    let position = args.position.options();
+    let gene = args.gene.options(false);
+    let pairing = args.pairing.options(false);
 
-    let dedup_method = match method {
-        "unique" => DedupMethod::Unique,
-        "percentile" => DedupMethod::Percentile,
-        "cluster" => DedupMethod::Cluster,
-        "adjacency" => DedupMethod::Adjacency,
-        "directional" => DedupMethod::Directional,
-        other => bail!("unknown dedup method '{other}'"),
-    };
+    let input = args
+        .input
+        .as_deref()
+        .context("--stdin is required for dedup (BAM input path)")?;
+    args.input_format.note_ignored_flags();
+    args.output_format.note_ignored_flags();
 
-    let multimapping_detection = multimapping_detection_method
+    let dedup_method = DedupMethod::parse(&args.method)
+        .with_context(|| format!("unknown dedup method '{}'", args.method))?;
+
+    let multimapping_detection = args
+        .multimapping_detection_method
+        .as_deref()
         .map(|name| {
             MultimappingDetection::parse(name)
                 .ok_or_else(|| anyhow::anyhow!("unknown --multimapping-detection-method '{name}'"))
         })
         .transpose()?;
 
-    let umi_whitelist = if filter_umi {
-        let wl_path =
-            umi_whitelist_path.context("--umi-whitelist is required when --filter-umi is set")?;
-        Some(load_umi_whitelist(wl_path, umi_whitelist_paired_path)?)
+    let umi_whitelist = if args.filter_umi {
+        let wl_path = args
+            .umi_whitelist
+            .as_deref()
+            .context("--umi-whitelist is required when --filter-umi is set")?;
+        Some(load_umi_whitelist(
+            wl_path,
+            args.umi_whitelist_paired.as_deref(),
+        )?)
     } else {
         None
     };
 
     let config = DedupConfig {
         method: dedup_method,
-        ignore_umi,
+        ignore_umi: args.ignore_umi,
         barcode,
-        random_seed,
-        output_path: output_path.map(String::from),
-        output_format: output_format.resolve(output_path)?,
-        reference: input_format.reference_filename.clone(),
-        chrom: chrom.map(String::from),
-        edit_distance_threshold,
+        random_seed: args.random_seed,
+        output_path: args.output.clone(),
+        output_format: args.output_format.resolve(args.output.as_deref())?,
+        reference: args.input_format.reference_filename.clone(),
+        chrom: args.chrom.clone(),
+        edit_distance_threshold: args.edit_distance_threshold,
         position,
-        subset,
-        mapping_quality,
+        subset: args.subset,
+        mapping_quality: args.mapping_quality,
         multimapping_detection,
-        buffer_whole_contig,
+        buffer_whole_contig: args.buffer_whole_contig,
         gene,
-        output_stats: output_stats.map(String::from),
+        output_stats: args.output_stats.clone(),
         pairing,
-        ignore_tlen,
+        ignore_tlen: args.pairing.ignore_tlen,
         umi_whitelist,
     };
 
@@ -1823,52 +1523,36 @@ fn load_umi_whitelist(path: &str, paired_path: Option<&str>) -> Result<HashSet<V
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-fn run_count_cmd(
-    input_path: Option<&str>,
-    output_path: Option<&str>,
-    input_format: &InputFormatArgs,
-    mapping_quality: u8,
-    method: &str,
-    gene: GeneOptions,
-    barcode: BarcodeExtractor,
-    ignore_umi: bool,
-    pairing: PairingOptions,
-    chrom: Option<&str>,
-    subset: Option<f32>,
-    random_seed: u64,
-    wide_format: bool,
-    edit_distance_threshold: u32,
-    compresslevel: u32,
-) -> Result<String> {
-    let input = input_path.context("--stdin is required for count (BAM input path)")?;
-    input_format.note_ignored_flags();
+fn run_count_cmd(args: &CountArgs) -> Result<String> {
+    let gene = args.gene.options(true);
+    let barcode = args.barcode.extractor()?;
+    let pairing = args.pairing.options(false);
 
-    let dedup_method = match method {
-        "unique" => DedupMethod::Unique,
-        "percentile" => DedupMethod::Percentile,
-        "cluster" => DedupMethod::Cluster,
-        "adjacency" => DedupMethod::Adjacency,
-        "directional" => DedupMethod::Directional,
-        other => bail!("unknown method '{other}'"),
-    };
+    let input = args
+        .input
+        .as_deref()
+        .context("--stdin is required for count (BAM input path)")?;
+    args.input_format.note_ignored_flags();
+
+    let dedup_method = DedupMethod::parse(&args.method)
+        .with_context(|| format!("unknown method '{}'", args.method))?;
 
     let config = CountConfig {
         method: dedup_method,
         gene,
         barcode,
-        ignore_umi,
+        ignore_umi: args.ignore_umi,
         pairing,
-        chrom: chrom.map(String::from),
-        subset,
-        random_seed,
-        wide_format,
-        edit_distance_threshold,
-        reference: input_format.reference_filename.clone(),
-        mapping_quality,
+        chrom: args.chrom.clone(),
+        subset: args.subset,
+        random_seed: args.random_seed,
+        wide_format: args.wide_format,
+        edit_distance_threshold: args.edit_distance_threshold,
+        reference: args.input_format.reference_filename.clone(),
+        mapping_quality: args.mapping_quality,
     };
 
-    let mut output = open_output(output_path, compresslevel)?;
+    let mut output = open_output(args.output.as_deref(), args.common.compresslevel)?;
     let stats = run_count(&config, input, &mut output).context("count failed")?;
     finish_outputs([Some(output)])?;
 
@@ -1878,34 +1562,20 @@ fn run_count_cmd(
     ))
 }
 
-fn run_count_tab_cmd(
-    input_path: Option<&str>,
-    output_path: Option<&str>,
-    per_cell: bool,
-    separator: &str,
-    method: &str,
-    edit_distance_threshold: u32,
-    compresslevel: u32,
-) -> Result<String> {
-    let dedup_method = match method {
-        "unique" => DedupMethod::Unique,
-        "percentile" => DedupMethod::Percentile,
-        "cluster" => DedupMethod::Cluster,
-        "adjacency" => DedupMethod::Adjacency,
-        "directional" => DedupMethod::Directional,
-        other => bail!("unknown method '{other}'"),
-    };
+fn run_count_tab_cmd(args: &CountTabArgs) -> Result<String> {
+    let dedup_method = DedupMethod::parse(&args.method)
+        .with_context(|| format!("unknown method '{}'", args.method))?;
 
     let config = CountTabConfig {
         method: dedup_method,
-        per_cell,
-        separator: separator.as_bytes().to_vec(),
-        edit_distance_threshold,
+        per_cell: args.per_cell,
+        separator: args.separator.as_bytes().to_vec(),
+        edit_distance_threshold: args.edit_distance_threshold,
     };
 
-    let input = open_input(input_path)?;
+    let input = open_input(args.input.as_deref())?;
     let mut reader = io::BufReader::new(input);
-    let mut output = open_output(output_path, compresslevel)?;
+    let mut output = open_output(args.output.as_deref(), args.common.compresslevel)?;
     let stats = run_count_tab(&config, &mut reader, &mut output).context("count_tab failed")?;
     finish_outputs([Some(output)])?;
 

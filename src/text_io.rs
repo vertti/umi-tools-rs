@@ -28,6 +28,10 @@ pub fn open_input(path: Option<&str>) -> Result<Box<dyn Read + Send>> {
     }
 }
 
+pub fn open_optional_input(path: Option<&str>) -> Result<Option<Box<dyn Read + Send>>> {
+    path.map(|path| open_input(Some(path))).transpose()
+}
+
 /// Keeps compression ownership until the command explicitly checks finalization.
 pub enum Output {
     Plain(BufWriter<Box<dyn Write>>),
