@@ -380,9 +380,45 @@ fn aux_char(record: &Record, tag: &[u8]) -> Option<u8> {
     }
 }
 
-/// Sub-key within a position group: `(is_reverse, splice_offset, tlen, read_length, cell)`.
-/// With default options, this collapses to `(is_reverse, 0, 0, 0, [])`.
-pub(crate) type GroupKey = (bool, i64, i64, usize, Vec<u8>);
+/// Fields retain their original tuple order for deterministic bundle traversal.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct GroupKey {
+    reverse: bool,
+    splice_offset: i64,
+    template_length: i64,
+    read_length: usize,
+    cell: Vec<u8>,
+}
+
+impl GroupKey {
+    pub(crate) fn for_gene(cell: Vec<u8>) -> Self {
+        Self {
+            cell,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn for_position(
+        record: &Record,
+        position: &ReadPosition,
+        options: &PositionOptions,
+        use_template_length: bool,
+        cell: Vec<u8>,
+    ) -> Self {
+        let (splice_offset, read_length) = options.key_parts(position, record);
+        Self {
+            reverse: record.is_reverse(),
+            splice_offset,
+            template_length: if use_template_length {
+                record.insert_size()
+            } else {
+                0
+            },
+            read_length,
+            cell,
+        }
+    }
+}
 
 /// Holds per-UMI read selection state: best record + reservoir-sampling counter.
 pub(crate) struct UmiSlot {
@@ -1204,7 +1240,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             gene_buffer.add(
                 record,
                 gene,
-                (false, 0, 0, 0, cell),
+                GroupKey::for_gene(cell),
                 umi,
                 &mut rng,
                 config.multimapping_detection,
@@ -1235,13 +1271,13 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             last_start = start;
             last_chrom = tid;
 
-            let tlen = if config.pairing.paired && !config.ignore_tlen {
-                record.insert_size()
-            } else {
-                0
-            };
-            let (splice, length) = config.position.key_parts(&position, &record);
-            let key: GroupKey = (record.is_reverse(), splice, tlen, length, cell);
+            let key = GroupKey::for_position(
+                &record,
+                &position,
+                &config.position,
+                config.pairing.paired && !config.ignore_tlen,
+                cell,
+            );
             buffer.add(
                 record,
                 position.pos,
@@ -1410,7 +1446,7 @@ mod tests {
 
     #[test]
     fn multimapping_tag_breaks_mapq_ties_like_umi_tools() {
-        let key: GroupKey = (false, 0, 0, 0, Vec::new());
+        let key: GroupKey = GroupKey::default();
         let umi = b"ACGT".to_vec();
         let nh = Some(MultimappingDetection::Nh);
         let mut rng = FixedRng {
@@ -1487,7 +1523,7 @@ mod tests {
 
     #[test]
     fn xt_unique_beats_repeat() {
-        let key: GroupKey = (false, 0, 0, 0, Vec::new());
+        let key: GroupKey = GroupKey::default();
         let umi = b"ACGT".to_vec();
         let xt = Some(MultimappingDetection::Xt);
         let mut rng = FixedRng {
