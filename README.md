@@ -29,6 +29,18 @@ Run benchmarks yourself: `mise run bench`
 cargo install umi-tools-rs
 ```
 
+### Bioconda
+
+Community-maintained [Bioconda packages](https://anaconda.org/bioconda/umi-tools-rs/files) are available for Linux x86_64 and Intel macOS:
+
+```sh
+conda create -n umi-tools-rs --override-channels \
+  -c conda-forge -c bioconda --strict-channel-priority umi-tools-rs
+conda activate umi-tools-rs
+```
+
+Bioconda versions may lag behind GitHub releases. For native Apple Silicon builds, use the prebuilt binaries below or install from crates.io.
+
 ### Prebuilt binaries
 
 Download from [GitHub Releases](https://github.com/vertti/umi-tools-rs/releases/latest):
