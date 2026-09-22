@@ -8,16 +8,18 @@ A drop-in replacement for [UMI-tools](https://github.com/CGATOxford/UMI-tools), 
 
 ## Performance
 
-Measured with [hyperfine](https://github.com/sharkdp/hyperfine) against UMI-tools 1.1.6:
+Measured for v2.0.0 with [hyperfine](https://github.com/sharkdp/hyperfine) against UMI-tools 1.1.6 on the bundled benchmark inputs:
 
 | Command | Speedup |
 |:--------|--------:|
-| `extract` | **14-43x** |
-| `whitelist` | **31x** |
-| `dedup` | **50x** |
-| `group` | **17x** |
-| `count` | **66x** |
-| `count_tab` | **103x** |
+| `extract` | **13.2–33.7x** |
+| `whitelist` | **31.6x** |
+| `dedup` | **34.6x** |
+| `group` | **14.1x** |
+| `count` | **80.1x** |
+| `count_tab` | **76.2x** |
+
+These are end-to-end command timings, including process startup. Speedups depend on input size and workload; the short count benchmarks have higher timing variability.
 
 Run benchmarks yourself: `mise run bench`
 
