@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::error::ExtractError;
@@ -10,6 +11,39 @@ pub struct ExtractionResult {
     pub cell_barcode: Vec<u8>,
     pub trimmed_sequence: Vec<u8>,
     pub trimmed_quality: Vec<u8>,
+}
+
+/// Borrow unchanged slices while the input record remains in the parser buffer.
+pub(crate) struct ExtractionView<'a> {
+    pub umi: Cow<'a, [u8]>,
+    pub umi_quality: Cow<'a, [u8]>,
+    pub cell_barcode: Cow<'a, [u8]>,
+    pub trimmed_sequence: Cow<'a, [u8]>,
+    pub trimmed_quality: Cow<'a, [u8]>,
+}
+
+impl From<ExtractionResult> for ExtractionView<'_> {
+    fn from(result: ExtractionResult) -> Self {
+        Self {
+            umi: Cow::Owned(result.umi),
+            umi_quality: Cow::Owned(result.umi_quality),
+            cell_barcode: Cow::Owned(result.cell_barcode),
+            trimmed_sequence: Cow::Owned(result.trimmed_sequence),
+            trimmed_quality: Cow::Owned(result.trimmed_quality),
+        }
+    }
+}
+
+impl ExtractionView<'_> {
+    fn into_owned(self) -> ExtractionResult {
+        ExtractionResult {
+            umi: self.umi.into_owned(),
+            umi_quality: self.umi_quality.into_owned(),
+            cell_barcode: self.cell_barcode.into_owned(),
+            trimmed_sequence: self.trimmed_sequence.into_owned(),
+            trimmed_quality: self.trimmed_quality.into_owned(),
+        }
+    }
 }
 
 /// Which end of the read to extract the barcode from (string method only).
@@ -27,6 +61,17 @@ pub enum BarcodePattern {
 }
 
 impl BarcodePattern {
+    pub(crate) fn extract_view<'a>(
+        &self,
+        sequence: &'a [u8],
+        quality: &'a [u8],
+    ) -> Result<ExtractionView<'a>, ExtractError> {
+        match self {
+            Self::String(pattern) => pattern.extract_view(sequence, quality),
+            Self::Regex(pattern) => pattern.extract(sequence, quality).map(ExtractionView::from),
+        }
+    }
+
     /// # Errors
     /// Returns error if the read is too short (string method) or doesn't match (regex method).
     pub fn extract(
@@ -114,6 +159,15 @@ impl StringPattern {
         sequence: &[u8],
         quality: &[u8],
     ) -> Result<ExtractionResult, ExtractError> {
+        self.extract_view(sequence, quality)
+            .map(ExtractionView::into_owned)
+    }
+
+    fn extract_view<'a>(
+        &self,
+        sequence: &'a [u8],
+        quality: &'a [u8],
+    ) -> Result<ExtractionView<'a>, ExtractError> {
         if sequence.len() < self.pattern_length {
             return Err(ExtractError::ReadTooShort {
                 read_len: sequence.len(),
@@ -145,7 +199,7 @@ impl StringPattern {
         );
 
         let (trimmed_sequence, trimmed_quality) = if self.sample_positions.is_empty() {
-            (remaining_seq.to_vec(), remaining_qual.to_vec())
+            (Cow::Borrowed(remaining_seq), Cow::Borrowed(remaining_qual))
         } else {
             let sample_seq = extract_slice(
                 barcode_region,
@@ -159,17 +213,17 @@ impl StringPattern {
             );
             match self.prime_end {
                 PrimeEnd::Five => (
-                    join_slices(&sample_seq, remaining_seq),
-                    join_slices(&sample_qual, remaining_qual),
+                    Cow::Owned(join_slices(&sample_seq, remaining_seq)),
+                    Cow::Owned(join_slices(&sample_qual, remaining_qual)),
                 ),
                 PrimeEnd::Three => (
-                    join_slices(remaining_seq, &sample_seq),
-                    join_slices(remaining_qual, &sample_qual),
+                    Cow::Owned(join_slices(remaining_seq, &sample_seq)),
+                    Cow::Owned(join_slices(remaining_qual, &sample_qual)),
                 ),
             }
         };
 
-        Ok(ExtractionResult {
+        Ok(ExtractionView {
             umi,
             umi_quality,
             cell_barcode,
@@ -371,11 +425,16 @@ fn as_contiguous_range(positions: &[usize]) -> Option<Range<usize>> {
     is_contiguous.then(|| start..start + positions.len())
 }
 
-fn extract_slice(source: &[u8], range: Option<&Range<usize>>, positions: &[usize]) -> Vec<u8> {
-    range.map_or_else(
-        || positions.iter().map(|&i| source[i]).collect(),
-        |r| source[r.clone()].to_vec(),
-    )
+fn extract_slice<'a>(
+    source: &'a [u8],
+    range: Option<&Range<usize>>,
+    positions: &[usize],
+) -> Cow<'a, [u8]> {
+    match range {
+        Some(range) => Cow::Borrowed(&source[range.clone()]),
+        None if positions.is_empty() => Cow::Borrowed(&[]),
+        None => Cow::Owned(positions.iter().map(|&i| source[i]).collect()),
+    }
 }
 
 fn join_slices(a: &[u8], b: &[u8]) -> Vec<u8> {
@@ -390,6 +449,80 @@ mod tests {
     use super::*;
 
     // --- StringPattern tests ---
+
+    #[test]
+    fn contiguous_extraction_borrows_all_five_fields() {
+        let sequence = b"ACGTACGT";
+        let quality = b"12345678";
+        for (end, cell, umi, remaining) in [
+            (PrimeEnd::Five, 0..2, 2..4, 4..8),
+            (PrimeEnd::Three, 4..6, 6..8, 0..4),
+        ] {
+            let pattern = StringPattern::parse("CCNN", end).unwrap();
+            let view = pattern.extract_view(sequence, quality).unwrap();
+            for (actual, expected) in [
+                (&view.cell_barcode, &sequence[cell]),
+                (&view.umi, &sequence[umi.clone()]),
+                (&view.umi_quality, &quality[umi]),
+                (&view.trimmed_sequence, &sequence[remaining.clone()]),
+                (&view.trimmed_quality, &quality[remaining]),
+            ] {
+                assert_eq!(actual.as_ref(), expected);
+                assert!(
+                    matches!(actual, Cow::Borrowed(_)),
+                    "copied an unchanged slice"
+                );
+                assert_eq!(actual.as_ptr(), expected.as_ptr());
+            }
+        }
+    }
+
+    #[test]
+    fn extraction_matches_position_reference_for_all_short_patterns() {
+        for length in 1..=4u32 {
+            for mut code in 0..3usize.pow(length) {
+                let pattern: String = (0..length)
+                    .map(|_| {
+                        let ch = char::from(b"NCX"[code % 3]);
+                        code /= 3;
+                        ch
+                    })
+                    .collect();
+                for end in [PrimeEnd::Five, PrimeEnd::Three] {
+                    for extra in [0, 3] {
+                        let size = pattern.len() + extra;
+                        let sequence = &b"ACGTNAC"[..size];
+                        let quality = &b"1234567"[..size];
+                        let start = if end == PrimeEnd::Five { 0 } else { extra };
+                        let marker = |index: usize| {
+                            index
+                                .checked_sub(start)
+                                .and_then(|offset| pattern.as_bytes().get(offset))
+                                .copied()
+                                .unwrap_or(b'X')
+                        };
+                        let select = |source: &[u8], kind| -> Vec<u8> {
+                            source
+                                .iter()
+                                .enumerate()
+                                .filter(|&(index, _)| marker(index) == kind)
+                                .map(|(_, &base)| base)
+                                .collect()
+                        };
+                        let result = StringPattern::parse(&pattern, end)
+                            .unwrap()
+                            .extract_view(sequence, quality)
+                            .unwrap();
+                        assert_eq!(result.umi.as_ref(), select(sequence, b'N'));
+                        assert_eq!(result.umi_quality.as_ref(), select(quality, b'N'));
+                        assert_eq!(result.cell_barcode.as_ref(), select(sequence, b'C'));
+                        assert_eq!(result.trimmed_sequence.as_ref(), select(sequence, b'X'));
+                        assert_eq!(result.trimmed_quality.as_ref(), select(quality, b'X'));
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_valid_pattern() {

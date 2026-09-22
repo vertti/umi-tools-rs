@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write};
 
@@ -5,7 +6,7 @@ use needletail::parser::{FastqReader, FastxReader, SequenceRecord};
 
 use crate::error::ExtractError;
 use crate::fastq::write_fastq_record;
-use crate::pattern::{BarcodePattern, ExtractionResult};
+use crate::pattern::{BarcodePattern, ExtractionView};
 
 /// Returns `true` if any base in `umi_quality` falls below the threshold after
 /// subtracting the encoding offset.
@@ -65,21 +66,16 @@ pub enum EitherReadResolve {
 impl ExtractConfig {
     /// UMI as written to the read name: with `--quality-filter-mask`, bases below the
     /// threshold become `N`.
-    fn final_umi(&self, umi: &[u8], quality: &[u8]) -> Vec<u8> {
+    fn mask_umi(&self, umi: &mut Cow<'_, [u8]>, quality: &[u8]) {
         let Some(mask) = self.quality_filter_mask else {
-            return umi.to_vec();
+            return;
         };
         let offset = self.quality_encoding.offset();
-        umi.iter()
-            .zip(quality)
-            .map(|(&base, &q)| {
-                if q.saturating_sub(offset) < mask {
-                    b'N'
-                } else {
-                    base
-                }
-            })
-            .collect()
+        for (index, &q) in quality.iter().enumerate() {
+            if q.saturating_sub(offset) < mask && umi[index] != b'N' {
+                umi.to_mut()[index] = b'N';
+            }
+        }
     }
 
     /// `--subset-reads`: `umi_tools` stops once the input count exceeds the limit.
@@ -229,24 +225,24 @@ impl Writers<'_> {
 }
 
 #[derive(Default)]
-struct Barcodes {
-    cell: Vec<u8>,
-    umi: Vec<u8>,
-    quality: Vec<u8>,
+struct Barcodes<'a> {
+    cell: Cow<'a, [u8]>,
+    umi: Cow<'a, [u8]>,
+    quality: Cow<'a, [u8]>,
 }
 
-struct TrimmedRead {
-    sequence: Vec<u8>,
-    quality: Vec<u8>,
+struct TrimmedRead<'a> {
+    sequence: Cow<'a, [u8]>,
+    quality: Cow<'a, [u8]>,
 }
 
-struct Extraction {
-    barcodes: Barcodes,
-    read1: Option<TrimmedRead>,
-    read2: Option<TrimmedRead>,
+struct Extraction<'a> {
+    barcodes: Barcodes<'a>,
+    read1: Option<TrimmedRead<'a>>,
+    read2: Option<TrimmedRead<'a>>,
 }
 
-fn split_extraction(result: ExtractionResult) -> (Barcodes, Option<TrimmedRead>) {
+fn split_extraction(result: ExtractionView<'_>) -> (Barcodes<'_>, Option<TrimmedRead<'_>>) {
     (
         Barcodes {
             cell: result.cell_barcode,
@@ -260,21 +256,29 @@ fn split_extraction(result: ExtractionResult) -> (Barcodes, Option<TrimmedRead>)
     )
 }
 
-fn extract_record(
-    record: &SequenceRecord,
+fn extract_record<'a>(
+    record: &'a SequenceRecord,
     pattern: &BarcodePattern,
-) -> Result<ExtractionResult, ExtractError> {
+) -> Result<ExtractionView<'a>, ExtractError> {
     let quality = record
         .qual()
         .ok_or_else(|| ExtractError::FastqParse("missing quality scores in FASTQ record".into()))?;
-    pattern.extract(&record.seq(), quality)
+    pattern.extract_view(record.raw_seq(), quality)
 }
 
-fn extract_combined(
+fn append_barcode<'a>(first: &mut Cow<'a, [u8]>, second: Cow<'a, [u8]>) {
+    if first.is_empty() {
+        *first = second;
+    } else if !second.is_empty() {
+        first.to_mut().extend_from_slice(&second);
+    }
+}
+
+fn extract_combined<'a>(
     config: &ExtractConfig,
-    r1: &SequenceRecord,
-    r2: Option<&SequenceRecord>,
-) -> Result<Extraction, ExtractError> {
+    r1: &'a SequenceRecord,
+    r2: Option<&'a SequenceRecord>,
+) -> Result<Extraction<'a>, ExtractError> {
     let (mut barcodes, read1) = config
         .pattern
         .as_ref()
@@ -288,9 +292,9 @@ fn extract_combined(
         .map(|(pattern, record)| extract_record(record, pattern).map(split_extraction))
         .transpose()?
         .unwrap_or_default();
-    barcodes.cell.extend(second.cell);
-    barcodes.umi.extend(second.umi);
-    barcodes.quality.extend(second.quality);
+    append_barcode(&mut barcodes.cell, second.cell);
+    append_barcode(&mut barcodes.umi, second.umi);
+    append_barcode(&mut barcodes.quality, second.quality);
     Ok(Extraction {
         barcodes,
         read1,
@@ -298,10 +302,10 @@ fn extract_combined(
     })
 }
 
-fn try_extract(
-    record: &SequenceRecord,
+fn try_extract<'a>(
+    record: &'a SequenceRecord,
     pattern: &BarcodePattern,
-) -> Result<Option<ExtractionResult>, ExtractError> {
+) -> Result<Option<ExtractionView<'a>>, ExtractError> {
     match extract_record(record, pattern) {
         Ok(result) => Ok(Some(result)),
         Err(ExtractError::ReadTooShort { .. } | ExtractError::RegexNoMatch) => Ok(None),
@@ -309,12 +313,12 @@ fn try_extract(
     }
 }
 
-fn extract_either(
+fn extract_either<'a>(
     config: &ExtractConfig,
-    r1: &SequenceRecord,
-    r2: &SequenceRecord,
+    r1: &'a SequenceRecord,
+    r2: &'a SequenceRecord,
     stats: &mut ExtractStats,
-) -> Result<Option<Extraction>, ExtractError> {
+) -> Result<Option<Extraction<'a>>, ExtractError> {
     let first = try_extract(
         r1,
         config.pattern.as_ref().expect("validated read1 pattern"),
@@ -329,7 +333,7 @@ fn extract_either(
                 stats.both_matched += 1;
                 return Ok(None);
             }
-            let min_quality = |result: &ExtractionResult| {
+            let min_quality = |result: &ExtractionView| {
                 result
                     .umi_quality
                     .iter()
@@ -390,7 +394,7 @@ fn filter_barcodes(
         stats.quality_filtered += 1;
         return false;
     }
-    barcodes.umi = config.final_umi(&barcodes.umi, &barcodes.quality);
+    config.mask_umi(&mut barcodes.umi, &barcodes.quality);
     let blacklisted = |cell: &[u8]| {
         config
             .blacklist
@@ -402,14 +406,14 @@ fn filter_barcodes(
         return false;
     }
     if let Some(whitelist) = &config.whitelist
-        && !whitelist.contains(&barcodes.cell)
+        && !whitelist.contains(barcodes.cell.as_ref())
     {
         if let Some(corrected) = config
             .correction_map
             .as_ref()
-            .and_then(|map| map.get(&barcodes.cell))
+            .and_then(|map| map.get(barcodes.cell.as_ref()))
         {
-            barcodes.cell.clone_from(corrected);
+            barcodes.cell.to_mut().clone_from(corrected);
         } else {
             stats.whitelist_filtered += 1;
             return false;
@@ -422,13 +426,13 @@ fn filter_barcodes(
     true
 }
 
-fn extract_and_filter(
+fn extract_and_filter<'a>(
     config: &ExtractConfig,
     mode: ExtractMode,
-    r1: &SequenceRecord,
-    r2: Option<&SequenceRecord>,
+    r1: &'a SequenceRecord,
+    r2: Option<&'a SequenceRecord>,
     stats: &mut ExtractStats,
-) -> Result<Option<Extraction>, ExtractError> {
+) -> Result<Option<Extraction<'a>>, ExtractError> {
     let result = match mode {
         ExtractMode::Combine => extract_combined(config, r1, r2).map(Some),
         ExtractMode::EitherRead => {
