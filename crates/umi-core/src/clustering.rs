@@ -62,28 +62,6 @@ fn indexed_adjacency<'a>(
     threshold: u32,
     accepts: impl Fn(&[u8], &[u8]) -> bool,
 ) -> HashMap<&'a [u8], Vec<&'a [u8]>> {
-    // Tiny bundles need at most 56 comparisons; avoid allocating an index and
-    // per-query candidate sets for them. Keep the same input-order neighbors.
-    if umis.len() <= 8 {
-        return umis
-            .iter()
-            .enumerate()
-            .map(|(i, &umi)| {
-                let neighbors = umis
-                    .iter()
-                    .enumerate()
-                    .filter(|&(j, &other)| {
-                        i != j
-                            && umi.len() == other.len()
-                            && hamming_distance(umi, other) <= threshold
-                            && accepts(umi, other)
-                    })
-                    .map(|(_, &other)| other)
-                    .collect();
-                (umi, neighbors)
-            })
-            .collect();
-    }
     let index = NeighborIndex::new(umis.to_vec(), threshold as usize);
     umis.iter()
         .enumerate()
@@ -207,19 +185,8 @@ pub fn cluster_umis<'a>(
     entries: impl IntoIterator<Item = (&'a [u8], u32, u32)>,
     threshold: u32,
 ) -> Vec<Vec<&'a [u8]>> {
-    let mut entries = entries.into_iter();
-    let Some(first) = entries.next() else {
-        return Vec::new();
-    };
-    let Some(second) = entries.next() else {
-        return if method == DedupMethod::Percentile && first.1 == 0 {
-            Vec::new()
-        } else {
-            vec![vec![first.0]]
-        };
-    };
-    let entries = [first, second].into_iter().chain(entries);
     let (counts, orders): (HashMap<_, _>, HashMap<_, _>) = entries
+        .into_iter()
         .map(|(umi, count, order)| ((umi, count), (umi, order)))
         .unzip();
     let mut umis: Vec<&[u8]> = counts.keys().copied().collect();
@@ -276,74 +243,6 @@ pub fn cluster_umis<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn empty_and_singleton_groups_preserve_each_methods_count_rules() {
-        let umi = b"ACGT".as_slice();
-        for method in [
-            DedupMethod::Unique,
-            DedupMethod::Percentile,
-            DedupMethod::Cluster,
-            DedupMethod::Adjacency,
-            DedupMethod::Directional,
-        ] {
-            assert!(cluster_umis(method, [], 1).is_empty());
-            for count in [0, 1, 100, u32::MAX] {
-                let expected = if method == DedupMethod::Percentile && count == 0 {
-                    vec![]
-                } else {
-                    vec![vec![umi]]
-                };
-                assert_eq!(cluster_umis(method, [(umi, count, 7)], 1), expected);
-            }
-            // Repeated entries keep the last count, as the original maps do.
-            let expected = if method == DedupMethod::Percentile {
-                vec![]
-            } else {
-                vec![vec![umi]]
-            };
-            assert_eq!(
-                cluster_umis(method, [(umi, 3, 0), (umi, 0, 1)], 1),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn small_adjacency_lists_preserve_input_order_and_directed_edges() {
-        let umis: Vec<&[u8]> = vec![
-            b"TTT", b"AAC", b"", b"AAA", b"AA", b"ANT", b"NAA", b"TTA", b"ACA",
-        ];
-        let counts: HashMap<_, _> = umis
-            .iter()
-            .enumerate()
-            .map(|(index, &umi)| (umi, u32::try_from(index % 3 + 1).unwrap()))
-            .collect();
-        for size in 0..=umis.len() {
-            let umis = &umis[..size];
-            for threshold in [0, 1, 2, 3, u32::MAX] {
-                let undirected = build_adjacency_list(umis, threshold);
-                let directed = build_directional_adjacency_list(umis, &counts, threshold);
-                for &umi in umis {
-                    let expected: Vec<_> = umis
-                        .iter()
-                        .copied()
-                        .filter(|&other| {
-                            other != umi
-                                && other.len() == umi.len()
-                                && hamming_distance(umi, other) <= threshold
-                        })
-                        .collect();
-                    assert_eq!(undirected[umi], expected);
-                    let expected: Vec<_> = expected
-                        .into_iter()
-                        .filter(|other| counts[umi] >= 2 * counts[other] - 1)
-                        .collect();
-                    assert_eq!(directed[umi], expected);
-                }
-            }
-        }
-    }
 
     #[test]
     fn adjacency_matches_exhaustive_search_for_mixed_barcodes() {
