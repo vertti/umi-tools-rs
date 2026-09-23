@@ -9,10 +9,12 @@ use rust_htslib::errors::Error as HtsError;
 /// Assign an auxiliary field, replacing an existing value as pysam's `set_tag` does.
 pub(crate) fn set_aux(record: &mut Record, tag: &[u8], value: Aux<'_>) -> Result<(), HtsError> {
     match record.remove_aux(tag) {
-        Ok(()) | Err(HtsError::BamAuxTagNotFound) => {}
-        Err(error) => return Err(error),
+        // Keep the duplicate check when a tag was removed: malformed input could
+        // have another copy. A missing tag was already proven absent by the scan.
+        Ok(()) => record.push_aux(tag, value),
+        Err(HtsError::BamAuxTagNotFound) => record.push_aux_unchecked(tag, value),
+        Err(error) => Err(error),
     }
-    record.push_aux(tag, value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -276,6 +278,32 @@ fn coordinate_sorted_header_text(text: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setting_aux_adds_and_replaces_without_changing_other_tags() {
+        let mut record = Record::new();
+        record.push_aux(b"XX", Aux::String("keep")).unwrap();
+        set_aux(&mut record, b"UG", Aux::U32(42)).unwrap();
+        set_aux(&mut record, b"BX", Aux::String("ACGT")).unwrap();
+        set_aux(&mut record, b"UG", Aux::U32(7)).unwrap();
+        set_aux(&mut record, b"BX", Aux::String("T")).unwrap();
+        assert_eq!(record.aux(b"XX").unwrap(), Aux::String("keep"));
+        assert_eq!(record.aux(b"UG").unwrap(), Aux::U32(7));
+        assert_eq!(record.aux(b"BX").unwrap(), Aux::String("T"));
+        assert_eq!(record.aux_iter().count(), 3);
+        assert!(set_aux(&mut record, b"U", Aux::U32(1)).is_err());
+    }
+
+    #[test]
+    fn setting_aux_still_rejects_duplicate_existing_tags() {
+        let mut record = Record::new();
+        record.push_aux_unchecked(b"UG", Aux::U32(1)).unwrap();
+        record.push_aux_unchecked(b"UG", Aux::U32(2)).unwrap();
+        assert!(matches!(
+            set_aux(&mut record, b"UG", Aux::U32(3)),
+            Err(HtsError::BamAuxTagAlreadyPresent)
+        ));
+    }
 
     #[test]
     fn parse_is_case_insensitive() {
