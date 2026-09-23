@@ -1,4 +1,4 @@
-"""Compressed output must report failures, including at finalization."""
+"""Gzip streams preserve content and report input and output failures."""
 
 import gzip
 import resource
@@ -8,6 +8,51 @@ import subprocess
 import pytest
 
 from .test_alignment_regressions import write_bam
+
+
+@pytest.mark.parametrize("split_members", [False, True])
+def test_extract_reads_gzip_members_including_empty_members(rust_binary, tmp_path, split_members):
+    data = b"@r1\nAATT\n+\nIIII\n@r2\nCCGG\n+\nJJJJ\n"
+    parts = [data[:7], b"", data[7:]] if split_members else [data]
+    source = tmp_path / "input.fastq.gz"
+    source.write_bytes(b"".join(gzip.compress(part) for part in parts))
+    result = subprocess.run(
+        [str(rust_binary), "extract", "--bc-pattern=NN", "--stdin", str(source)],
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == b"@r1_AA\nTT\n+\nII\n@r2_CC\nGG\n+\nJJ\n"
+
+
+@pytest.mark.parametrize("damage", ["crc", "size", "truncated"])
+@pytest.mark.parametrize("after_valid_member", [False, True])
+def test_extract_rejects_damaged_gzip_members(rust_binary, tmp_path, damage, after_valid_member):
+    member = bytearray(gzip.compress(b"@r\nAATT\n+\nIIII\n"))
+    if damage == "truncated":
+        del member[-4:]
+    else:
+        member[-8 if damage == "crc" else -4] ^= 1
+    prefix = gzip.compress(b"@first\nCCGG\n+\nIIII\n") if after_valid_member else b""
+    source = tmp_path / "input.fastq.gz"
+    source.write_bytes(prefix + member)
+    result = subprocess.run(
+        [str(rust_binary), "extract", "--bc-pattern=NN", "--stdin", str(source)],
+        capture_output=True,
+    )
+    assert result.returncode != 0, "damaged gzip input must not be reported as success"
+    assert b"Error:" in result.stderr
+
+
+@pytest.mark.parametrize("level", [1, 3, 9])
+def test_gzip_output_decodes_with_python_at_each_level(rust_binary, tmp_path, level):
+    output = tmp_path / "output.fastq.gz"
+    result = subprocess.run(
+        [str(rust_binary), "extract", "--bc-pattern=NN", "--compresslevel", str(level),
+         "--stdout", str(output)],
+        input=b"@r\nAATT\n+\nIIII\n", capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert gzip.decompress(output.read_bytes()) == b"@r_AA\nTT\n+\nII\n"
 
 
 @pytest.mark.parametrize("command,options,data", [
