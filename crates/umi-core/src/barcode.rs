@@ -64,14 +64,23 @@ impl BarcodeExtractor {
     pub fn extract(&self, record: &Record) -> Result<Barcode, BarcodeError> {
         match &self.source {
             BarcodeSource::ReadId { separator } => {
-                let fields = split_all(record.qname(), separator);
-                let umi = fields[fields.len() - 1].to_vec();
+                let (umi, cell) = if let [separator] = separator.as_slice() {
+                    // Read only the trailing barcode fields for the usual single-byte separator.
+                    let mut fields = record.qname().rsplit(|base| base == separator);
+                    let umi = fields.next().unwrap_or_default();
+                    let cell = if self.per_cell { fields.next() } else { None };
+                    (umi, cell)
+                } else {
+                    // Overlapping multibyte separators must keep Python's left-to-right split.
+                    let fields = split_all(record.qname(), separator);
+                    (
+                        fields[fields.len() - 1],
+                        fields.len().checked_sub(2).map(|i| fields[i]),
+                    )
+                };
+                let umi = umi.to_vec();
                 let cell = if self.per_cell {
-                    fields
-                        .len()
-                        .checked_sub(2)
-                        .map(|i| fields[i].to_vec())
-                        .ok_or_else(|| malformed(record))?
+                    cell.map(<[u8]>::to_vec).ok_or_else(|| malformed(record))?
                 } else {
                     Vec::new()
                 };
@@ -218,6 +227,50 @@ mod tests {
             cell_tag: Some(b"CB".to_vec()),
             cell_split: opt(cell_split),
             cell_delimiter: None,
+        }
+    }
+
+    #[test]
+    fn read_id_extraction_preserves_empty_and_overlapping_separator_fields() {
+        for length in 1..=5 {
+            for mut code in 0..3usize.pow(length) {
+                let name: String = (0..length)
+                    .map(|_| {
+                        let base = char::from(b"a:_"[code % 3]);
+                        code /= 3;
+                        base
+                    })
+                    .collect();
+                let record = read(&name, "");
+                for separator in ["_", ":", "::", "aa", "a:a", ""] {
+                    let fields: Vec<_> = if separator.is_empty() {
+                        vec![name.as_str()]
+                    } else {
+                        name.split(separator).collect()
+                    };
+                    for per_cell in [false, true] {
+                        let extractor = BarcodeExtractor {
+                            source: BarcodeSource::ReadId {
+                                separator: separator.as_bytes().to_vec(),
+                            },
+                            per_cell,
+                        };
+                        let result = extractor.extract(&record);
+                        if per_cell && fields.len() < 2 {
+                            assert!(matches!(result, Err(BarcodeError::Malformed(_))));
+                        } else {
+                            let barcode = result.unwrap();
+                            assert_eq!(barcode.umi, fields.last().unwrap().as_bytes());
+                            let cell = if per_cell {
+                                fields[fields.len() - 2].as_bytes()
+                            } else {
+                                b""
+                            };
+                            assert_eq!(barcode.cell, cell);
+                        }
+                    }
+                }
+            }
         }
     }
 
