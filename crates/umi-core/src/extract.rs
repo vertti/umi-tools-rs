@@ -134,7 +134,8 @@ fn build_read_name(
     umi: &[u8],
     separator: &[u8],
     strip_suffixes: bool,
-) -> Vec<u8> {
+    out: &mut Vec<u8>,
+) {
     let (name, comment) = header
         .iter()
         .position(|&b| b == b' ')
@@ -146,7 +147,8 @@ fn build_read_name(
         name
     };
 
-    let mut out = Vec::with_capacity(header.len() + 2 * separator.len() + cell.len() + umi.len());
+    out.clear();
+    out.reserve(header.len() + 2 * separator.len() + cell.len() + umi.len());
     out.extend_from_slice(name);
     if !cell.is_empty() {
         out.extend_from_slice(separator);
@@ -157,7 +159,6 @@ fn build_read_name(
     if let Some(c) = comment {
         out.extend_from_slice(c);
     }
-    out
 }
 
 /// Whether to combine barcodes from the supplied patterns or choose either read.
@@ -193,6 +194,8 @@ struct Writers<'a> {
     read2: Output<'a>,
     filtered1: Output<'a>,
     filtered2: Output<'a>,
+    header1: Vec<u8>,
+    header2: Vec<u8>,
 }
 
 impl<'a> From<ExtractOutputs<'a>> for Writers<'a> {
@@ -203,6 +206,8 @@ impl<'a> From<ExtractOutputs<'a>> for Writers<'a> {
             read2: outputs.read2.map(buffer),
             filtered1: outputs.filtered1.map(buffer),
             filtered2: outputs.filtered2.map(buffer),
+            header1: Vec::new(),
+            header2: Vec::new(),
         }
     }
 }
@@ -474,16 +479,16 @@ fn write_output(
     Ok(())
 }
 
-fn filtered_header(header: &[u8], strip_suffixes: bool) -> Vec<u8> {
+fn filtered_header(header: &[u8], strip_suffixes: bool, result: &mut Vec<u8>) {
     let name = read_name(header);
-    let mut result = if strip_suffixes {
+    let stripped = if strip_suffixes {
         strip_pair_suffix(name)
     } else {
         name
-    }
-    .to_vec();
+    };
+    result.clear();
+    result.extend_from_slice(stripped);
     result.extend_from_slice(&header[name.len()..]);
-    result
 }
 
 fn process_records(
@@ -495,41 +500,48 @@ fn process_records(
     writers: &mut Writers<'_>,
 ) -> Result<(), ExtractError> {
     let Some(extraction) = extract_and_filter(config, mode, r1, r2, stats)? else {
-        write_output(
-            &mut writers.filtered1,
-            r1,
-            &filtered_header(r1.id(), config.ignore_read_pair_suffixes),
-            None,
-        )?;
+        filtered_header(
+            r1.id(),
+            config.ignore_read_pair_suffixes,
+            &mut writers.header1,
+        );
+        write_output(&mut writers.filtered1, r1, &writers.header1, None)?;
         if let Some(r2) = r2 {
-            write_output(
-                &mut writers.filtered2,
-                r2,
-                &filtered_header(r2.id(), config.ignore_read_pair_suffixes),
-                None,
-            )?;
+            filtered_header(
+                r2.id(),
+                config.ignore_read_pair_suffixes,
+                &mut writers.header2,
+            );
+            write_output(&mut writers.filtered2, r2, &writers.header2, None)?;
         }
         return Ok(());
     };
-    let header = |record: &SequenceRecord| {
+    let header = |record: &SequenceRecord, buffer: &mut Vec<u8>| {
         build_read_name(
             record.id(),
             &extraction.barcodes.cell,
             &extraction.barcodes.umi,
             &config.umi_separator,
             config.ignore_read_pair_suffixes,
-        )
+            buffer,
+        );
     };
-    let id1 = header(r1);
-    write_output(&mut writers.read1, r1, &id1, extraction.read1.as_ref())?;
+    header(r1, &mut writers.header1);
+    write_output(
+        &mut writers.read1,
+        r1,
+        &writers.header1,
+        extraction.read1.as_ref(),
+    )?;
     if let Some(r2) = r2 {
         // Python's either-read mode copies the entire read1 header to read2.
         let id2 = if mode == ExtractMode::EitherRead {
-            id1
+            &writers.header1
         } else {
-            header(r2)
+            header(r2, &mut writers.header2);
+            &writers.header2
         };
-        write_output(&mut writers.read2, r2, &id2, extraction.read2.as_ref())?;
+        write_output(&mut writers.read2, r2, id2, extraction.read2.as_ref())?;
     }
     stats.output_reads += 1;
     Ok(())
@@ -722,4 +734,42 @@ pub fn extract_reads_either_read<
         Some(input2),
         ExtractOutputs::paired(output1, output2),
     )
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[test]
+    fn headers_reuse_storage_without_retaining_previous_barcodes_or_comments() {
+        let mut buffer = Vec::with_capacity(1024);
+        let allocation = buffer.as_ptr();
+        for (header, cell, umi, separator, strip, expected) in [
+            (
+                b"read/1 comment".as_slice(),
+                b"AC".as_slice(),
+                b"GT".as_slice(),
+                b"::".as_slice(),
+                true,
+                b"read::AC::GT comment".as_slice(),
+            ),
+            (b"r/2", b"", b"A", b"_", false, b"r/2_A"),
+            (
+                b"other/2 two words",
+                b"C",
+                b"T",
+                b"",
+                true,
+                b"otherCT two words",
+            ),
+        ] {
+            build_read_name(header, cell, umi, separator, strip, &mut buffer);
+            assert_eq!(buffer, expected);
+            assert_eq!(
+                buffer.as_ptr(),
+                allocation,
+                "reallocated despite sufficient capacity"
+            );
+        }
+    }
 }
