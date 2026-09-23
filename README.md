@@ -8,16 +8,16 @@ A drop-in replacement for [UMI-tools](https://github.com/CGATOxford/UMI-tools), 
 
 ## Performance
 
-Measured for v2.0.0 with [hyperfine](https://github.com/sharkdp/hyperfine) against UMI-tools 1.1.6 on the bundled benchmark inputs:
+Measured after v2.0.0 ([commit 7c36cb7](https://github.com/vertti/umi-tools-rs/commit/7c36cb7)) with [hyperfine](https://github.com/sharkdp/hyperfine) against UMI-tools 1.1.6 on the bundled benchmark inputs:
 
 | Command | Speedup |
 |:--------|--------:|
-| `extract` | **13.2–33.7x** |
-| `whitelist` | **31.6x** |
-| `dedup` | **34.6x** |
-| `group` | **14.1x** |
-| `count` | **80.1x** |
-| `count_tab` | **76.2x** |
+| `extract` | **16.1–37.7x** |
+| `whitelist` | **30.5x** |
+| `dedup` | **37.5x** |
+| `group` | **15.7x** |
+| `count` | **90.3x** |
+| `count_tab` | **68.5x** |
 
 These are end-to-end command timings, including process startup. Speedups depend on input size and workload; the short count benchmarks have higher timing variability.
 
