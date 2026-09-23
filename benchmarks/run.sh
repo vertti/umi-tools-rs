@@ -15,8 +15,9 @@ if [[ ! -x "$RUST_BIN" ]]; then
     exit 1
 fi
 
-UMI_TOOLS="uv run --group bench umi_tools"
-if ! $UMI_TOOLS --version &>/dev/null; then
+# Resolve the locked environment once; time the executable, not the uv launcher.
+UMI_TOOLS="$(uv run --locked --group bench python -c 'import shutil; print(shutil.which("umi_tools"))')"
+if ! "$UMI_TOOLS" --version &>/dev/null; then
     echo "ERROR: umi_tools not available via uv"
     exit 1
 fi
@@ -30,7 +31,7 @@ fi
 echo ""
 echo "Versions:"
 echo "  umi-tools-rs: $("$RUST_BIN" --version 2>&1 || echo 'unknown')"
-echo "  umi_tools:    $($UMI_TOOLS --version 2>&1 || echo 'unknown')"
+echo "  umi_tools:    $("$UMI_TOOLS" --version 2>&1 || echo 'unknown')"
 echo "  hyperfine:    $(hyperfine --version)"
 echo ""
 
@@ -49,7 +50,7 @@ run_benchmark() {
         --command-name "umi-tools-rs" \
         "$RUST_BIN extract --bc-pattern=$PATTERN --stdin=$input --stdout=/dev/null" \
         --command-name "umi_tools (python)" \
-        "$UMI_TOOLS extract --bc-pattern=$PATTERN --stdin=$input --stdout=/dev/null --log=/dev/null"
+        "\"$UMI_TOOLS\" extract --bc-pattern=$PATTERN --stdin=$input --stdout=/dev/null --log=/dev/null"
 
     echo ""
 }
@@ -80,7 +81,7 @@ if [[ -f "$CHR19_BAM" ]]; then
             --command-name "umi-tools-rs" \
             "$RUST_BIN dedup --method=$method --out-sam --random-seed=123456789 --stdin=$CHR19_BAM > /dev/null" \
             --command-name "umi_tools (python)" \
-            "$UMI_TOOLS dedup --method=$method --out-sam --random-seed=123456789 --stdin=$CHR19_BAM --stdout=/dev/null --log=/dev/null"
+            "\"$UMI_TOOLS\" dedup --method=$method --out-sam --random-seed=123456789 --stdin=$CHR19_BAM --stdout=/dev/null --log=/dev/null"
 
         echo ""
     }
@@ -100,7 +101,7 @@ if [[ -f "$CHR19_BAM" ]]; then
         --command-name "umi-tools-rs" \
         "$RUST_BIN group --method=directional --output-bam --stdin=$CHR19_BAM > /dev/null" \
         --command-name "umi_tools (python)" \
-        "$UMI_TOOLS group --method=directional --output-bam --stdin=$CHR19_BAM --stdout=/dev/null --log=/dev/null"
+        "\"$UMI_TOOLS\" group --method=directional --output-bam --stdin=$CHR19_BAM --stdout=/dev/null --log=/dev/null"
 
     echo ""
 
@@ -121,7 +122,7 @@ if [[ -f "$CHR19_BAM" ]]; then
             --command-name "umi-tools-rs" \
             "$RUST_BIN count --method=directional --gene-tag=XF --skip-tags-regex='^[__|Unassigned]' --extract-umi-method=umis --stdin=$CHR19_GENE_BAM > /dev/null" \
             --command-name "umi_tools (python)" \
-            "$UMI_TOOLS count --method=directional --gene-tag=XF --skip-tags-regex='^[__|Unassigned]' --extract-umi-method=umis --stdin=$CHR19_GENE_BAM --stdout=/dev/null --log=/dev/null"
+            "\"$UMI_TOOLS\" count --method=directional --gene-tag=XF --skip-tags-regex='^[__|Unassigned]' --extract-umi-method=umis --stdin=$CHR19_GENE_BAM --stdout=/dev/null --log=/dev/null"
 
         echo ""
     else
@@ -140,7 +141,7 @@ if [[ -f "$CHR19_BAM" ]]; then
             --command-name "umi-tools-rs" \
             "$RUST_BIN count_tab --stdin=$CHR19_GENE_TSV > /dev/null" \
             --command-name "umi_tools (python)" \
-            "$UMI_TOOLS count_tab --stdin=$CHR19_GENE_TSV --stdout=/dev/null --log=/dev/null"
+            "\"$UMI_TOOLS\" count_tab --stdin=$CHR19_GENE_TSV --stdout=/dev/null --log=/dev/null"
 
         echo ""
     else
@@ -167,7 +168,7 @@ if [[ -f "$FASTQ_100K" ]]; then
         --command-name "umi-tools-rs" \
         "$RUST_BIN whitelist --bc-pattern=$PATTERN --stdin=$FASTQ_100K --stdout=/dev/null" \
         --command-name "umi_tools (python)" \
-        "$UMI_TOOLS whitelist --bc-pattern=$PATTERN --stdin=$FASTQ_100K --stdout=/dev/null --log=/dev/null"
+        "\"$UMI_TOOLS\" whitelist --bc-pattern=$PATTERN --stdin=$FASTQ_100K --stdout=/dev/null --log=/dev/null"
 
     echo ""
 fi
