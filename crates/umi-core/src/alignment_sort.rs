@@ -250,7 +250,7 @@ mod tests {
             .flatten()
             .map(|run| run.path.to_path_buf())
             .collect();
-        assert!(!paths.is_empty());
+        assert_ne!(paths.len(), 0);
         expected.sort_by_key(coordinate_sort_key);
         let mut actual = Vec::new();
         sorter
