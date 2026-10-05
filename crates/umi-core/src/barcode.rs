@@ -324,7 +324,7 @@ mod tests {
             .extract(&read("r", "\tRX:Z:GT-GACC\tCB:Z:ACAAGG-1"))
             .unwrap();
         assert_eq!(barcode.umi, b"GT");
-        assert!(barcode.cell.is_empty());
+        assert_eq!(barcode.cell, b"");
     }
 
     #[test]
@@ -358,7 +358,7 @@ mod tests {
         };
         let barcode = single.extract(&read(name, "")).unwrap();
         assert_eq!(barcode.umi, b"GTGACC");
-        assert!(barcode.cell.is_empty());
+        assert_eq!(barcode.cell, b"");
         let per_cell = BarcodeExtractor {
             source: BarcodeSource::Umis,
             per_cell: true,
@@ -380,7 +380,7 @@ mod tests {
             .for_grouping(&read("a:b:c:d:e:f:g:CELL_AC:UMI_GT", ""), true)
             .unwrap()
             .unwrap();
-        assert!(barcode.umi.is_empty());
+        assert_eq!(barcode.umi, b"");
         assert_eq!(barcode.cell, b"AC");
     }
 }

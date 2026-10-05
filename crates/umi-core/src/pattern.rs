@@ -529,7 +529,7 @@ mod tests {
         let pat = StringPattern::parse("NNNXXXXNN", PrimeEnd::Five).unwrap();
         assert_eq!(pat.umi_positions, vec![0, 1, 2, 7, 8]);
         assert_eq!(pat.sample_positions, vec![3, 4, 5, 6]);
-        assert!(pat.cell_positions.is_empty());
+        assert_eq!(pat.cell_positions, []);
         assert_eq!(pat.pattern_length, 9);
     }
 
@@ -557,7 +557,7 @@ mod tests {
 
         assert_eq!(result.umi, b"CAGAA");
         assert_eq!(result.umi_quality, b"1=DHH");
-        assert!(result.cell_barcode.is_empty());
+        assert_eq!(result.cell_barcode, b"");
         assert_eq!(result.trimmed_sequence, b"GTTCTCTCGGTGGGACCTC");
         assert_eq!(result.trimmed_quality, b"FFFFHHHJJJFGIJIJJIJ");
     }
