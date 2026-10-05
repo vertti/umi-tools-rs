@@ -122,6 +122,7 @@ impl PythonRandom {
 
 impl TieBreakRng for PythonRandom {
     /// `CPython` `genrand_res53`: 53-bit precision float in `[0, 1)`.
+    #[allow(clippy::suboptimal_flops)]
     fn random(&mut self) -> f64 {
         let a = self.next_u32() >> 5;
         let b = self.next_u32() >> 6;
