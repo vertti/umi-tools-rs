@@ -244,6 +244,66 @@ pub fn cluster_umis<'a>(
 mod tests {
     use super::*;
 
+    fn rescanning_min_set_cover<'a>(
+        cluster: &[&'a [u8]],
+        adj_list: &HashMap<&'a [u8], Vec<&'a [u8]>>,
+        counts: &HashMap<&[u8], u32>,
+    ) -> Vec<&'a [u8]> {
+        let mut sorted_nodes = cluster.to_vec();
+        sorted_nodes.sort_by(|a, b| counts[*b].cmp(&counts[*a]).then_with(|| a.cmp(b)));
+        for i in 0..sorted_nodes.len() - 1 {
+            let selected = &sorted_nodes[..=i];
+            let covered: HashSet<&[u8]> = selected
+                .iter()
+                .flat_map(|&node| std::iter::once(node).chain(adj_list[node].iter().copied()))
+                .collect();
+            if cluster.iter().all(|node| covered.contains(node)) {
+                return selected.to_vec();
+            }
+        }
+        sorted_nodes
+    }
+
+    #[test]
+    fn min_set_cover_matches_rescanning_reference() {
+        for size in [1_usize, 2, 3, 50, 500] {
+            let names: Vec<Vec<u8>> = (0..size).map(|i| format!("{i:04}").into_bytes()).collect();
+            let nodes: Vec<&[u8]> = names.iter().map(Vec::as_slice).collect();
+            let neighbours_by_shape: [&dyn Fn(usize) -> Vec<usize>; 4] = [
+                &|i| {
+                    [i.wrapping_sub(1), i + 1]
+                        .into_iter()
+                        .filter(|&j| j < size)
+                        .collect()
+                },
+                &|i| if i == 0 { (1..size).collect() } else { vec![0] },
+                &|i| (0..size).filter(|&j| j != i).collect(),
+                &|_| Vec::new(),
+            ];
+            for neighbours in neighbours_by_shape {
+                let adj_list: HashMap<&[u8], Vec<&[u8]>> = (0..size)
+                    .map(|i| {
+                        (
+                            nodes[i],
+                            neighbours(i).into_iter().map(|j| nodes[j]).collect(),
+                        )
+                    })
+                    .collect();
+                for count_of in [
+                    |_: usize| 1_u32,
+                    |i: usize| u32::try_from(i % 7 + 1).unwrap(),
+                ] {
+                    let counts: HashMap<&[u8], u32> =
+                        (0..size).map(|i| (nodes[i], count_of(i))).collect();
+                    assert_eq!(
+                        min_set_cover(&nodes, &adj_list, &counts),
+                        rescanning_min_set_cover(&nodes, &adj_list, &counts)
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn adjacency_matches_exhaustive_search_for_mixed_barcodes() {
         let mut sequences = std::collections::BTreeSet::from([Vec::new(), b"AAAAA".to_vec()]);
