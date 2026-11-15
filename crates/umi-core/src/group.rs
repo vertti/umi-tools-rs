@@ -112,8 +112,7 @@ impl<K: Ord + Clone> GroupBuffer<K> {
         self.insertion_counters.remove(key);
         self.groups
             .remove(key)
-            .map(|key_map| BTreeMap::from([(key.clone(), key_map)]))
-            .unwrap_or_default()
+            .map_or_default(|key_map| BTreeMap::from([(key.clone(), key_map)]))
     }
 
     fn drain_all(&mut self) -> Drained<K> {
@@ -174,10 +173,9 @@ fn process_drained<K: Ord>(
                             // umi_tools prints the contig, not the mapped gene, for --per-contig.
                             let gene_label = match assigner {
                                 Some(assigner) if assigner.per_contig() => contig_name.to_string(),
-                                Some(assigner) => assigner
-                                    .gene(&record)
-                                    .map(|gene| String::from_utf8_lossy(&gene).into_owned())
-                                    .unwrap_or_default(),
+                                Some(assigner) => assigner.gene(&record).map_or_default(|gene| {
+                                    String::from_utf8_lossy(&gene).into_owned()
+                                }),
                                 None => "NA".to_string(),
                             };
 
