@@ -905,7 +905,7 @@ impl StatsCollector {
         // Post-dedup edit distance from the actual output records' UMIs
         let post_umis: Vec<Vec<u8>> = selected_records
             .iter()
-            .map(|r| barcode.extract(r).map(|b| b.umi).unwrap_or_default())
+            .map(|r| barcode.extract(r).map_or_default(|b| b.umi))
             .collect();
         let post_refs: Vec<&[u8]> = post_umis.iter().map(Vec::as_slice).collect();
         let avg_post = get_average_umi_distance(&post_refs);
