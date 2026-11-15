@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: CGATOxford/UMI-tools
-          ref: c457eefc5e0c47368cf3652b9b6d497b78c3050a
+          ref: 79d8b818676c1e7fb6c5a620e4cb24b372d03eea
           path: umi-tools
       - uses: jdx/mise-action@v5
         with:
