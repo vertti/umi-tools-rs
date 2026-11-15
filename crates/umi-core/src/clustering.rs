@@ -145,25 +145,17 @@ fn min_set_cover<'a>(
     let mut sorted_nodes: Vec<&'a [u8]> = cluster.to_vec();
     // Sort by count desc, lex asc (BFS output is lex-sorted; Python's stable sort preserves that)
     sorted_nodes.sort_by(|a, b| counts[*b].cmp(&counts[*a]).then_with(|| a.cmp(b)));
-    for i in 0..sorted_nodes.len() - 1 {
-        let selected = &sorted_nodes[..=i];
-        // Compute covered nodes: selected nodes + their neighbors
-        let mut covered: HashSet<&[u8]> = HashSet::new();
-        for &s in selected {
-            covered.insert(s);
-            if let Some(neighbors) = adj_list.get(s) {
-                for &n in neighbors {
-                    covered.insert(n);
-                }
-            }
+    let mut uncovered: HashSet<&[u8]> = cluster.iter().copied().collect();
+    for (i, &node) in sorted_nodes[..sorted_nodes.len() - 1].iter().enumerate() {
+        uncovered.remove(node);
+        for neighbor in adj_list.get(node).into_iter().flatten() {
+            uncovered.remove(neighbor);
         }
-        // Check if all cluster nodes are covered
-        let remaining: usize = cluster.iter().filter(|n| !covered.contains(*n)).count();
-        if remaining == 0 {
-            return selected.to_vec();
+        if uncovered.is_empty() {
+            sorted_nodes.truncate(i + 1);
+            break;
         }
     }
-    // Fallback: all nodes (shouldn't reach here for valid inputs)
     sorted_nodes
 }
 
