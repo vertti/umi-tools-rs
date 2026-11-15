@@ -21,6 +21,13 @@ jobs:
         env:
           MISE_AUTO_INSTALL: "false"
 
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install 1.98 --profile minimal
+      - run: cargo +1.98 build --locked --workspace
+
   compat:
     runs-on: ubuntu-latest
     steps:
