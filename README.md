@@ -33,7 +33,7 @@ cargo install umi-tools-rs
 
 ### Bioconda
 
-Community-maintained [Bioconda packages](https://anaconda.org/bioconda/umi-tools-rs/files) are available for Linux x86_64 and Intel macOS:
+Community-maintained [Bioconda packages](https://anaconda.org/bioconda/umi-tools-rs/files) are available for Linux (x86_64 and aarch64) and macOS (Apple Silicon and Intel):
 
 ```sh
 conda create -n umi-tools-rs --override-channels \
@@ -41,7 +41,7 @@ conda create -n umi-tools-rs --override-channels \
 conda activate umi-tools-rs
 ```
 
-Bioconda versions may lag behind GitHub releases. For native Apple Silicon builds, use the prebuilt binaries below or install from crates.io.
+Bioconda versions may lag behind GitHub releases.
 
 ### Prebuilt binaries
 
