@@ -10,7 +10,7 @@ use flate2::write::GzEncoder;
 fn is_gzipped(path: &str) -> bool {
     Path::new(path)
         .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz") || ext.eq_ignore_ascii_case("z"))
 }
 
 pub fn open_input(path: Option<&str>) -> Result<Box<dyn Read + Send>> {
@@ -91,4 +91,19 @@ pub fn finish_outputs(outputs: impl IntoIterator<Item = Option<Output>>) -> io::
         output.finish()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_gzipped;
+
+    #[test]
+    fn gzip_is_recognised_by_the_gz_and_z_suffixes() {
+        for path in ["reads.fq.gz", "reads.fq.GZ", "reads.fq.z", "reads.fq.Z"] {
+            assert!(is_gzipped(path), "{path}");
+        }
+        for path in ["reads.fq", "reads.gz.fq", "gz", "z"] {
+            assert!(!is_gzipped(path), "{path}");
+        }
+    }
 }
