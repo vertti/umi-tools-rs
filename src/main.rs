@@ -1449,10 +1449,7 @@ fn run_whitelist_cmd(args: &WhitelistArgs) -> Result<String> {
         expect_cells: args.expect_cells,
         error_correct_threshold: args.error_correct_threshold,
         ed_above_threshold: ed_above,
-        subset_reads: match args.subset_reads {
-            0 => usize::MAX,
-            limit => limit,
-        },
+        subset_reads: args.subset_reads,
     };
 
     let reader = open_input(args.input.as_deref())?;
