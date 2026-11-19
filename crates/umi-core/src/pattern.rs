@@ -240,6 +240,170 @@ impl StringPattern {
 #[derive(Debug, Clone)]
 pub struct RegexPattern {
     pattern: regex::Regex,
+    relaxed: Option<RelaxedPattern>,
+}
+
+/// The pattern with each fuzzy group widened to any text of its length.
+///
+/// Resolving captures with the exact pattern, an alternation over every choice of
+/// substituted positions, is slow. The widened match is the fuzzy match whenever its
+/// groups are within their substitution limits. Otherwise the groups are pinned to the
+/// only places they fit, and the exact pattern is left for reads where they fit in several.
+#[derive(Debug, Clone)]
+struct RelaxedPattern {
+    pattern: regex::Regex,
+    /// As `pattern`, with group N starting on the byte N + 1 instead of any character.
+    pinned: regex::Regex,
+    groups: Vec<WidenedGroup>,
+}
+
+#[derive(Debug, Clone)]
+struct WidenedGroup {
+    capture: String,
+    accepted_bytes: Vec<[bool; 128]>,
+    limit: usize,
+}
+
+enum Placements {
+    Impossible,
+    Unique(Vec<usize>),
+    Ambiguous,
+}
+
+impl RelaxedPattern {
+    const MAX_GROUPS: usize = 8;
+
+    /// `None` without fuzzy groups, or when one of them does not take part in every match.
+    fn parse(pattern_str: &str) -> Result<Option<Self>, ExtractError> {
+        let mut groups = Vec::new();
+        let mut pins = Vec::new();
+        let mut all_required = true;
+        let rewritten = rewrite_fuzzy(pattern_str, &mut |group, limit, required| {
+            let (header, items) = fuzzy_group_items(group)?;
+            if limit >= items.len() {
+                return Ok(format!("({header}.{{{}}})", items.len()));
+            }
+            all_required &= required;
+            let capture = format!("__fuzzy_{}", groups.len());
+            let widened = format!("(?P<{capture}>.{{{}}})", items.len());
+            pins.push((
+                widened.clone(),
+                format!(
+                    "(?P<{capture}>\\x{:02x}.{{{}}})",
+                    groups.len() + 1,
+                    items.len() - 1
+                ),
+            ));
+            groups.push(WidenedGroup {
+                capture,
+                accepted_bytes: items
+                    .iter()
+                    .map(|item| accepted_bytes(item))
+                    .collect::<Result<_, _>>()?,
+                limit,
+            });
+            Ok(format!("({header}{widened})"))
+        })?;
+        if groups.is_empty()
+            || groups.len() > Self::MAX_GROUPS
+            || !all_required
+            || rewritten.alternates_at_top_level
+        {
+            return Ok(None);
+        }
+        let compile = |pattern: &str| {
+            regex::Regex::new(pattern)
+                .map_err(|e| ExtractError::InvalidPattern(format!("invalid regex: {e}")))
+        };
+        let pinned = pins
+            .iter()
+            .fold(rewritten.pattern.clone(), |pattern, (widened, pinned)| {
+                pattern.replace(widened, pinned)
+            });
+        Ok(Some(Self {
+            pattern: compile(&rewritten.pattern)?,
+            pinned: compile(&pinned)?,
+            groups,
+        }))
+    }
+
+    fn within_limits(&self, captures: &regex::Captures) -> bool {
+        self.groups.iter().all(|group| {
+            captures
+                .name(&group.capture)
+                .is_some_and(|text| group.accepts(text.as_str().as_bytes()))
+        })
+    }
+
+    fn placements(&self, sequence: &[u8]) -> Placements {
+        let mut starts = Vec::with_capacity(self.groups.len());
+        for group in &self.groups {
+            let mut fits = sequence
+                .windows(group.accepted_bytes.len())
+                .enumerate()
+                .filter(|(_, window)| group.accepts(window))
+                .map(|(start, _)| start);
+            match (fits.next(), fits.next()) {
+                (None, _) => return Placements::Impossible,
+                (Some(start), None) => starts.push(start),
+                (Some(_), Some(_)) => return Placements::Ambiguous,
+            }
+        }
+        Placements::Unique(starts)
+    }
+
+    /// `sequence` with the byte N + 1 where group N starts.
+    fn pin(sequence: &str, starts: &[usize]) -> Option<String> {
+        let mut pinned = sequence.as_bytes().to_vec();
+        for (marker, &start) in (1_u8..).zip(starts) {
+            pinned[start] = marker;
+        }
+        String::from_utf8(pinned).ok()
+    }
+}
+
+impl WidenedGroup {
+    fn accepts(&self, text: &[u8]) -> bool {
+        text.len() == self.accepted_bytes.len()
+            && text
+                .iter()
+                .zip(&self.accepted_bytes)
+                .filter(|&(&byte, accepted)| !accepted.get(usize::from(byte)).is_some_and(|&ok| ok))
+                .count()
+                <= self.limit
+    }
+}
+
+type GroupSpan<'p> = (&'p str, usize, usize);
+
+/// Spans of the named groups in the match of `pattern` that starts `haystack`.
+fn anchored_spans<'p>(pattern: &'p regex::Regex, haystack: &str) -> Option<Vec<GroupSpan<'p>>> {
+    let captures = pattern
+        .captures(haystack)
+        .filter(|captures| captures.get(0).is_some_and(|matched| matched.start() == 0))?;
+    Some(named_spans(pattern, &captures))
+}
+
+fn named_spans<'p>(pattern: &'p regex::Regex, captures: &regex::Captures) -> Vec<GroupSpan<'p>> {
+    pattern
+        .capture_names()
+        .flatten()
+        .filter_map(|name| {
+            captures
+                .name(name)
+                .map(|matched| (name, matched.start(), matched.end()))
+        })
+        .collect()
+}
+
+fn accepted_bytes(item: &str) -> Result<[bool; 128], ExtractError> {
+    let item = regex::Regex::new(&format!("^(?:{item})$"))
+        .map_err(|e| ExtractError::InvalidPattern(format!("invalid regex: {e}")))?;
+    let mut accepted = [false; 128];
+    for (byte, slot) in (0_u8..).zip(&mut accepted) {
+        *slot = item.is_match(char::from(byte).encode_utf8(&mut [0; 4]));
+    }
+    Ok(accepted)
 }
 
 impl RegexPattern {
@@ -250,7 +414,9 @@ impl RegexPattern {
     pub fn parse(pattern_str: &str) -> Result<Self, ExtractError> {
         let processed = preprocess_fuzzy(pattern_str)?;
 
-        let pattern = regex::Regex::new(&processed)
+        let pattern = regex::RegexBuilder::new(&processed)
+            .size_limit(EXACT_PATTERN_SIZE_LIMIT)
+            .build()
             .map_err(|e| ExtractError::InvalidPattern(format!("invalid regex: {e}")))?;
 
         let has_barcode_group = pattern
@@ -265,7 +431,32 @@ impl RegexPattern {
             ));
         }
 
-        Ok(Self { pattern })
+        Ok(Self {
+            pattern,
+            relaxed: RelaxedPattern::parse(pattern_str)?,
+        })
+    }
+
+    /// Spans of the named groups in the match that starts `sequence`.
+    fn group_spans(&self, sequence: &str) -> Option<Vec<GroupSpan<'_>>> {
+        let Some(relaxed) = &self.relaxed else {
+            return anchored_spans(&self.pattern, sequence);
+        };
+        let captures = relaxed
+            .pattern
+            .captures(sequence)
+            .filter(|captures| captures.get(0).is_some_and(|matched| matched.start() == 0))?;
+        if relaxed.within_limits(&captures) {
+            return Some(named_spans(&relaxed.pattern, &captures));
+        }
+        match relaxed.placements(sequence.as_bytes()) {
+            Placements::Impossible => None,
+            Placements::Unique(starts) => RelaxedPattern::pin(sequence, &starts).map_or_else(
+                || anchored_spans(&self.pattern, sequence),
+                |pinned| anchored_spans(&relaxed.pinned, &pinned),
+            ),
+            Placements::Ambiguous => anchored_spans(&self.pattern, sequence),
+        }
     }
 
     /// Extract barcodes from a read's sequence and quality strings.
@@ -280,10 +471,8 @@ impl RegexPattern {
         let seq_str = std::str::from_utf8(sequence)
             .map_err(|e| ExtractError::FastqParse(format!("non-UTF8 sequence: {e}")))?;
 
-        let caps = self
-            .pattern
-            .captures(seq_str)
-            .filter(|captures| captures.get(0).is_some_and(|matched| matched.start() == 0))
+        let spans = self
+            .group_spans(seq_str)
             .ok_or(ExtractError::RegexNoMatch)?;
 
         // Collect named group spans into (name, start, end) sorted by name
@@ -291,16 +480,13 @@ impl RegexPattern {
         let mut cell_spans: Vec<(&str, usize, usize)> = Vec::new();
         let mut discard_spans: Vec<(usize, usize)> = Vec::new();
 
-        for name in self.pattern.capture_names().flatten() {
-            if let Some(m) = caps.name(name) {
-                let span = (m.start(), m.end());
-                if name.starts_with("umi_") {
-                    umi_spans.push((name, span.0, span.1));
-                } else if name.starts_with("cell_") {
-                    cell_spans.push((name, span.0, span.1));
-                } else if name.starts_with("discard_") {
-                    discard_spans.push(span);
-                }
+        for (name, start, end) in spans {
+            if name.starts_with("umi_") {
+                umi_spans.push((name, start, end));
+            } else if name.starts_with("cell_") {
+                cell_spans.push((name, start, end));
+            } else if name.starts_with("discard_") {
+                discard_spans.push((start, end));
             }
         }
 
@@ -354,64 +540,252 @@ impl RegexPattern {
     }
 }
 
-/// Pre-process a regex string, replacing `CHAR{s<=N}` fuzzy quantifiers.
+const MAX_FUZZY_ALTERNATIVES: usize = 10_000;
+/// Room for a group at the alternative limit; the default 10 MiB holds about a third of that.
+const EXACT_PATTERN_SIZE_LIMIT: usize = 64 << 20;
+
+enum Atom {
+    Single,
+    Group,
+}
+
+/// Rewrite the `{s<=N}` substitution quantifiers of Python's `regex` module as plain regex.
 ///
-/// In Python's `regex` module, `{s<=N}` applies to the single preceding character
-/// (not to an entire literal sequence). For N >= 1, `CHAR{s<=N}` matches any
-/// single character, equivalent to `.`. For N == 0, it's an exact match (no-op).
+/// A quantified single character, class or escape matches any character. A quantified
+/// group must have a fixed length and becomes an alternation over the substituted positions.
 fn preprocess_fuzzy(pattern_str: &str) -> Result<String, ExtractError> {
-    let mut result = String::with_capacity(pattern_str.len());
-    let bytes = pattern_str.as_bytes();
-    let len = bytes.len();
+    rewrite_fuzzy(pattern_str, &mut |group, limit, _| {
+        fuzzy_group(group, limit)
+    })
+    .map(|rewritten| rewritten.pattern)
+}
+
+struct Rewritten {
+    pattern: String,
+    alternates_at_top_level: bool,
+}
+
+/// `rewrite_group` receives each fuzzy group, its substitution limit, and whether the
+/// group sits outside every other group with no quantifier of its own.
+fn rewrite_fuzzy(
+    pattern_str: &str,
+    rewrite_group: &mut dyn FnMut(&str, usize, bool) -> Result<String, ExtractError>,
+) -> Result<Rewritten, ExtractError> {
+    let mut alternates_at_top_level = false;
+    let chars: Vec<char> = pattern_str.chars().collect();
+    let mut out = String::with_capacity(pattern_str.len());
+    let mut open_groups: Vec<usize> = Vec::new();
+    let mut last: Option<(usize, Atom)> = None;
     let mut i = 0;
 
-    while i < len {
-        if bytes[i] == b'{'
-            && i + 4 < len
-            && bytes[i + 1] == b's'
-            && bytes[i + 2] == b'<'
-            && bytes[i + 3] == b'='
-        {
-            let num_start = i + 4;
-            let mut num_end = num_start;
-            while num_end < len && bytes[num_end].is_ascii_digit() {
-                num_end += 1;
+    while i < chars.len() {
+        let start = out.len();
+        match chars[i] {
+            '{' => {
+                let Some(close) = chars[i..].iter().position(|&c| c == '}') else {
+                    out.extend(&chars[i..]);
+                    break;
+                };
+                let quantifier: String = chars[i..=i + close].iter().collect();
+                i += close + 1;
+                match substitution_limit(&quantifier)? {
+                    None => out.push_str(&quantifier),
+                    Some(0) => {}
+                    Some(limit) => match last {
+                        None => {
+                            return Err(ExtractError::InvalidPattern(format!(
+                                "fuzzy quantifier {quantifier} has nothing to apply to"
+                            )));
+                        }
+                        Some((atom_start, Atom::Single)) => {
+                            out.truncate(atom_start);
+                            out.push('.');
+                        }
+                        Some((atom_start, Atom::Group)) => {
+                            let required = open_groups.is_empty()
+                                && !matches!(chars.get(i), Some('?' | '*' | '+' | '{'));
+                            let group = rewrite_group(&out[atom_start..], limit, required)?;
+                            out.truncate(atom_start);
+                            out.push_str(&group);
+                        }
+                    },
+                }
+                last = None;
             }
-            if num_end == num_start || num_end >= len || bytes[num_end] != b'}' {
-                return Err(ExtractError::InvalidPattern(format!(
-                    "malformed fuzzy quantifier at position {i}"
-                )));
+            '\\' => {
+                out.extend(&chars[i..chars.len().min(i + 2)]);
+                i += 2;
+                last = Some((start, Atom::Single));
             }
-            let max_subs: usize = std::str::from_utf8(&bytes[num_start..num_end])
-                .expect("ASCII digits validated above")
-                .parse()
-                .map_err(|_| {
-                    ExtractError::InvalidPattern(format!(
-                        "fuzzy quantifier at position {i} exceeds the supported integer range"
-                    ))
-                })?;
-
-            if result.is_empty() {
-                return Err(ExtractError::InvalidPattern(format!(
-                    "fuzzy quantifier at position {i} has no preceding character"
-                )));
+            '[' => {
+                let end = class_end(&chars, i);
+                out.extend(&chars[i..end]);
+                i = end;
+                last = Some((start, Atom::Single));
             }
-
-            if max_subs >= 1 {
-                // Replace the preceding character with '.' (any character)
-                result.pop();
-                result.push('.');
+            '(' => {
+                open_groups.push(start);
+                out.push('(');
+                i += 1;
+                last = None;
             }
-            // For max_subs == 0, keep the character as-is (exact match)
-
-            i = num_end + 1;
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
+            ')' => {
+                out.push(')');
+                i += 1;
+                last = open_groups
+                    .pop()
+                    .map(|group_start| (group_start, Atom::Group));
+            }
+            c @ ('*' | '+' | '?' | '|' | '^' | '$') => {
+                alternates_at_top_level |= c == '|' && open_groups.is_empty();
+                out.push(c);
+                i += 1;
+                last = None;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+                last = Some((start, Atom::Single));
+            }
         }
     }
 
-    Ok(result)
+    Ok(Rewritten {
+        pattern: out,
+        alternates_at_top_level,
+    })
+}
+
+/// The N of `{s<=N}`, or `None` for a counted repetition such as `{3}` or `{8,12}`.
+fn substitution_limit(quantifier: &str) -> Result<Option<usize>, ExtractError> {
+    let body = &quantifier[1..quantifier.len() - 1];
+    if body.bytes().all(|b| b.is_ascii_digit() || b == b',') {
+        return Ok(None);
+    }
+    body.strip_prefix("s<=")
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(|| {
+            ExtractError::InvalidPattern(format!(
+                "fuzzy quantifier {quantifier} is not supported: only substitutions, {{s<=N}}, are"
+            ))
+        })?
+        .parse()
+        .map(Some)
+        .map_err(|_| {
+            ExtractError::InvalidPattern(format!(
+                "fuzzy quantifier {quantifier} exceeds the supported integer range"
+            ))
+        })
+}
+
+/// Index just past the `]` closing the character class that opens at `start`.
+fn class_end(chars: &[char], start: usize) -> usize {
+    let mut i = start + 1;
+    if chars.get(i) == Some(&'^') {
+        i += 1;
+    }
+    if chars.get(i) == Some(&']') {
+        i += 1;
+    }
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            ']' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    chars.len()
+}
+
+/// The header, such as `?P<name>`, and the single-character items of a parenthesised group.
+fn fuzzy_group_items(group: &str) -> Result<(&str, Vec<String>), ExtractError> {
+    let unsupported = || {
+        ExtractError::InvalidPattern(format!(
+            "fuzzy matching of {group} is not supported: the group must be a fixed-length run of \
+             characters, classes and escapes"
+        ))
+    };
+    let inner = &group[1..group.len() - 1];
+    let header_len = if inner.starts_with("?:") {
+        2
+    } else if inner.starts_with("?P<") || inner.starts_with("?<") {
+        inner.find('>').ok_or_else(unsupported)? + 1
+    } else if inner.starts_with('?') {
+        return Err(unsupported());
+    } else {
+        0
+    };
+    let (header, body) = inner.split_at(header_len);
+
+    let chars: Vec<char> = body.chars().collect();
+    let mut items: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let end = match chars[i] {
+            '\\' => chars.len().min(i + 2),
+            '[' => class_end(&chars, i),
+            '(' | ')' | '*' | '+' | '?' | '|' | '^' | '$' | '{' => return Err(unsupported()),
+            _ => i + 1,
+        };
+        let item: String = chars[i..end].iter().collect();
+        i = end;
+        let mut count = 1;
+        if chars.get(i) == Some(&'{') {
+            let close = chars[i..]
+                .iter()
+                .position(|&c| c == '}')
+                .ok_or_else(unsupported)?;
+            let digits: String = chars[i + 1..i + close].iter().collect();
+            count = digits.parse().map_err(|_| unsupported())?;
+            i += close + 1;
+        }
+        if items.len() + count > MAX_FUZZY_ALTERNATIVES {
+            return Err(unsupported());
+        }
+        items.extend(std::iter::repeat_n(item, count));
+    }
+    Ok((header, items))
+}
+
+/// Rewrite `group` as an alternation that lets up to `limit` of its items match any character.
+fn fuzzy_group(group: &str, limit: usize) -> Result<String, ExtractError> {
+    let (header, items) = fuzzy_group_items(group)?;
+    let wildcards = limit.min(items.len());
+    let mut alternatives: Vec<String> = Vec::new();
+    let mut chosen: Vec<usize> = (0..wildcards).collect();
+    loop {
+        if alternatives.len() == MAX_FUZZY_ALTERNATIVES {
+            return Err(ExtractError::InvalidPattern(format!(
+                "fuzzy matching of {group} with {limit} substitutions needs more than \
+                 {MAX_FUZZY_ALTERNATIVES} alternatives"
+            )));
+        }
+        alternatives.push(
+            items
+                .iter()
+                .enumerate()
+                .map(|(position, item)| {
+                    if chosen.contains(&position) {
+                        "."
+                    } else {
+                        item
+                    }
+                })
+                .collect(),
+        );
+        // Advance to the next combination of wildcard positions.
+        let Some(movable) =
+            (0..wildcards).rfind(|&slot| chosen[slot] < items.len() - wildcards + slot)
+        else {
+            break;
+        };
+        chosen[movable] += 1;
+        for slot in movable + 1..wildcards {
+            chosen[slot] = chosen[slot - 1] + 1;
+        }
+    }
+
+    Ok(format!("({header}(?:{}))", alternatives.join("|")))
 }
 
 /// If `positions` is a contiguous ascending sequence [a, a+1, ..., b-1], return Some(a..b).
@@ -617,6 +991,168 @@ mod tests {
             RegexPattern::parse("(?P<umi_1>A{s<=9999999999999999999999999999999})"),
             Err(ExtractError::InvalidPattern(_))
         ));
+    }
+
+    fn fuzzy(pattern: &str) -> regex::Regex {
+        regex::Regex::new(&format!("^(?:{})$", preprocess_fuzzy(pattern).unwrap())).unwrap()
+    }
+
+    #[test]
+    fn fuzzy_group_allows_substitutions_anywhere_in_the_group() {
+        let pattern = fuzzy("(?P<discard_1>GATTACA){s<=2}");
+        for accepted in ["GATTACA", "CATTACA", "GATTACT", "TATTACT", "GAAAACA"] {
+            assert!(pattern.is_match(accepted), "{accepted}");
+        }
+        for rejected in ["CTTTACT", "GATTAC", "GATTACAA", "ATTACAG"] {
+            assert!(!pattern.is_match(rejected), "{rejected}");
+        }
+        let captures = pattern.captures("CATTACT").unwrap();
+        assert_eq!(&captures["discard_1"], "CATTACT");
+    }
+
+    #[test]
+    fn fuzzy_group_keeps_its_kind() {
+        assert!(fuzzy("(?:ACG){s<=1}").is_match("ATG"));
+        assert_eq!(&fuzzy("(ACG){s<=1}").captures("ATG").unwrap()[1], "ATG");
+        assert_eq!(
+            &fuzzy("(?<x>ACG){s<=1}").captures("ATG").unwrap()["x"],
+            "ATG"
+        );
+    }
+
+    #[test]
+    fn fuzzy_group_handles_classes_escapes_and_counts() {
+        let pattern = fuzzy(r"([AC]G{2}\dT){s<=1}");
+        for accepted in ["AGG1T", "CGG9T", "TGG1T", "AGGxT", "AGT1T"] {
+            assert!(pattern.is_match(accepted), "{accepted}");
+        }
+        for rejected in ["TGGxT", "ATT1T"] {
+            assert!(!pattern.is_match(rejected), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn fuzzy_group_with_enough_substitutions_matches_any_text_of_its_length() {
+        assert!(fuzzy("(ACG){s<=3}").is_match("TTT"));
+        assert!(fuzzy("(ACG){s<=9}").is_match("TTT"));
+        assert!(!fuzzy("(ACG){s<=9}").is_match("TTTT"));
+    }
+
+    #[test]
+    fn fuzzy_single_atom_matches_any_character() {
+        for pattern in [
+            "AC{s<=1}",
+            r"A\d{s<=1}",
+            "A[CG]{s<=1}",
+            "A.{s<=1}",
+            r"A[\]C]{s<=2}",
+        ] {
+            let pattern = fuzzy(pattern);
+            assert!(pattern.is_match("AT"));
+            assert!(!pattern.is_match("TT"));
+        }
+    }
+
+    #[test]
+    fn zero_substitutions_leave_the_pattern_exact() {
+        assert!(!fuzzy("(ACG){s<=0}").is_match("ATG"));
+        assert!(!fuzzy("AC{s<=0}").is_match("AT"));
+        assert!(fuzzy(r"A\d{s<=0}").is_match("A1"));
+    }
+
+    #[test]
+    fn widened_fast_path_agrees_with_the_exact_pattern() {
+        for pattern in [
+            "(?P<cell_1>.{2,5})(?P<discard_1>GA[TC]TA){s<=1}(?P<umi_1>.{3})(AC){s<=1}T*",
+            "(?P<cell_1>.{2,5}?)(?P<discard_1>GATTACA){s<=2}(?P<umi_1>.{3})",
+            "(?P<cell_1>[AC]{0,3})(GATT){s<=1}(?P<umi_1>.{2})(?:CAT){s<=1}",
+        ] {
+            assert_fast_path_agrees(pattern);
+        }
+    }
+
+    fn assert_fast_path_agrees(pattern: &str) {
+        let fast = RegexPattern::parse(pattern).unwrap();
+        assert!(fast.relaxed.is_some());
+        let exact = RegexPattern {
+            relaxed: None,
+            ..fast.clone()
+        };
+        let mut state = 7_u32;
+        let mut matched = 0;
+        for _ in 0..20_000 {
+            let sequence: Vec<u8> = (0..18)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    b"GATTACAC"[(state >> 29) as usize]
+                })
+                .collect();
+            let quality = vec![b'I'; sequence.len()];
+            let expected = exact.extract(&sequence, &quality).ok();
+            matched += usize::from(expected.is_some());
+            assert_eq!(
+                fast.extract(&sequence, &quality).ok().map(|r| (
+                    r.cell_barcode,
+                    r.umi,
+                    r.trimmed_sequence
+                )),
+                expected.map(|r| (r.cell_barcode, r.umi, r.trimmed_sequence)),
+                "{pattern} on {}",
+                String::from_utf8_lossy(&sequence)
+            );
+        }
+        assert!(matched > 100, "{pattern}: {matched}");
+    }
+
+    #[test]
+    fn fast_path_needs_every_fuzzy_group_in_every_match() {
+        for pattern in [
+            "(?P<umi_1>.{3})(ACG){s<=1}?",
+            "(?P<umi_1>.{3})(ACG){s<=1}{2}",
+            "(?P<umi_1>.{3})((ACG){s<=1})",
+            "(?P<umi_1>.{3})T|(ACG){s<=1}",
+            "(?P<umi_1>.{3})(ACG){s<=0}",
+            "(?P<umi_1>.{3})(ACG){s<=3}",
+            "(?P<umi_1>.{3})ACG{s<=1}",
+        ] {
+            assert!(
+                RelaxedPattern::parse(pattern).unwrap().is_none(),
+                "{pattern}"
+            );
+            assert!(RegexPattern::parse(pattern).is_ok(), "{pattern}");
+        }
+        assert!(
+            RelaxedPattern::parse("(?P<umi_1>.{3})(ACG){s<=1}")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn counted_repetition_is_not_a_fuzzy_quantifier() {
+        assert_eq!(
+            preprocess_fuzzy("(?P<umi_1>.{6})T{3,}.{2,4}").unwrap(),
+            "(?P<umi_1>.{6})T{3,}.{2,4}"
+        );
+    }
+
+    #[test]
+    fn unsupported_fuzzy_forms_are_named_in_the_error() {
+        for (pattern, named) in [
+            ("(ACG){e<=1}", "{e<=1}"),
+            ("(ACG){i<=1}", "{i<=1}"),
+            ("(ACG){d<=1,s<=1}", "{d<=1,s<=1}"),
+            ("(AC+G){s<=1}", "(AC+G)"),
+            ("(A|C){s<=1}", "(A|C)"),
+            ("(A(C)G){s<=1}", "(A(C)G)"),
+            ("{s<=1}", "{s<=1}"),
+            ("A*{s<=1}", "{s<=1}"),
+        ] {
+            let Err(ExtractError::InvalidPattern(message)) = preprocess_fuzzy(pattern) else {
+                panic!("{pattern} was accepted");
+            };
+            assert!(message.contains(named), "{pattern}: {message}");
+        }
     }
 
     #[test]
