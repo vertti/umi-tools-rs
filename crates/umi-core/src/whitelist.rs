@@ -541,10 +541,12 @@ fn error_detect_above_threshold(
             }
             EdAboveThreshold::Correct => {
                 if near_misses.len() == 1
-                    && cb.len() == near_misses[0].len()
-                    && hamming_distance(cb.as_bytes(), near_misses[0].as_bytes()) <= threshold
+                    && near_misses[0]
+                        .as_bytes()
+                        .get(..cb.len())
+                        .is_some_and(|prefix| hamming_distance(cb.as_bytes(), prefix) <= threshold)
                 {
-                    // Pure substitution: correct by adding to the higher-count barcode's map
+                    // Substitutions only: correct by adding to the higher-count barcode's map
                     let count = all_counts.get(cb).copied().unwrap_or(0);
                     corrections
                         .entry(near_misses[0].clone())
@@ -704,6 +706,40 @@ mod tests {
             assert!(determine_whitelist(&counts, &config).is_err());
         }
         assert!(determine_whitelist(&HashMap::new(), &config).is_err());
+    }
+
+    #[test]
+    fn a_shorter_barcode_is_corrected_to_one_it_substitutes_a_prefix_of() {
+        // umi_tools tests regex.match("(cb){s<=1}", near), which only has to match a prefix.
+        // Expected values are errorDetectAboveThreshold's on the same counts.
+        let counts: Vec<(String, u64)> = [
+            ("AAAAAAA", 50),
+            ("AAAAAT", 20),
+            ("AAAAATT", 9),
+            ("GGGGGGG", 30),
+            ("GGGGGG", 8),
+        ]
+        .map(|(barcode, count)| (barcode.to_string(), count))
+        .to_vec();
+        let first_seen: HashMap<String, usize> = counts
+            .iter()
+            .map(|(barcode, _)| barcode.clone())
+            .zip(0..)
+            .collect();
+        let mut corrections = HashMap::new();
+        let mut kept = error_detect_above_threshold(
+            &counts.iter().cloned().collect(),
+            &first_seen,
+            counts.iter().map(|(barcode, _)| barcode.clone()).collect(),
+            &mut corrections,
+            1,
+            EdAboveThreshold::Correct,
+        );
+        kept.sort();
+        assert_eq!(kept, ["AAAAAAA", "GGGGGGG"]);
+        assert_eq!(corrections["AAAAAAA"], [("AAAAAT".to_string(), 20)]);
+        assert_eq!(corrections["GGGGGGG"], [("GGGGGG".to_string(), 8)]);
+        assert_eq!(corrections.len(), 2);
     }
 
     #[test]
