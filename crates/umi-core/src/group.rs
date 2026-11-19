@@ -9,8 +9,8 @@ use crate::alignment_sort::RecordOutput;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
 use crate::clustering::{MixedUmiLengths, cluster_umis};
 use crate::dedup::{
-    DedupMethod, GroupKey, PositionOptions, PythonRandom, TieBreakRng, five_prime_position,
-    get_read_position,
+    DedupMethod, GroupKey, PositionOptions, PythonRandom, five_prime_position, get_read_position,
+    sampled_barcode,
 };
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 use crate::pairing::PairingOptions;
@@ -31,7 +31,7 @@ pub struct GroupConfig {
     pub group_out: Option<String>,
     pub edit_distance_threshold: u32,
     pub position: PositionOptions,
-    pub subset: Option<f32>,
+    pub subset: Option<f64>,
     pub mapping_quality: u8,
     pub buffer_whole_contig: bool,
     pub gene: GeneOptions,
@@ -303,7 +303,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
     };
 
     #[allow(clippy::cast_possible_truncation)]
-    let mut rng = PythonRandom::new(config.random_seed as u32);
+    let mut rng = PythonRandom::new(config.random_seed);
 
     let mut output = RecordOutput::new(
         writer,
@@ -337,17 +337,14 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             continue;
         }
 
-        // Subset check consumes one RNG call per grouped read (before buffer.add)
-        if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
-            continue;
-        }
-
-        if record.mapq() < config.mapping_quality {
-            continue;
-        }
-
-        let Some(Barcode { umi, cell }) =
-            config.barcode.for_grouping(&record, config.ignore_umi)?
+        let Some(Barcode { umi, cell }) = sampled_barcode(
+            &record,
+            config.subset,
+            &mut rng,
+            config.mapping_quality,
+            &config.barcode,
+            config.ignore_umi,
+        )?
         else {
             continue;
         };

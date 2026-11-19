@@ -320,7 +320,7 @@ struct GroupArgs {
 
     /// Random subset of reads to process (0.0-1.0)
     #[arg(long = "subset")]
-    subset: Option<f32>,
+    subset: Option<f64>,
 
     #[command(flatten)]
     position: PositionArgs,
@@ -408,7 +408,7 @@ struct DedupArgs {
 
     /// Random subset of reads to process (0.0-1.0)
     #[arg(long = "subset")]
-    subset: Option<f32>,
+    subset: Option<f64>,
 
     #[command(flatten)]
     gene: GeneArgs,
@@ -485,7 +485,7 @@ struct CountArgs {
 
     /// Random subset of reads to process (0.0-1.0)
     #[arg(long = "subset")]
-    subset: Option<f32>,
+    subset: Option<f64>,
 
     /// Accepted for umi-tools compatibility; count writes no alignments, so it has no effect
     #[arg(long = "no-sort-output", action = ArgAction::SetTrue, overrides_with = "no_sort_output")]
@@ -769,6 +769,14 @@ fn validate_typed_sam_options(
 
 fn typed_command() -> String {
     std::env::args().collect::<Vec<_>>().join(" ")
+}
+
+/// `np.random.seed`, which dedup and count call, takes 32 bits.
+fn validate_numpy_seed(seed: u64) -> Result<()> {
+    if u32::try_from(seed).is_err() {
+        bail!("Seed must be between 0 and 2**32 - 1");
+    }
+    Ok(())
 }
 
 /// Grouping-key options shared by dedup and group.
@@ -1547,7 +1555,7 @@ fn run_group_cmd(args: &GroupArgs) -> Result<String> {
         group_out: args.group_out.clone(),
         edit_distance_threshold: args.edit_distance_threshold,
         position,
-        subset: args.subset,
+        subset: args.subset.filter(|&fraction| fraction != 0.0),
         mapping_quality: args.mapping_quality,
         buffer_whole_contig: args.buffer_whole_contig,
         gene,
@@ -1566,6 +1574,7 @@ fn run_group_cmd(args: &GroupArgs) -> Result<String> {
 fn run_dedup_cmd(args: &DedupArgs) -> Result<String> {
     let barcode = args.barcode.extractor()?;
     validate_typed_sam_options(&typed_command(), &args.barcode, &args.pairing)?;
+    validate_numpy_seed(args.random_seed)?;
     if args.output_stats.is_some() && args.ignore_umi {
         bail!("'--output-stats' and '--ignore-umi' options cannot be used together");
     }
@@ -1601,6 +1610,7 @@ fn run_dedup_cmd(args: &DedupArgs) -> Result<String> {
             wl_path,
             args.umi_whitelist_paired.as_deref(),
         )?)
+        .filter(|umis| !umis.is_empty())
     } else {
         None
     };
@@ -1616,7 +1626,7 @@ fn run_dedup_cmd(args: &DedupArgs) -> Result<String> {
         chrom: args.chrom.clone(),
         edit_distance_threshold: args.edit_distance_threshold,
         position,
-        subset: args.subset,
+        subset: args.subset.filter(|&fraction| fraction != 0.0),
         mapping_quality: args.mapping_quality,
         multimapping_detection,
         buffer_whole_contig: args.buffer_whole_contig,
@@ -1685,6 +1695,7 @@ fn run_count_cmd(args: &CountArgs) -> Result<String> {
     let gene = args.gene.options(true);
     let barcode = args.barcode.extractor()?;
     validate_typed_sam_options(&typed_command(), &args.barcode, &args.pairing)?;
+    validate_numpy_seed(args.random_seed)?;
     let pairing = args.pairing.options(false);
 
     let input = args
@@ -1703,7 +1714,7 @@ fn run_count_cmd(args: &CountArgs) -> Result<String> {
         ignore_umi: args.ignore_umi,
         pairing,
         chrom: args.chrom.clone(),
-        subset: args.subset,
+        subset: args.subset.filter(|&fraction| fraction != 0.0),
         random_seed: args.random_seed,
         wide_format: args.wide_format,
         edit_distance_threshold: args.edit_distance_threshold,
