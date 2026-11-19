@@ -1220,7 +1220,7 @@ fn load_whitelist_with_correction(
     for line in reader.lines() {
         let line = line.with_context(|| format!("failed to read whitelist file: {path}"))?;
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || line.starts_with('#') {
             continue;
         }
         let mut cols = trimmed.split('\t');

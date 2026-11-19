@@ -186,3 +186,16 @@ def test_mismatched_names_are_rejected(rust_binary, tmp_path, mode):
     # The helper asserts success; the command must instead reject this pair.
     with pytest.raises(AssertionError, match="(?i)read pairs do not match"):
         run_extract(rust_binary, tmp_path, mode_options(mode), reads)
+
+
+def test_whitelist_comment_lines_are_not_barcodes(rust_binary, tmp_path):
+    whitelist = tmp_path / "whitelist.tsv"
+    whitelist.write_text("#AAAA\tAAAT\nCCCC\tCCCA\n")
+    reads = tmp_path / "reads.fq"
+    reads.write_text("@r1\nAAATGGG\n+\nIIIIIII\n@r2\nCCCCGGG\n+\nIIIIIII\n")
+    result = subprocess.run(
+        [str(rust_binary), "extract", "--bc-pattern=CCCCNNN", f"--whitelist={whitelist}",
+         "--error-correct-cell", "-I", str(reads)], capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "@r2_CCCC_GGG\n\n+\n\n"
