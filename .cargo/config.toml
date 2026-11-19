@@ -1,0 +1,3 @@
+# hts-sys 2.2.1 defines HAVE_LIBBZ2 where its lzma feature should define HAVE_LIBLZMA.
+[env]
+CFLAGS = "-DHAVE_LIBLZMA=1"
