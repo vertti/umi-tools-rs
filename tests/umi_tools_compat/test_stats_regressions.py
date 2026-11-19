@@ -39,6 +39,15 @@ def test_empty_input_produces_empty_statistics(rust_binary, tmp_path):
         assert (tmp_path / f"stats_{suffix}.tsv").read_text().strip()
 
 
+def test_single_umi_positions_add_no_edit_distance_row(rust_binary, tmp_path):
+    run_stats(rust_binary, tmp_path, {"AAAA": 2})
+    assert (tmp_path / "stats_edit_distance.tsv").read_text() == (
+        "unique\tunique_null\tadjacency\tadjacency_null\tedit_distance\n"
+        "1\t1\t1\t1\tSingle_UMI\n"
+        "0\t0\t0\t0\t0\n"
+    )
+
+
 MIXED_LENGTHS = "not all umis are the same length(!):  4 - 5"
 
 
