@@ -8,6 +8,8 @@ use regex::bytes::Regex;
 use rust_htslib::bam::record::Aux;
 use rust_htslib::bam::{HeaderView, Record};
 
+use crate::alignment_io::RecordSource;
+
 pub const DEFAULT_SKIP_REGEX: &str = "^(__|Unassigned)";
 
 /// `--per-gene` and its companions.
@@ -53,6 +55,8 @@ pub enum GeneError {
     TranscriptMapRead(String, String),
     #[error("--gene-transcript-map line does not have two tab-separated fields: {0}")]
     TranscriptMapLine(String),
+    #[error("failed to open BAM: {0}")]
+    Open(String),
 }
 
 impl GeneOptions {
@@ -190,6 +194,27 @@ impl GeneAssigner {
             map,
             header: header.clone(),
         }))
+    }
+
+    /// Opens the alignments and the assigner for them. With a transcript map the reads
+    /// come gene by gene instead of in file order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::new`] and of opening the file.
+    pub fn open(
+        options: &GeneOptions,
+        path: &str,
+        reference: Option<&str>,
+    ) -> Result<(RecordSource, Option<Self>), GeneError> {
+        let open_error = |e: rust_htslib::errors::Error| GeneError::Open(e.to_string());
+        let mut source = RecordSource::whole(path, reference).map_err(open_error)?;
+        let assigner = Self::new(options, source.header())?;
+        if let Some(map) = assigner.as_ref().and_then(Self::transcript_map) {
+            source =
+                RecordSource::by_contig(path, reference, map.genes.clone()).map_err(open_error)?;
+        }
+        Ok((source, assigner))
     }
 
     #[must_use]
