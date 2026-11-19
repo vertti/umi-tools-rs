@@ -81,7 +81,7 @@ def test_gzip_finalization_failure_is_reported(rust_binary, tmp_path, command, o
 
 @pytest.mark.parametrize("flag,expected", [
     ("--whitelist", "@r_AA_T\nT\n+\nI\n"),
-    ("--blacklist", ""),
+    ("--blacklist", "@r_AA_T\nT\n+\nI\n"),
 ])
 def test_extract_reads_compressed_barcode_lists(rust_binary, tmp_path, flag, expected):
     path = tmp_path / "barcodes.tsv.gz"

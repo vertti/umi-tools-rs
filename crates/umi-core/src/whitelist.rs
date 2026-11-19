@@ -46,6 +46,7 @@ pub struct WhitelistConfig {
     pub expect_cells: Option<usize>,
     pub error_correct_threshold: usize,
     pub ed_above_threshold: Option<EdAboveThreshold>,
+    /// Stop after this many reads; 0 reads everything.
     pub subset_reads: usize,
 }
 
@@ -188,7 +189,7 @@ fn count_barcodes<R: Read + Send, FW: Write>(
         } else {
             matched
         };
-        if processed > config.subset_reads as u64 {
+        if config.subset_reads != 0 && processed > config.subset_reads as u64 {
             break;
         }
     }
@@ -238,7 +239,7 @@ fn extract_pair(
                 cell.extend(extraction.cell_barcode);
                 umi.extend(extraction.umi);
             }
-            Err(ExtractError::ReadTooShort { .. } | ExtractError::RegexNoMatch) => return Ok(None),
+            Err(ExtractError::RegexNoMatch) => return Ok(None),
             Err(e) => return Err(e),
         }
     }
