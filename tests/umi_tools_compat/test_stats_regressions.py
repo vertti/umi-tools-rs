@@ -39,6 +39,49 @@ def test_empty_input_produces_empty_statistics(rust_binary, tmp_path):
         assert (tmp_path / f"stats_{suffix}.tsv").read_text().strip()
 
 
+MIXED_LENGTHS = "not all umis are the same length(!):  4 - 5"
+
+
+@pytest.mark.parametrize("method", ["unique", "percentile", "cluster", "adjacency", "directional"])
+@pytest.mark.parametrize("command", [
+    ["dedup"], ["dedup", "--output-stats=stats"], ["group", "--group-out=groups.tsv", "--output-bam"],
+    ["count", "--per-contig"],
+])
+def test_mixed_umi_lengths_in_a_bundle_abort(rust_binary, tmp_path, command, method):
+    source = tmp_path / "in.sam"
+    write_counts(source, {"ACGT": 1, "ACGTA": 1})
+    result = subprocess.run(
+        [str(rust_binary), *command, "--stdin", str(source), "--stdout", "out", f"--method={method}"],
+        capture_output=True, text=True, cwd=tmp_path,
+    )
+    assert result.returncode == 1
+    assert MIXED_LENGTHS in result.stderr
+
+
+def test_count_tab_rejects_mixed_umi_lengths(rust_binary, tmp_path):
+    source = tmp_path / "in.tsv"
+    source.write_text("r1_ACGT\tg1\nr2_ACGTA\tg1\n")
+    result = subprocess.run(
+        [str(rust_binary), "count_tab", "--stdin", str(source)], capture_output=True, text=True,
+    )
+    assert result.returncode == 1
+    assert MIXED_LENGTHS in result.stderr
+
+
+def test_null_umis_of_mixed_lengths_fail_statistics(rust_binary, tmp_path):
+    source = tmp_path / "in.sam"
+    write_counts(source, {"AAAA": 1, "AAAT": 1})
+    longer = "".join(f"s{i}_{umi}\t0\tchr1\t301\t60\t4M\t*\t0\t0\tACGT\tIIII\n"
+                     for i, umi in enumerate(["CCCCC", "CCCCG"]))
+    source.write_text(source.read_text() + longer)
+    result = subprocess.run(
+        [str(rust_binary), "dedup", "--stdin", str(source), "--stdout", "out.bam",
+         "--output-stats=stats", "--random-seed=1"], capture_output=True, text=True, cwd=tmp_path,
+    )
+    assert result.returncode == 1
+    assert "panicked" not in result.stderr
+
+
 def test_dedup_reports_processed_positions(rust_binary, tmp_path):
     source = tmp_path / "positions.sam"
     write_counts(source, {"AAAA": 2, "AAAT": 1})

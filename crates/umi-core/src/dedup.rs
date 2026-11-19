@@ -8,7 +8,9 @@ use rust_htslib::bam::{Read as BamRead, Record};
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
 use crate::alignment_sort::RecordOutput;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
-use crate::clustering::{cluster_umis, hamming_distance, median};
+use crate::clustering::{
+    MixedUmiLengths, cluster_umis, hamming_distance, median, require_equal_lengths,
+};
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 use crate::pairing::{PairingError, PairingOptions};
 
@@ -456,7 +458,7 @@ impl ReadBuffer<i64> {
         edit_threshold: u32,
         stats_ctx: &mut Option<StatsContext>,
         umi_whitelist: Option<&HashSet<Vec<u8>>>,
-    ) -> Vec<Record> {
+    ) -> Result<Vec<Record>, DedupError> {
         let rest = self.groups.split_off(&(threshold + 1));
         let drained = std::mem::replace(&mut self.groups, rest);
         // Clean up insertion counters for drained positions
@@ -561,9 +563,9 @@ impl<K: Ord + Clone> ReadBuffer<K> {
         edit_threshold: u32,
         stats_ctx: &mut Option<StatsContext>,
         umi_whitelist: Option<&HashSet<Vec<u8>>>,
-    ) -> Vec<Record> {
+    ) -> Result<Vec<Record>, DedupError> {
         let Some(key_map) = self.groups.remove(key) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         self.insertion_counters.remove(key);
         let drained = BTreeMap::from([(key.clone(), key_map)]);
@@ -577,7 +579,7 @@ impl<K: Ord + Clone> ReadBuffer<K> {
         edit_threshold: u32,
         stats_ctx: &mut Option<StatsContext>,
         umi_whitelist: Option<&HashSet<Vec<u8>>>,
-    ) -> Vec<Record> {
+    ) -> Result<Vec<Record>, DedupError> {
         let drained = std::mem::take(&mut self.groups);
         self.insertion_counters.clear();
         Self::apply_selection(drained, method, edit_threshold, stats_ctx, umi_whitelist)
@@ -590,13 +592,13 @@ impl<K: Ord + Clone> ReadBuffer<K> {
         edit_threshold: u32,
         stats_ctx: &mut Option<StatsContext>,
         umi_whitelist: Option<&HashSet<Vec<u8>>>,
-    ) -> Vec<Record> {
+    ) -> Result<Vec<Record>, DedupError> {
         let mut records = Vec::new();
         for key_map in groups.into_values() {
             for umi_map in key_map.into_values() {
                 if stats_ctx.is_some() {
                     let selected_with_counts =
-                        select_umis_with_cluster_counts(method, &umi_map, edit_threshold);
+                        select_umis_with_cluster_counts(method, &umi_map, edit_threshold)?;
                     let mut bundle_records: Vec<&Record> = Vec::new();
                     let mut selected_umis = Vec::new();
                     let mut cluster_counts = Vec::new();
@@ -618,13 +620,13 @@ impl<K: Ord + Clone> ReadBuffer<K> {
                             &bundle_records,
                             &ctx.barcode,
                             &mut ctx.read_gen,
-                        );
+                        )?;
                     }
                     for r in bundle_records {
                         records.push(r.clone());
                     }
                 } else {
-                    let selected = select_umis(method, &umi_map, edit_threshold);
+                    let selected = select_umis(method, &umi_map, edit_threshold)?;
                     for umi in &selected {
                         if umi_whitelist.is_some_and(|wl| !wl.contains(umi)) {
                             continue;
@@ -636,7 +638,7 @@ impl<K: Ord + Clone> ReadBuffer<K> {
                 }
             }
         }
-        records
+        Ok(records)
     }
 }
 
@@ -652,18 +654,18 @@ pub(crate) fn select_umis(
     method: DedupMethod,
     umi_map: &HashMap<Vec<u8>, UmiSlot>,
     edit_threshold: u32,
-) -> Vec<Vec<u8>> {
-    slot_groups(method, umi_map, edit_threshold)
+) -> Result<Vec<Vec<u8>>, MixedUmiLengths> {
+    Ok(slot_groups(method, umi_map, edit_threshold)?
         .into_iter()
         .map(|group| group[0].to_vec())
-        .collect()
+        .collect())
 }
 
 fn slot_groups(
     method: DedupMethod,
     umi_map: &HashMap<Vec<u8>, UmiSlot>,
     edit_threshold: u32,
-) -> Vec<Vec<&[u8]>> {
+) -> Result<Vec<Vec<&[u8]>>, MixedUmiLengths> {
     cluster_umis(
         method,
         umi_map
@@ -675,35 +677,38 @@ fn slot_groups(
 
 /// Count deduplicated UMI groups from raw count/order maps.
 ///
+/// # Errors
+/// Returns an error when the UMIs differ in length.
+///
 /// # Panics
 /// Panics if an input UMI has no corresponding insertion order.
 #[allow(clippy::implicit_hasher)]
-#[must_use]
 pub fn count_umis(
     method: DedupMethod,
     counts: &HashMap<Vec<u8>, u32>,
     orders: &HashMap<Vec<u8>, u32>,
     edit_threshold: u32,
-) -> usize {
+) -> Result<usize, MixedUmiLengths> {
     if method == DedupMethod::Unique {
-        return counts.len();
+        require_equal_lengths(counts.keys().map(Vec::as_slice))?;
+        return Ok(counts.len());
     }
-    cluster_umis(
+    Ok(cluster_umis(
         method,
         counts
             .iter()
             .map(|(umi, &count)| (umi.as_slice(), count, orders[umi])),
         edit_threshold,
-    )
-    .len()
+    )?
+    .len())
 }
 
 fn select_umis_with_cluster_counts(
     method: DedupMethod,
     umi_map: &HashMap<Vec<u8>, UmiSlot>,
     edit_threshold: u32,
-) -> Vec<(Vec<u8>, u32)> {
-    slot_groups(method, umi_map, edit_threshold)
+) -> Result<Vec<(Vec<u8>, u32)>, MixedUmiLengths> {
+    Ok(slot_groups(method, umi_map, edit_threshold)?
         .into_iter()
         .map(|group| {
             (
@@ -711,15 +716,16 @@ fn select_umis_with_cluster_counts(
                 group.iter().map(|umi| umi_map[*umi].count).sum(),
             )
         })
-        .collect()
+        .collect())
 }
 
 /// Mean pairwise Hamming distance between UMIs. Returns -1.0 for single UMI.
 #[allow(clippy::cast_precision_loss)]
-fn get_average_umi_distance(umis: &[&[u8]]) -> f64 {
+fn get_average_umi_distance(umis: &[&[u8]]) -> Result<f64, MixedUmiLengths> {
     if umis.len() <= 1 {
-        return -1.0;
+        return Ok(-1.0);
     }
+    require_equal_lengths(umis.iter().copied())?;
     let mut total: u64 = 0;
     let mut count: u64 = 0;
     for i in 0..umis.len() {
@@ -728,7 +734,7 @@ fn get_average_umi_distance(umis: &[&[u8]]) -> f64 {
             count += 1;
         }
     }
-    total as f64 / count as f64
+    Ok(total as f64 / count as f64)
 }
 
 /// Pre-scans BAM to build UMI frequency distribution for null model sampling.
@@ -882,19 +888,19 @@ impl StatsCollector {
         selected_records: &[&Record],
         barcode: &BarcodeExtractor,
         read_gen: &mut RandomReadGenerator,
-    ) {
+    ) -> Result<(), MixedUmiLengths> {
         // Pre-dedup: all UMIs in the bundle
         let pre_umis: Vec<&[u8]> = umi_map.keys().map(Vec::as_slice).collect();
         for (umi, slot) in umi_map {
             self.pre_umi_counts.push((umi.clone(), slot.count));
         }
-        let avg_dist = get_average_umi_distance(&pre_umis);
+        let avg_dist = get_average_umi_distance(&pre_umis)?;
         self.pre_cluster_stats.push(avg_dist);
 
         let cluster_size = pre_umis.len();
         let random_umis = read_gen.get_umis(cluster_size);
         let random_refs: Vec<&[u8]> = random_umis.iter().map(Vec::as_slice).collect();
-        let avg_null = get_average_umi_distance(&random_refs);
+        let avg_null = get_average_umi_distance(&random_refs)?;
         self.pre_cluster_stats_null.push(avg_null);
 
         // Post-dedup: selected UMIs with cluster-aggregated counts
@@ -908,14 +914,15 @@ impl StatsCollector {
             .map(|r| barcode.extract(r).map_or_default(|b| b.umi))
             .collect();
         let post_refs: Vec<&[u8]> = post_umis.iter().map(Vec::as_slice).collect();
-        let avg_post = get_average_umi_distance(&post_refs);
+        let avg_post = get_average_umi_distance(&post_refs)?;
         self.post_cluster_stats.push(avg_post);
 
         let post_size = post_umis.len();
         let random_umis_post = read_gen.get_umis(post_size);
         let random_post_refs: Vec<&[u8]> = random_umis_post.iter().map(Vec::as_slice).collect();
-        let avg_null_post = get_average_umi_distance(&random_post_refs);
+        let avg_null_post = get_average_umi_distance(&random_post_refs)?;
         self.post_cluster_stats_null.push(avg_null_post);
+        Ok(())
     }
 
     fn write_files(&self, prefix: &str, method_name: &str) -> Result<(), DedupError> {
@@ -1228,14 +1235,14 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
                     config.edit_distance_threshold,
                     &mut stats_ctx,
                     wl_ref,
-                ))?,
+                )?)?,
                 Flush::Gene(done) => emit_selected(gene_buffer.drain_key(
                     &done,
                     config.method,
                     config.edit_distance_threshold,
                     &mut stats_ctx,
                     wl_ref,
-                ))?,
+                )?)?,
             }
             flusher.after_read(tid, &gene);
             gene_buffer.add(
@@ -1257,7 +1264,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
                     config.edit_distance_threshold,
                     &mut stats_ctx,
                     wl_ref,
-                ))?;
+                )?)?;
             } else if !config.buffer_whole_contig && start > last_start + 1000 {
                 let threshold = start - 1000;
                 emit_selected(buffer.drain_up_to(
@@ -1266,7 +1273,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
                     config.edit_distance_threshold,
                     &mut stats_ctx,
                     wl_ref,
-                ))?;
+                )?)?;
             }
 
             last_start = start;
@@ -1295,13 +1302,13 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
         config.edit_distance_threshold,
         &mut stats_ctx,
         wl_ref,
-    ))?;
+    )?)?;
     emit_selected(gene_buffer.drain_all(
         config.method,
         config.edit_distance_threshold,
         &mut stats_ctx,
         wl_ref,
-    ))?;
+    )?)?;
 
     // Paired mode: second pass to find R2 mates of surviving R1 reads.
     if config.pairing.paired {
@@ -1366,6 +1373,8 @@ pub enum DedupError {
     Gene(#[from] GeneError),
     #[error(transparent)]
     Pairing(#[from] PairingError),
+    #[error(transparent)]
+    UmiLengths(#[from] MixedUmiLengths),
 }
 
 #[cfg(test)]
