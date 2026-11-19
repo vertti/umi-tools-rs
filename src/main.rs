@@ -128,6 +128,10 @@ struct ExtractArgs {
     #[arg(long = "reconcile-pairs")]
     reconcile_pairs: bool,
 
+    /// Deprecated in umi-tools: --whitelist already filters cell barcodes
+    #[arg(long = "filter-cell-barcode", hide = true)]
+    filter_cell_barcode: bool,
+
     /// Error-correct cell barcodes using whitelist correction map
     #[arg(long = "error-correct-cell")]
     error_correct_cell: bool,
@@ -315,6 +319,9 @@ struct GroupArgs {
     #[arg(long = "output-bam")]
     output_bam: bool,
 
+    #[command(flatten)]
+    _umi_filter: UnusedUmiFilterArgs,
+
     /// Skip coordinate sorting of output
     #[arg(long = "no-sort-output")]
     no_sort_output: bool,
@@ -362,6 +369,10 @@ struct DedupArgs {
     /// Skip coordinate sorting of output
     #[arg(long = "no-sort-output")]
     no_sort_output: bool,
+
+    /// Legacy flag; umi-tools accepts it here without any effect
+    #[arg(long = "output-unmapped", hide = true)]
+    _output_unmapped: bool,
 
     /// Dedup method: unique, percentile, cluster, adjacency, directional
     #[arg(long = "method", default_value = "directional")]
@@ -442,6 +453,7 @@ struct DedupArgs {
 }
 
 #[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
 struct CountArgs {
     /// Input BAM file
     #[arg(short = 'I', long = "stdin")]
@@ -450,6 +462,13 @@ struct CountArgs {
     /// Accepted as in umi-tools, where counting per gene never looks at them
     #[command(flatten)]
     _position: PositionArgs,
+
+    #[command(flatten)]
+    _umi_filter: UnusedUmiFilterArgs,
+
+    /// Legacy flag; umi-tools accepts it here without any effect
+    #[arg(long = "output-unmapped", hide = true)]
+    _output_unmapped: bool,
 
     /// Output file (default: stdout)
     #[arg(short = 'S', long = "stdout")]
@@ -786,6 +805,19 @@ fn validate_numpy_seed(seed: u64) -> Result<()> {
         bail!("Seed must be between 0 and 2**32 - 1");
     }
     Ok(())
+}
+
+/// Flags `umi_tools` defines for every BAM command although only `dedup` filters UMIs.
+#[derive(clap::Args)]
+struct UnusedUmiFilterArgs {
+    #[arg(long = "filter-umi", hide = true)]
+    _filter_umi: bool,
+
+    #[arg(long = "umi-whitelist", hide = true)]
+    _umi_whitelist: Option<String>,
+
+    #[arg(long = "umi-whitelist-paired", hide = true)]
+    _umi_whitelist_paired: Option<String>,
 }
 
 /// Grouping-key options shared by dedup and group.
@@ -1267,6 +1299,9 @@ fn extract_config(args: &ExtractArgs) -> Result<ExtractConfig> {
     }
     if args.whitelist.is_some() && !extract_cell {
         bail!("{}", options.lacks("cell", 'C'));
+    }
+    if args.filter_cell_barcode && args.whitelist.is_none() {
+        bail!("--filter-cell-barcode needs a whitelist of cell barcodes (--whitelist)");
     }
 
     let qe = match args.quality_encoding.as_deref() {
@@ -2062,6 +2097,30 @@ mod tests {
             "--spliced-is-unique",
             "--soft-clip-threshold=2",
         ]);
+    }
+
+    #[test]
+    fn hidden_umi_tools_flags_are_accepted_where_they_do_nothing() {
+        for command in ["group", "count"] {
+            parse(&[
+                command,
+                "--filter-umi",
+                "--umi-whitelist=umis.txt",
+                "--umi-whitelist-paired=umis2.txt",
+            ]);
+        }
+        for command in ["dedup", "count"] {
+            parse(&[command, "--output-unmapped"]);
+        }
+        let Commands::Extract(args) =
+            parse(&["extract", "-p", "CCNN", "--filter-cell-barcode"]).command
+        else {
+            panic!("expected extract");
+        };
+        assert!(
+            extract_config(&args).is_err(),
+            "needs --whitelist, as in umi_tools"
+        );
     }
 
     #[test]

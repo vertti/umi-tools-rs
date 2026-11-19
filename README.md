@@ -117,4 +117,5 @@ Optparse-style abbreviations work as in UMI-tools, for example `--unmapped` for 
 - `count` needs `--gene-tag` or `--per-contig`, as UMI-tools does; earlier releases defaulted to `XF`.
 - `group --unpaired-reads=output` writes each unpaired read twice, once ungrouped and once grouped, because UMI-tools yields it and then keeps processing it.
 - Fuzzy regex matching covers substitutions only: `{s<=N}` after a character, class or escape, or after a group that is a fixed-length run of them, such as `(?P<discard_1>GAGTGATTGCTTGTGACGCCTT){s<=2}`. Insertions, deletions and `{e<=N}` are rejected with an error, as are groups needing more than 10,000 substitution patterns.
+- `extract` does not implement the options UMI-tools hides from its help: `--filter-umi`, `--umi-whitelist`, `--umi-whitelist-paired`, `--retain-umi`, `--correct-umi-threshold` and `--umi-correct-log`.
 - Help output is rendered by clap and does not match the UMI-tools text.
