@@ -61,6 +61,22 @@ pub enum BarcodePattern {
 }
 
 impl BarcodePattern {
+    #[must_use]
+    pub fn has_umi(&self) -> bool {
+        match self {
+            Self::String(pattern) => !pattern.umi_positions.is_empty(),
+            Self::Regex(pattern) => pattern.has_group_named("umi_"),
+        }
+    }
+
+    #[must_use]
+    pub fn has_cell(&self) -> bool {
+        match self {
+            Self::String(pattern) => !pattern.cell_positions.is_empty(),
+            Self::Regex(pattern) => pattern.has_group_named("cell_"),
+        }
+    }
+
     pub(crate) fn extract_view<'a>(
         &self,
         sequence: &'a [u8],
@@ -435,6 +451,13 @@ impl RegexPattern {
             pattern,
             relaxed: RelaxedPattern::parse(pattern_str)?,
         })
+    }
+
+    fn has_group_named(&self, prefix: &str) -> bool {
+        self.pattern
+            .capture_names()
+            .flatten()
+            .any(|name| name.starts_with(prefix))
     }
 
     /// Spans of the named groups in the match that starts `sequence`.
