@@ -443,3 +443,92 @@ pub enum GroupError {
     #[error(transparent)]
     UmiLengths(#[from] MixedUmiLengths),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(name: &str) -> Record {
+        let view = bam::HeaderView::from_bytes(b"@SQ\tSN:chr1\tLN:10000\n");
+        let line = format!("{name}\t0\tchr1\t1\t60\t1M\t*\t0\t0\tA\tI");
+        Record::from_sam(&view, line.as_bytes()).unwrap()
+    }
+
+    fn buffer(reads: &[(&str, i64, &str, &str)]) -> GroupBuffer<i64> {
+        let mut buffer = GroupBuffer::new();
+        for &(name, position, cell, umi) in reads {
+            let key = GroupKey::for_gene(cell.as_bytes().to_vec());
+            buffer.add(record(name), position, key, umi.as_bytes().to_vec());
+        }
+        buffer
+    }
+
+    #[test]
+    fn umis_are_numbered_in_first_seen_order_within_a_position_and_key() {
+        let mut buffer = buffer(&[
+            ("r1", 100, "", "AAAA"),
+            ("r2", 100, "", "CCCC"),
+            ("r3", 100, "", "AAAA"),
+            ("r4", 100, "cell", "GGGG"),
+            ("r5", 200, "", "TTTT"),
+            ("r6", 100, "", "GGGG"),
+        ]);
+        let drained = buffer.drain_all();
+        let slots = &drained[&100][&GroupKey::for_gene(Vec::new())];
+        let summary = |umi: &[u8]| {
+            let slot = &slots[umi];
+            let names: Vec<&[u8]> = slot.records.iter().map(Record::qname).collect();
+            (slot.insertion_order, slot.count, names.concat())
+        };
+        assert_eq!(summary(b"AAAA"), (0, 2, b"r1r3".to_vec()));
+        assert_eq!(summary(b"CCCC"), (1, 1, b"r2".to_vec()));
+        assert_eq!(summary(b"GGGG"), (2, 1, b"r6".to_vec()));
+        let other_cell = &drained[&100][&GroupKey::for_gene(b"cell".to_vec())];
+        assert_eq!(other_cell[&b"GGGG"[..]].insertion_order, 0);
+        assert_eq!(
+            drained[&200].values().next().unwrap()[&b"TTTT"[..]].insertion_order,
+            0
+        );
+        assert!(buffer.drain_all().is_empty());
+    }
+
+    #[test]
+    fn drain_up_to_includes_the_threshold_position() {
+        let mut buffer = buffer(&[
+            ("r1", 99, "", "AAAA"),
+            ("r2", 100, "", "AAAA"),
+            ("r3", 101, "", "AAAA"),
+        ]);
+        assert_eq!(
+            buffer.drain_up_to(100).keys().copied().collect::<Vec<_>>(),
+            [99, 100]
+        );
+        assert!(buffer.drain_up_to(100).is_empty());
+        assert_eq!(
+            buffer.drain_all().keys().copied().collect::<Vec<_>>(),
+            [101]
+        );
+    }
+
+    #[test]
+    fn drain_key_takes_one_gene_and_leaves_the_rest() {
+        let mut buffer = GroupBuffer::<Vec<u8>>::new();
+        for (name, gene) in [("r1", "g1"), ("r2", "g2"), ("r3", "g1")] {
+            let key = GroupKey::for_gene(Vec::new());
+            buffer.add(
+                record(name),
+                gene.as_bytes().to_vec(),
+                key,
+                b"AAAA".to_vec(),
+            );
+        }
+        let drained = buffer.drain_key(&b"g1".to_vec());
+        assert_eq!(drained.len(), 1);
+        assert_eq!(
+            drained[&b"g1".to_vec()].values().next().unwrap()[&b"AAAA"[..]].count,
+            2
+        );
+        assert!(buffer.drain_key(&b"g1".to_vec()).is_empty());
+        assert_eq!(buffer.drain_all().len(), 1);
+    }
+}
