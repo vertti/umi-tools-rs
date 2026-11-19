@@ -41,3 +41,13 @@ def test_whitelist_subset_of_zero_reads_everything(rust_binary, tmp_path):
     unlimited = run(rust_binary, tmp_path, [*options, "--subset-reads=0"], cells=CELLS)
     assert unlimited.returncode == 0, unlimited.stderr
     assert unlimited.stdout == "AAAA\t\t3\t\nCCCC\t\t2\t\n"
+
+
+def test_blacklist_needs_a_whitelist_to_filter(rust_binary, tmp_path):
+    options = ["extract", "--bc-pattern=CCCCN", "--blacklist=blacklist", "-I", "reads"]
+    files = {"reads": READS, "blacklist": "ACGT\n", "whitelist": "ACGT\nTTGG\n"}
+    alone = run(rust_binary, tmp_path, options, **files)
+    assert alone.returncode == 0, alone.stderr
+    assert alone.stdout.count("@") == 2
+    filtered = run(rust_binary, tmp_path, [*options, "--whitelist=whitelist"], **files)
+    assert filtered.stdout == "@b_TTGG_C\nCAATT\n+\nIIIII\n"

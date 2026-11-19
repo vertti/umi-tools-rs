@@ -399,6 +399,9 @@ fn filter_barcodes(
         return false;
     }
     config.mask_umi(&mut barcodes.umi, &barcodes.quality);
+    let Some(whitelist) = &config.whitelist else {
+        return true;
+    };
     let blacklisted = |cell: &[u8]| {
         config
             .blacklist
@@ -409,9 +412,7 @@ fn filter_barcodes(
         stats.whitelist_filtered += 1;
         return false;
     }
-    if let Some(whitelist) = &config.whitelist
-        && !whitelist.contains(barcodes.cell.as_ref())
-    {
+    if !whitelist.contains(barcodes.cell.as_ref()) {
         if let Some(corrected) = config
             .correction_map
             .as_ref()
