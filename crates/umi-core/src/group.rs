@@ -7,7 +7,7 @@ use rust_htslib::bam::{self, Record};
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
 use crate::alignment_sort::RecordOutput;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
-use crate::clustering::cluster_umis;
+use crate::clustering::{MixedUmiLengths, cluster_umis};
 use crate::dedup::{
     DedupMethod, GroupKey, PositionOptions, PythonRandom, TieBreakRng, five_prime_position,
     get_read_position,
@@ -126,17 +126,17 @@ fn assign_groups(
     method: DedupMethod,
     umi_map: &HashMap<Vec<u8>, GroupSlot>,
     edit_threshold: u32,
-) -> Vec<Vec<Vec<u8>>> {
-    cluster_umis(
+) -> Result<Vec<Vec<Vec<u8>>>, MixedUmiLengths> {
+    Ok(cluster_umis(
         method,
         umi_map
             .iter()
             .map(|(umi, slot)| (umi.as_slice(), slot.count, slot.insertion_order)),
         edit_threshold,
-    )
+    )?
     .into_iter()
     .map(|group| group.into_iter().map(<[u8]>::to_vec).collect())
-    .collect()
+    .collect())
 }
 
 /// Process drained position groups: assign UMI groups, annotate records, write TSV rows.
@@ -152,7 +152,7 @@ fn process_drained<K: Ord>(
 ) -> Result<(), GroupError> {
     for key_map in drained.into_values() {
         for (_, mut umi_map) in key_map {
-            let groups = assign_groups(config.method, &umi_map, config.edit_distance_threshold);
+            let groups = assign_groups(config.method, &umi_map, config.edit_distance_threshold)?;
 
             for group in &groups {
                 let top_umi = &group[0];
@@ -468,4 +468,6 @@ pub enum GroupError {
     Barcode(#[from] BarcodeError),
     #[error(transparent)]
     Gene(#[from] GeneError),
+    #[error(transparent)]
+    UmiLengths(#[from] MixedUmiLengths),
 }

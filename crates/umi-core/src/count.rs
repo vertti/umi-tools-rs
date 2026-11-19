@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::alignment_io::RecordSource;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor, split_all};
-use crate::clustering::cluster_umis;
+use crate::clustering::{MixedUmiLengths, cluster_umis};
 use crate::dedup::{DedupMethod, PythonRandom, TieBreakRng};
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 use crate::pairing::{PairingError, PairingOptions};
@@ -28,6 +28,8 @@ pub enum CountError {
     Barcode(#[from] BarcodeError),
     #[error(transparent)]
     Gene(#[from] GeneError),
+    #[error(transparent)]
+    UmiLengths(#[from] MixedUmiLengths),
 }
 
 pub struct CountConfig {
@@ -141,10 +143,10 @@ pub fn run_count(
 
         match flusher.before_read(tid) {
             Flush::None => {}
-            Flush::All => flush_genes(std::mem::take(&mut buffer), config, &mut rows),
+            Flush::All => flush_genes(std::mem::take(&mut buffer), config, &mut rows)?,
             Flush::Gene(done) => {
                 if let Some(cells) = buffer.remove(&done) {
-                    flush_genes(BTreeMap::from([(done, cells)]), config, &mut rows);
+                    flush_genes(BTreeMap::from([(done, cells)]), config, &mut rows)?;
                 }
             }
         }
@@ -158,7 +160,7 @@ pub fn run_count(
             .or_default()
             .add(umi);
     }
-    flush_genes(buffer, config, &mut rows);
+    flush_genes(buffer, config, &mut rows)?;
 
     if config.barcode.per_cell {
         // A later bundle for the same gene and cell overwrites the earlier one, as umi_tools' dict does.
@@ -193,16 +195,21 @@ struct CountRow {
 }
 
 /// One row per (gene, cell) bundle: genes in name order, cells in name order.
-fn flush_genes(buffer: GeneBuffer, config: &CountConfig, rows: &mut Vec<CountRow>) {
+fn flush_genes(
+    buffer: GeneBuffer,
+    config: &CountConfig,
+    rows: &mut Vec<CountRow>,
+) -> Result<(), MixedUmiLengths> {
     for (gene, cells) in buffer {
         for (cell, umis) in cells {
             rows.push(CountRow {
                 gene: String::from_utf8_lossy(&gene).into_owned(),
                 cell: String::from_utf8_lossy(&cell).into_owned(),
-                count: umis.dedup_count(config.method, config.edit_distance_threshold),
+                count: umis.dedup_count(config.method, config.edit_distance_threshold)?,
             });
         }
     }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -221,15 +228,19 @@ impl UmiCounts {
         entry.0 += 1;
     }
 
-    fn dedup_count(&self, method: DedupMethod, edit_threshold: u32) -> usize {
-        cluster_umis(
+    fn dedup_count(
+        &self,
+        method: DedupMethod,
+        edit_threshold: u32,
+    ) -> Result<usize, MixedUmiLengths> {
+        Ok(cluster_umis(
             method,
             self.counts
                 .iter()
                 .map(|(umi, &(count, order))| (umi.as_slice(), count, order)),
             edit_threshold,
-        )
-        .len()
+        )?
+        .len())
     }
 }
 
@@ -337,7 +348,7 @@ impl CellUmiMap {
         &self,
         method: DedupMethod,
         edit_threshold: u32,
-    ) -> Vec<(&Option<String>, usize)> {
+    ) -> Result<Vec<(&Option<String>, usize)>, MixedUmiLengths> {
         self.cells
             .iter()
             .map(|(cell, umi_map)| {
@@ -347,9 +358,9 @@ impl CellUmiMap {
                         .iter()
                         .map(|(umi, &(count, order))| (umi.as_slice(), count, order)),
                     edit_threshold,
-                )
+                )?
                 .len();
-                (cell, n)
+                Ok((cell, n))
             })
             .collect()
     }
@@ -397,7 +408,7 @@ fn flush_count_tab_gene(
     config: &CountTabConfig,
     output: &mut dyn IoWrite,
 ) -> Result<(), CountError> {
-    let results = cell_umis.dedup_count(config.method, config.edit_distance_threshold);
+    let results = cell_umis.dedup_count(config.method, config.edit_distance_threshold)?;
 
     if config.per_cell {
         for (cell, count) in results {

@@ -28,6 +28,32 @@ impl DedupMethod {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("not all umis are the same length(!):  {min} - {max}")]
+pub struct MixedUmiLengths {
+    min: usize,
+    max: usize,
+}
+
+/// # Errors
+/// Returns the shortest and longest length when the UMIs differ in length.
+pub fn require_equal_lengths<'a>(
+    umis: impl IntoIterator<Item = &'a [u8]>,
+) -> Result<(), MixedUmiLengths> {
+    let mut lengths = umis.into_iter().map(<[u8]>::len);
+    let Some(first) = lengths.next() else {
+        return Ok(());
+    };
+    let (min, max) = lengths.fold((first, first), |(min, max), len| {
+        (min.min(len), max.max(len))
+    });
+    if min == max {
+        Ok(())
+    } else {
+        Err(MixedUmiLengths { min, max })
+    }
+}
+
 /// Hamming distance between two byte slices of equal length.
 /// Returns `u32::MAX` if lengths differ (matching Python's `np.inf` return).
 #[allow(clippy::cast_possible_truncation)]
@@ -172,28 +198,32 @@ pub fn median(values: &[u32]) -> f64 {
 
 /// Ordered UMI groups; the first member is the representative.
 /// Entries carry counts and first-seen order, independent of alignment storage.
+///
+/// # Errors
+/// Returns an error when the UMIs differ in length.
 pub fn cluster_umis<'a>(
     method: DedupMethod,
     entries: impl IntoIterator<Item = (&'a [u8], u32, u32)>,
     threshold: u32,
-) -> Vec<Vec<&'a [u8]>> {
+) -> Result<Vec<Vec<&'a [u8]>>, MixedUmiLengths> {
     let (counts, orders): (HashMap<_, _>, HashMap<_, _>) = entries
         .into_iter()
         .map(|(umi, count, order)| ((umi, count), (umi, order)))
         .unzip();
     let mut umis: Vec<&[u8]> = counts.keys().copied().collect();
     umis.sort_by_key(|umi| orders[umi]);
+    require_equal_lengths(umis.iter().copied())?;
     if matches!(method, DedupMethod::Unique | DedupMethod::Percentile) {
         let cutoff = if method == DedupMethod::Percentile && counts.len() > 1 {
             median(&counts.values().copied().collect::<Vec<_>>()) / 100.0
         } else {
             0.0
         };
-        return umis
+        return Ok(umis
             .into_iter()
             .filter(|umi| method == DedupMethod::Unique || f64::from(counts[umi]) > cutoff)
             .map(|umi| vec![umi])
-            .collect();
+            .collect());
     }
     let adjacency = if method == DedupMethod::Directional {
         build_directional_adjacency_list(&umis, &counts, threshold)
@@ -229,7 +259,7 @@ pub fn cluster_umis<'a>(
             DedupMethod::Unique | DedupMethod::Percentile => unreachable!("handled above"),
         }
     }
-    groups
+    Ok(groups)
 }
 
 #[cfg(test)]
@@ -254,6 +284,25 @@ mod tests {
             }
         }
         sorted_nodes
+    }
+
+    #[test]
+    fn every_method_rejects_mixed_umi_lengths() {
+        for method in [
+            DedupMethod::Unique,
+            DedupMethod::Percentile,
+            DedupMethod::Cluster,
+            DedupMethod::Adjacency,
+            DedupMethod::Directional,
+        ] {
+            let entries: [(&[u8], u32, u32); 3] =
+                [(b"ACGT", 1, 0), (b"ACGTAA", 1, 1), (b"ACG", 1, 2)];
+            let error = cluster_umis(method, entries, 1).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "not all umis are the same length(!):  3 - 6"
+            );
+        }
     }
 
     #[test]
