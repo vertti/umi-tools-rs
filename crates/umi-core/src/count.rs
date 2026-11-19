@@ -3,7 +3,6 @@ use std::io::{self, BufRead, Write as IoWrite};
 
 use thiserror::Error;
 
-use crate::alignment_io::RecordSource;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor, split_all};
 use crate::clustering::{MixedUmiLengths, cluster_umis};
 use crate::dedup::{DedupMethod, PythonRandom, sampled_barcode};
@@ -83,10 +82,9 @@ pub fn run_count(
     output: &mut dyn IoWrite,
 ) -> Result<CountStats, CountError> {
     config.pairing.validate(false)?;
-    let mut source = RecordSource::whole(bam_path, config.reference.as_deref())
-        .map_err(|e| CountError::BamOpen(e.to_string()))?;
-    let assigner =
-        GeneAssigner::new(&config.gene, source.header())?.ok_or(CountError::NotPerGene)?;
+    let (mut source, assigner) =
+        GeneAssigner::open(&config.gene, bam_path, config.reference.as_deref())?;
+    let assigner = assigner.ok_or(CountError::NotPerGene)?;
     let chrom_filter: Option<i32> = config
         .chrom
         .as_ref()
@@ -101,10 +99,6 @@ pub fn run_count(
         .transpose()?;
     #[allow(clippy::cast_possible_truncation)]
     let mut rng = PythonRandom::new(config.random_seed);
-    if let Some(map) = assigner.transcript_map() {
-        source = RecordSource::by_contig(bam_path, config.reference.as_deref(), map.genes.clone())
-            .map_err(|e| CountError::BamOpen(e.to_string()))?;
-    }
     let mut flusher = assigner.flusher();
 
     let mut buffer: GeneBuffer = BTreeMap::new();
