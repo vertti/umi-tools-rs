@@ -42,7 +42,12 @@ def _load_yaml(path):
 
 
 def _load_tests_yaml():
-    return _load_yaml(_get_tests_dir() / "tests.yaml")
+    path = _get_tests_dir() / "tests.yaml"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"upstream umi-tools tests not found at {path}; set UMI_TOOLS_TESTS_DIR"
+        )
+    return _load_yaml(path)
 
 
 @dataclass
@@ -85,11 +90,7 @@ def upstream_params(enabled):
     """Parameters for the named cases of the upstream tests.yaml."""
     tests_dir = _get_tests_dir()
     tests_yaml = _load_tests_yaml()
-    return [
-        _case(name, tests_yaml[name], tests_dir, tests_dir)
-        for name in enabled
-        if name in tests_yaml
-    ]
+    return [_case(name, tests_yaml[name], tests_dir, tests_dir) for name in enabled]
 
 
 def golden_params():
@@ -112,7 +113,7 @@ def rust_binary():
 def umi_tools_tests_dir():
     path = _get_tests_dir()
     if not path.exists():
-        pytest.skip(f"umi-tools tests directory not found at {path}")
+        pytest.fail(f"umi-tools tests directory not found at {path}")
     return path
 
 
