@@ -467,8 +467,6 @@ pub(crate) struct UmiSlot {
 struct ReadBuffer<K: Ord = i64> {
     positions: u64,
     groups: BTreeMap<K, BTreeMap<GroupKey, HashMap<Vec<u8>, UmiSlot>>>,
-    /// Per-(pos, key) insertion counters for deterministic ordering.
-    insertion_counters: BTreeMap<K, BTreeMap<GroupKey, u32>>,
 }
 
 impl ReadBuffer<i64> {
@@ -483,9 +481,6 @@ impl ReadBuffer<i64> {
     ) -> Result<Vec<Record>, DedupError> {
         let rest = self.groups.split_off(&(threshold + 1));
         let drained = std::mem::replace(&mut self.groups, rest);
-        // Clean up insertion counters for drained positions
-        let rest_counters = self.insertion_counters.split_off(&(threshold + 1));
-        let _ = std::mem::replace(&mut self.insertion_counters, rest_counters);
         Self::apply_selection(drained, method, edit_threshold, stats_ctx, umi_whitelist)
     }
 }
@@ -495,7 +490,6 @@ impl<K: Ord + Clone> ReadBuffer<K> {
         Self {
             positions: 0,
             groups: BTreeMap::new(),
-            insertion_counters: BTreeMap::new(),
         }
     }
 
@@ -511,23 +505,16 @@ impl<K: Ord + Clone> ReadBuffer<K> {
     ) -> Result<(), DedupError> {
         let umi_map = self
             .groups
-            .entry(pos.clone())
+            .entry(pos)
             .or_insert_with(|| {
                 self.positions += 1;
                 BTreeMap::new()
             })
-            .entry(key.clone())
+            .entry(key)
             .or_default();
 
         let Some(slot) = umi_map.get_mut(&umi) else {
-            let counter = self
-                .insertion_counters
-                .entry(pos)
-                .or_default()
-                .entry(key)
-                .or_default();
-            let order = *counter;
-            *counter += 1;
+            let order = u32::try_from(umi_map.len()).unwrap_or(u32::MAX);
             let mapq = record.mapq();
             umi_map.insert(
                 umi,
@@ -589,7 +576,6 @@ impl<K: Ord + Clone> ReadBuffer<K> {
         let Some(key_map) = self.groups.remove(key) else {
             return Ok(Vec::new());
         };
-        self.insertion_counters.remove(key);
         let drained = BTreeMap::from([(key.clone(), key_map)]);
         Self::apply_selection(drained, method, edit_threshold, stats_ctx, umi_whitelist)
     }
@@ -603,7 +589,6 @@ impl<K: Ord + Clone> ReadBuffer<K> {
         umi_whitelist: Option<&HashSet<Vec<u8>>>,
     ) -> Result<Vec<Record>, DedupError> {
         let drained = std::mem::take(&mut self.groups);
-        self.insertion_counters.clear();
         Self::apply_selection(drained, method, edit_threshold, stats_ctx, umi_whitelist)
     }
 
@@ -791,34 +776,6 @@ fn slot_groups(
             .map(|(umi, slot)| (umi.as_slice(), slot.count, slot.insertion_order)),
         edit_threshold,
     )
-}
-
-/// Count deduplicated UMI groups from raw count/order maps.
-///
-/// # Errors
-/// Returns an error when the UMIs differ in length.
-///
-/// # Panics
-/// Panics if an input UMI has no corresponding insertion order.
-#[allow(clippy::implicit_hasher)]
-pub fn count_umis(
-    method: DedupMethod,
-    counts: &HashMap<Vec<u8>, u32>,
-    orders: &HashMap<Vec<u8>, u32>,
-    edit_threshold: u32,
-) -> Result<usize, MixedUmiLengths> {
-    if method == DedupMethod::Unique {
-        require_equal_lengths(counts.keys().map(Vec::as_slice))?;
-        return Ok(counts.len());
-    }
-    Ok(cluster_umis(
-        method,
-        counts
-            .iter()
-            .map(|(umi, &count)| (umi.as_slice(), count, orders[umi])),
-        edit_threshold,
-    )?
-    .len())
 }
 
 fn select_umis_with_cluster_counts(
@@ -1476,8 +1433,6 @@ pub enum DedupError {
     BamWrite(String),
     #[error("unknown chromosome: {0}")]
     UnknownChrom(String),
-    #[error("invalid regex: {0}")]
-    InvalidRegex(String),
     #[error("failed to write stats file {0}: {1}")]
     StatsWrite(String, String),
     #[error("read {0} has no {1} tag for --multimapping-detection-method")]

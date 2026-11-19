@@ -92,7 +92,6 @@ pub struct ExtractStats {
     pub no_match: u64,
     pub quality_filtered: u64,
     pub whitelist_filtered: u64,
-    pub both_matched: u64,
 }
 
 /// Return the name portion of a FASTQ header (before first space).
@@ -174,16 +173,6 @@ pub struct ExtractOutputs<'a> {
     pub read2: Option<Box<dyn Write + 'a>>,
     pub filtered1: Option<Box<dyn Write + 'a>>,
     pub filtered2: Option<Box<dyn Write + 'a>>,
-}
-
-impl<'a> ExtractOutputs<'a> {
-    fn paired<W1: Write + 'a, W2: Write + 'a>(read1: W1, read2: W2) -> Self {
-        Self {
-            read1: Some(Box::new(read1)),
-            read2: Some(Box::new(read2)),
-            ..Self::default()
-        }
-    }
 }
 
 type Output<'a> = Option<BufWriter<Box<dyn Write + 'a>>>;
@@ -334,7 +323,6 @@ fn extract_either<'a>(
     let extraction = match (first, second) {
         (Some(first), Some(second)) => {
             if config.either_read_resolve == EitherReadResolve::Discard {
-                stats.both_matched += 1;
                 return Ok(None);
             }
             let min_quality = |result: &ExtractionView| {
@@ -629,8 +617,6 @@ pub fn extract_with_outputs<R1: std::io::Read + Send, R2: std::io::Read + Send>(
     Ok(stats)
 }
 
-// Compatibility entry points only adapt arguments; keep processing in extract_with_outputs.
-
 /// Extract single-end reads using the shared pipeline.
 ///
 /// # Errors
@@ -649,86 +635,6 @@ pub fn extract_reads<R: std::io::Read + Send, W: Write>(
             read1: Some(Box::new(output)),
             ..ExtractOutputs::default()
         },
-    )
-}
-
-/// Extract paired reads, combining barcodes from the configured patterns.
-///
-/// # Errors
-/// Returns errors for invalid options, malformed FASTQ, unmatched pairs or I/O failures.
-pub fn extract_reads_paired<
-    R1: std::io::Read + Send,
-    R2: std::io::Read + Send,
-    W1: Write,
-    W2: Write,
->(
-    config: &ExtractConfig,
-    input1: R1,
-    input2: R2,
-    output1: W1,
-    output2: W2,
-) -> Result<ExtractStats, ExtractError> {
-    extract_with_outputs(
-        config,
-        ExtractMode::Combine,
-        input1,
-        Some(input2),
-        ExtractOutputs::paired(output1, output2),
-    )
-}
-
-/// Extract paired reads and write read2 to the primary output.
-///
-/// # Errors
-/// Returns errors for invalid options, malformed FASTQ, unmatched pairs or I/O failures.
-pub fn extract_reads_paired_r1_pattern<
-    R1: std::io::Read + Send,
-    R2: std::io::Read + Send,
-    W: Write,
->(
-    config: &ExtractConfig,
-    input1: R1,
-    input2: R2,
-    output: W,
-    filtered_out1: Option<Box<dyn Write>>,
-    filtered_out2: Option<Box<dyn Write>>,
-) -> Result<ExtractStats, ExtractError> {
-    extract_with_outputs(
-        config,
-        ExtractMode::Combine,
-        input1,
-        Some(input2),
-        ExtractOutputs {
-            read1: None,
-            read2: Some(Box::new(output)),
-            filtered1: filtered_out1,
-            filtered2: filtered_out2,
-        },
-    )
-}
-
-/// Extract paired reads by choosing either matching pattern.
-///
-/// # Errors
-/// Returns errors for invalid options, malformed FASTQ, unmatched pairs or I/O failures.
-pub fn extract_reads_either_read<
-    R1: std::io::Read + Send,
-    R2: std::io::Read + Send,
-    W1: Write,
-    W2: Write,
->(
-    config: &ExtractConfig,
-    input1: R1,
-    input2: R2,
-    output1: W1,
-    output2: W2,
-) -> Result<ExtractStats, ExtractError> {
-    extract_with_outputs(
-        config,
-        ExtractMode::EitherRead,
-        input1,
-        Some(input2),
-        ExtractOutputs::paired(output1, output2),
     )
 }
 
