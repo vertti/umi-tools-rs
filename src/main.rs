@@ -875,7 +875,7 @@ struct CommonArgs {
     #[arg(long = "help-extended", action = ArgAction::Help)]
     _help_extended: Option<bool>,
 
-    /// Directory for temporary files. Accepted for umi-tools compatibility; has no effect.
+    /// Directory for temporary files: dedup and group write the spills of their output sort here
     #[arg(long = "temp-dir")]
     temp_dir: Option<String>,
 
@@ -893,9 +893,9 @@ struct CommonArgs {
 }
 
 impl CommonArgs {
-    fn note_ignored_flags(&self) {
+    fn note_ignored_flags(&self, sorts_alignments: bool) {
         let flags = [
-            ("--temp-dir", self.temp_dir.is_some()),
+            ("--temp-dir", self.temp_dir.is_some() && !sorts_alignments),
             ("--timeit", self.timeit.is_some()),
             ("--timeit-name", self.timeit_name.is_some()),
             ("--timeit-header", self.timeit_header),
@@ -921,7 +921,8 @@ impl Commands {
     }
 
     fn note_ignored_flags(&self) {
-        self.common().note_ignored_flags();
+        self.common()
+            .note_ignored_flags(matches!(self, Self::Dedup(_) | Self::Group(_)));
         if let Self::Whitelist(args) = self
             && args.plot_prefix.is_some()
         {
@@ -1563,6 +1564,7 @@ fn run_group_cmd(args: &GroupArgs) -> Result<String> {
         reference: args.input_format.reference_filename.clone(),
         output_bam: args.output_bam,
         no_sort_output: args.no_sort_output,
+        temp_dir: args.common.temp_dir.clone(),
         chrom: args.chrom.clone(),
         group_out: args.group_out.clone(),
         edit_distance_threshold: args.edit_distance_threshold,
@@ -1643,6 +1645,7 @@ fn run_dedup_cmd(args: &DedupArgs) -> Result<String> {
         multimapping_detection,
         buffer_whole_contig: args.buffer_whole_contig,
         no_sort_output: args.no_sort_output,
+        temp_dir: args.common.temp_dir.clone(),
         gene,
         output_stats: args.output_stats.clone(),
         pairing,
