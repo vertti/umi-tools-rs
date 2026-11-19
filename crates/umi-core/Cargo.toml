@@ -13,6 +13,6 @@ workspace = true
 [dependencies]
 needletail = { version = "0.7", default-features = false }
 regex = "1"
-rust-htslib = { version = "1", default-features = false, features = ["libdeflate"] }
+rust-htslib = { version = "1", default-features = false, features = ["bzip2", "libdeflate", "lzma"] }
 thiserror = "2"
 tempfile = "3.27.0"
