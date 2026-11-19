@@ -9,4 +9,6 @@ test = [
     "pytest",
     "pyyaml",
 ]
-bench = ["umi_tools"]
+bench = [
+    "umi_tools @ git+https://github.com/CGATOxford/UMI-tools@79d8b818676c1e7fb6c5a620e4cb24b372d03eea",
+]

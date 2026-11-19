@@ -1290,15 +1290,6 @@ wheels = [
 ]
 
 [[package]]
-name = "setuptools"
-version = "82.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/82/f3/748f4d6f65d1756b9ae577f329c951cda23fb900e4de9f70900ced962085/setuptools-82.0.0.tar.gz", hash = "sha256:22e0a2d69474c6ae4feb01951cb69d515ed23728cf96d05513d36e42b62b37cb", size = 1144893, upload-time = "2026-02-08T15:08:40.206Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e1/c6/76dc613121b793286a3f91621d7b75a2b493e0390ddca50f11993eadf192/setuptools-82.0.0-py3-none-any.whl", hash = "sha256:70b18734b607bd1da571d097d236cfcfacaf01de45717d59e6e04b96877532e0", size = 1003468, upload-time = "2026-02-08T15:08:38.723Z" },
-]
-
-[[package]]
 name = "six"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1381,8 +1372,8 @@ wheels = [
 
 [[package]]
 name = "umi-tools"
-version = "1.1.6"
-source = { registry = "https://pypi.org/simple" }
+version = "1.1.7.dev54+g79d8b8186"
+source = { git = "https://github.com/CGATOxford/UMI-tools?rev=79d8b818676c1e7fb6c5a620e4cb24b372d03eea#79d8b818676c1e7fb6c5a620e4cb24b372d03eea" }
 dependencies = [
     { name = "future" },
     { name = "matplotlib" },
@@ -1395,11 +1386,6 @@ dependencies = [
     { name = "regex" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "setuptools" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/45/6e/0e931a777d6105038e11188ee9166586c8e48cbae4277a1e1bc3d8147c2b/umi_tools-1.1.6.tar.gz", hash = "sha256:959c07d9e18d1005fea6e62ca0b82588378a078689f4e02e97ec93b18abd096c", size = 121241, upload-time = "2024-10-09T19:58:07.754Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4d/29/ca74ef0f4d370f1d35147674389fc7b07fe650a1e204d7ff8d93c176e85b/umi_tools-1.1.6-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:d9cb72c145baf62670db341f2917b2b3a7711dba2f45274c2a548cb0554a57fb", size = 134819, upload-time = "2024-10-03T10:17:36.11Z" },
 ]
 
 [[package]]
@@ -1420,7 +1406,7 @@ test = [
 [package.metadata]
 
 [package.metadata.requires-dev]
-bench = [{ name = "umi-tools" }]
+bench = [{ name = "umi-tools", git = "https://github.com/CGATOxford/UMI-tools?rev=79d8b818676c1e7fb6c5a620e4cb24b372d03eea" }]
 test = [
     { name = "pysam", specifier = ">=0.23.3" },
     { name = "pytest" },
