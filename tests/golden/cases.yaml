@@ -232,6 +232,24 @@ count_gene_transcript_map:
   references: [count_gene_transcript_map.tsv.gz]
   options: count --random-seed=123456789 --method=directional --per-gene --per-contig --gene-transcript-map=<INPUTS>/gene_transcript_map.tsv
 
+count_gene_transcript_map_chrom:
+  stdin: transcripts_sub.bam
+  outputs: [stdout]
+  references: [count_gene_transcript_map_chrom.tsv.gz]
+  options: count --random-seed=123456789 --method=directional --per-gene --per-contig --gene-transcript-map=<INPUTS>/gene_transcript_map.tsv --chrom=ENST00000000002
+
+dedup_gene_transcript_map_chrom:
+  stdin: transcripts_sub.bam
+  outputs: [stdout]
+  references: [dedup_gene_transcript_map_chrom.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --per-gene --per-contig --gene-transcript-map=<INPUTS>/gene_transcript_map.tsv --chrom=ENST00000000002
+
+group_gene_transcript_map_chrom:
+  stdin: transcripts_sub.bam
+  outputs: [stdout, group_gene_transcript_map_chrom.tsv]
+  references: [group_gene_transcript_map_chrom.sam.gz, group_gene_transcript_map_chrom.tsv.gz]
+  options: group --out-sam --output-bam --random-seed=123456789 --per-gene --per-contig --gene-transcript-map=<INPUTS>/gene_transcript_map.tsv --chrom=ENST00000000002 --group-out=group_gene_transcript_map_chrom.tsv
+
 dedup_paired_unmapped_reads_use:
   stdin: paired_sub.bam
   outputs: [stdout]
