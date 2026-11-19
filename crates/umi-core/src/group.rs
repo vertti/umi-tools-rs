@@ -229,8 +229,12 @@ fn process_drained<K: Ord>(
 /// Returns `GroupError` on BAM I/O failures or unknown chromosome filter.
 #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
 pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, GroupError> {
-    let (mut source, assigner) =
-        GeneAssigner::open(&config.gene, input_path, config.reference.as_deref())?;
+    let (mut source, assigner) = GeneAssigner::open(
+        &config.gene,
+        config.chrom.as_deref(),
+        input_path,
+        config.reference.as_deref(),
+    )?;
     let mut flusher = assigner.as_ref().map(GeneAssigner::flusher);
     let header_view = source.header().clone();
 

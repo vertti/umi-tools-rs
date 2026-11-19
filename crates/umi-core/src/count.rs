@@ -82,8 +82,12 @@ pub fn run_count(
     output: &mut dyn IoWrite,
 ) -> Result<CountStats, CountError> {
     config.pairing.validate(false)?;
-    let (mut source, assigner) =
-        GeneAssigner::open(&config.gene, bam_path, config.reference.as_deref())?;
+    let (mut source, assigner) = GeneAssigner::open(
+        &config.gene,
+        config.chrom.as_deref(),
+        bam_path,
+        config.reference.as_deref(),
+    )?;
     let assigner = assigner.ok_or(CountError::NotPerGene)?;
     let chrom_filter: Option<i32> = config
         .chrom

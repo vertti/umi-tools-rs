@@ -196,20 +196,27 @@ impl GeneAssigner {
         }))
     }
 
-    /// Opens the alignments and the assigner for them. With a transcript map the reads
-    /// come gene by gene instead of in file order.
+    /// Opens the alignments and the assigner for them. With a transcript map, and no
+    /// `chrom`, the reads come gene by gene instead of in file order.
     ///
     /// # Errors
     ///
     /// Returns the errors of [`Self::new`] and of opening the file.
     pub fn open(
         options: &GeneOptions,
+        chrom: Option<&str>,
         path: &str,
         reference: Option<&str>,
     ) -> Result<(RecordSource, Option<Self>), GeneError> {
+        options.validate()?;
         let open_error = |e: rust_htslib::errors::Error| GeneError::Open(e.to_string());
         let mut source = RecordSource::whole(path, reference).map_err(open_error)?;
-        let assigner = Self::new(options, source.header())?;
+        // `umi_tools` reads one contig with --chrom and never loads the transcript map.
+        let without_map = chrom.map(|_| GeneOptions {
+            transcript_map: None,
+            ..options.clone()
+        });
+        let assigner = Self::new(without_map.as_ref().unwrap_or(options), source.header())?;
         if let Some(map) = assigner.as_ref().and_then(Self::transcript_map) {
             source =
                 RecordSource::by_contig(path, reference, map.genes.clone()).map_err(open_error)?;

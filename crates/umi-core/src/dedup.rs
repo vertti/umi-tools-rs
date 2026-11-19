@@ -1216,8 +1216,12 @@ impl StatsCollector {
 #[allow(clippy::too_many_lines)]
 pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, DedupError> {
     config.pairing.validate(false)?;
-    let (mut source, assigner) =
-        GeneAssigner::open(&config.gene, input_path, config.reference.as_deref())?;
+    let (mut source, assigner) = GeneAssigner::open(
+        &config.gene,
+        config.chrom.as_deref(),
+        input_path,
+        config.reference.as_deref(),
+    )?;
     let mut flusher = assigner.as_ref().map(GeneAssigner::flusher);
     let header = if config.no_sort_output {
         bam::Header::from_template(source.header())
