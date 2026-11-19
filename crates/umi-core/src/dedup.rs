@@ -1032,7 +1032,7 @@ impl StatsCollector {
             .chain(&self.post_cluster_stats)
             .chain(&self.pre_cluster_stats_null)
             .chain(&self.post_cluster_stats_null);
-        let max_ed = all_stats.copied().fold(0.0_f64, f64::max) as i32;
+        let max_ed = all_stats.copied().fold(-1.0_f64, f64::max) as i32;
 
         // bins = range(-1, max_ed + 2)  →  [-1, 0, 1, ..., max_ed+1]
         let bins: Vec<i32> = (-1..=max_ed + 1).collect();
