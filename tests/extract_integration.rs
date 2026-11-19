@@ -43,7 +43,6 @@ fn extract_string_matches_umi_tools_reference() {
         stats.input_reads, stats.output_reads,
         "no reads should be filtered"
     );
-    assert_eq!(stats.too_short, 0);
 
     let actual = String::from_utf8(output).unwrap();
     let expected = read_gzipped_fastq("tests/data/slim_extracted_NNNXXXXNN.fastq.gz");

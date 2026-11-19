@@ -238,7 +238,7 @@ fn extract_pair(
                 cell.extend(extraction.cell_barcode);
                 umi.extend(extraction.umi);
             }
-            Err(ExtractError::ReadTooShort { .. } | ExtractError::RegexNoMatch) => return Ok(None),
+            Err(ExtractError::RegexNoMatch) => return Ok(None),
             Err(e) => return Err(e),
         }
     }

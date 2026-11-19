@@ -89,7 +89,6 @@ impl ExtractConfig {
 pub struct ExtractStats {
     pub input_reads: u64,
     pub output_reads: u64,
-    pub too_short: u64,
     pub no_match: u64,
     pub quality_filtered: u64,
     pub whitelist_filtered: u64,
@@ -313,7 +312,7 @@ fn try_extract<'a>(
 ) -> Result<Option<ExtractionView<'a>>, ExtractError> {
     match extract_record(record, pattern) {
         Ok(result) => Ok(Some(result)),
-        Err(ExtractError::ReadTooShort { .. } | ExtractError::RegexNoMatch) => Ok(None),
+        Err(ExtractError::RegexNoMatch) => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -447,10 +446,6 @@ fn extract_and_filter<'a>(
     let mut extraction = match result {
         Ok(Some(extraction)) => extraction,
         Ok(None) => return Ok(None),
-        Err(ExtractError::ReadTooShort { .. }) => {
-            stats.too_short += 1;
-            return Ok(None);
-        }
         Err(ExtractError::RegexNoMatch) => {
             stats.no_match += 1;
             return Ok(None);

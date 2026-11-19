@@ -1310,10 +1310,9 @@ fn run_extract(args: &ExtractArgs) -> Result<String> {
     finish_outputs([Some(primary), secondary, filtered1, filtered2])?;
 
     Ok(format!(
-        "Reads input: {}, output: {}, too short: {}, no match: {}, quality filtered: {}, whitelist filtered: {}",
+        "Reads input: {}, output: {}, no match: {}, quality filtered: {}, whitelist filtered: {}",
         stats.input_reads,
         stats.output_reads,
-        stats.too_short,
         stats.no_match,
         stats.quality_filtered,
         stats.whitelist_filtered,
