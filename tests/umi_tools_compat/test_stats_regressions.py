@@ -127,3 +127,37 @@ def test_clustering_agrees_across_commands(rust_binary, tmp_path, method, expect
     )
     assert counted.returncode == 0, counted.stderr
     assert counted.stdout == f"gene\tcount\nchr1\t{expected}\n"
+
+
+BUNDLES = [(101, {"AAAA": 5, "AAAT": 2, "CCCC": 1}), (301, {"GGGG": 3, "GGGT": 1}),
+           (601, {"TTTT": 2}), (901, {"ACGT": 1, "TGCA": 1, "AAAA": 1})]
+
+
+def bundle_stats(binary, tmp_path, *options):
+    """Statistics files for BUNDLES; expected contents come from umi_tools master."""
+    names = (f"q{i}" for i in range(100))
+    rows = [f"{next(names)}_{umi}\t0\tchr1\t{position}\t60\t4M\t*\t0\t0\tACGT\tIIII\n"
+            for position, counts in BUNDLES for umi, count in counts.items() for _ in range(count)]
+    source = tmp_path / "in.sam"
+    source.write_text("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:100000\n" + "".join(rows))
+    (tmp_path / "umis.txt").write_text("AAAA\nCCCC\n")
+    result = subprocess.run(
+        [str(binary), "dedup", "--stdin", str(source), "--stdout", "out.bam",
+         "--output-stats=stats", "--random-seed=1", *options],
+        capture_output=True, text=True, cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    return {suffix: (tmp_path / f"stats_{suffix}.tsv").read_text()
+            for suffix in ("edit_distance", "per_umi", "per_umi_per_position")}
+
+
+def test_unique_method_reports_its_own_tallies_in_the_unique_columns(rust_binary, tmp_path):
+    stats = bundle_stats(rust_binary, tmp_path, "--method=unique")
+    assert stats["edit_distance"] == "unique\tunique_null\tunique\tunique_null\tedit_distance\n1\t1\t1\t1\tSingle_UMI\n0\t1\t0\t1\t0\n1\t0\t1\t0\t1\n0\t0\t0\t0\t2\n1\t1\t1\t1\t3\n1\t1\t1\t1\t4\n0\t0\t0\t0\t5\n"
+
+
+def test_bundles_emptied_by_the_umi_whitelist_leave_no_statistics(rust_binary, tmp_path):
+    stats = bundle_stats(rust_binary, tmp_path, "--filter-umi", "--umi-whitelist=umis.txt")
+    assert stats["edit_distance"] == "unique\tunique_null\tdirectional\tdirectional_null\tedit_distance\n0\t0\t1\t1\tSingle_UMI\n0\t1\t0\t1\t0\n0\t0\t0\t0\t1\n0\t0\t0\t0\t2\n1\t1\t0\t0\t3\n1\t0\t1\t0\t4\n0\t0\t0\t0\t5\n"
+    assert stats["per_umi"] == "UMI\tmedian_counts_pre\ttimes_observed_pre\ttotal_counts_pre\tmedian_counts_post\ttimes_observed_post\ttotal_counts_post\nAAAA\t3\t2\t6\t4\t2\t8\nAAAT\t2\t1\t2\t0\t0\t0\nACGT\t1\t1\t1\t0\t0\t0\nCCCC\t1\t1\t1\t1\t1\t1\nTGCA\t1\t1\t1\t0\t0\t0\n"
+    assert stats["per_umi_per_position"] == "counts\tinstances_pre\tinstances_post\n1\t4\t2\n2\t1\t0\n5\t1\t0\n7\t0\t1\n"
