@@ -744,6 +744,33 @@ impl PairedArgs {
     }
 }
 
+/// The checks of `validateSamOptions` that look for a flag in the command line as typed,
+/// which an abbreviated flag therefore passes.
+fn validate_typed_sam_options(
+    command: &str,
+    barcode: &BarcodeArgs,
+    pairing: &PairedArgs,
+) -> Result<()> {
+    if (command.contains("--umi-tag") || command.contains("--cell-tag"))
+        && barcode.extract_umi_method != "tag"
+    {
+        bail!("--umi-tag and/or --cell-tag options provided. Need to set --extract-umi-method=tag");
+    }
+    if pairing.unmapped_reads == "use" && !pairing.paired {
+        bail!("--unmapped-reads=use is only compatible with paired end reads (--paired)");
+    }
+    for flag in ["--chimeric-pairs", "--unpaired-reads", "--ignore-tlen"] {
+        if command.contains(flag) && !pairing.paired {
+            bail!("{flag} is only compatible with paired end reads (--paired)");
+        }
+    }
+    Ok(())
+}
+
+fn typed_command() -> String {
+    std::env::args().collect::<Vec<_>>().join(" ")
+}
+
 /// Grouping-key options shared by dedup and group.
 #[derive(clap::Args, Clone, Copy)]
 struct PositionArgs {
@@ -1361,6 +1388,7 @@ fn run_whitelist_cmd(args: &WhitelistArgs) -> Result<String> {
 
 fn run_group_cmd(args: &GroupArgs) -> Result<String> {
     let barcode = args.barcode.extractor()?;
+    validate_typed_sam_options(&typed_command(), &args.barcode, &args.pairing)?;
     let position = args.position.options();
     let pairing = args.pairing.options(args.output_unmapped);
     let gene = args.gene.options(false);
@@ -1411,6 +1439,10 @@ fn run_group_cmd(args: &GroupArgs) -> Result<String> {
 
 fn run_dedup_cmd(args: &DedupArgs) -> Result<String> {
     let barcode = args.barcode.extractor()?;
+    validate_typed_sam_options(&typed_command(), &args.barcode, &args.pairing)?;
+    if args.output_stats.is_some() && args.ignore_umi {
+        bail!("'--output-stats' and '--ignore-umi' options cannot be used together");
+    }
     let position = args.position.options();
     let gene = args.gene.options(false);
     let pairing = args.pairing.options(false);
@@ -1526,6 +1558,7 @@ fn load_umi_whitelist(path: &str, paired_path: Option<&str>) -> Result<HashSet<V
 fn run_count_cmd(args: &CountArgs) -> Result<String> {
     let gene = args.gene.options(true);
     let barcode = args.barcode.extractor()?;
+    validate_typed_sam_options(&typed_command(), &args.barcode, &args.pairing)?;
     let pairing = args.pairing.options(false);
 
     let input = args
