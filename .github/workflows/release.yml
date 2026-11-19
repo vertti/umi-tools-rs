@@ -14,6 +14,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo test --workspace --locked
+      - name: Check that both crates package and build at the tagged version
+        run: |
+          .github/scripts/set-release-version.sh
+          cargo publish --workspace --dry-run --allow-dirty
 
   build:
     needs: test
@@ -42,8 +46,29 @@ jobs:
           name: umi-tools-rs-${{ matrix.target }}
           path: umi-tools-rs-${{ matrix.target }}.tar.gz*
 
-  release:
+  publish:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - run: .github/scripts/set-release-version.sh
+
+      - name: Publish the crates not yet on crates.io
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for crate in umi-core umi-tools-rs; do
+            if curl -fs -o /dev/null -A "umi-tools-rs release workflow" "https://crates.io/api/v1/crates/$crate/$VERSION"; then
+              echo "$crate $VERSION is already published"
+            else
+              cargo publish --allow-dirty -p "$crate"
+            fi
+          done
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release:
+    needs: [build, publish]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -58,29 +83,3 @@ jobs:
           files: |
             *.tar.gz
             *.tar.gz.sha256
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Set version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version = \"0.0.0-dev\"/version = \"$VERSION\"/" Cargo.toml
-          sed -i "s/^version = \"0.0.0-dev\"/version = \"$VERSION\"/" crates/umi-core/Cargo.toml
-          sed -i "s|umi-core = { path = \"crates/umi-core\", version = \"0.0.0-dev\" }|umi-core = { path = \"crates/umi-core\", version = \"$VERSION\" }|" Cargo.toml
-
-      - name: Publish umi-core
-        run: cargo publish --allow-dirty -p umi-core
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index update
-        run: sleep 30
-
-      - name: Publish umi-tools-rs
-        run: cargo publish --allow-dirty
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
