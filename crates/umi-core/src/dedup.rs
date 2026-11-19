@@ -185,6 +185,8 @@ pub struct DedupConfig {
     pub multimapping_detection: Option<MultimappingDetection>,
     pub buffer_whole_contig: bool,
     pub no_sort_output: bool,
+    /// Directory for the spills of the output sort.
+    pub temp_dir: Option<String>,
     pub barcode: BarcodeExtractor,
     pub gene: GeneOptions,
     pub output_stats: Option<String>,
@@ -1262,7 +1264,11 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
         positions: 0,
     };
 
-    let mut output = RecordOutput::new(Some(writer), (!config.no_sort_output).then_some(header));
+    let mut output = RecordOutput::new(
+        Some(writer),
+        (!config.no_sort_output).then_some(header),
+        config.temp_dir.as_deref(),
+    );
     let mut mates = config.pairing.paired.then(|| MateWriter {
         input_path,
         reference: config.reference.as_deref(),

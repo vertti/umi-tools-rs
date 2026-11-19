@@ -27,6 +27,8 @@ pub struct GroupConfig {
     pub reference: Option<String>,
     pub output_bam: bool,
     pub no_sort_output: bool,
+    /// Directory for the spills of the output sort.
+    pub temp_dir: Option<String>,
     pub chrom: Option<String>,
     pub group_out: Option<String>,
     pub edit_distance_threshold: u32,
@@ -303,6 +305,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
     let mut output = RecordOutput::new(
         writer,
         (!config.no_sort_output).then(|| alignment_io::coordinate_sorted_header(&header_view)),
+        config.temp_dir.as_deref(),
     );
     let mut unique_id: u32 = 0;
 

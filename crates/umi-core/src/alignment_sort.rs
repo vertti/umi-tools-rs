@@ -2,6 +2,7 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::path::PathBuf;
 
 use rust_htslib::bam::{self, Read as _, Record};
 use tempfile::TempPath;
@@ -30,9 +31,17 @@ pub struct RecordOutput {
 }
 
 impl RecordOutput {
-    pub fn new(writer: Option<bam::Writer>, sorted_header: Option<bam::Header>) -> Self {
+    /// Records are sorted when `sorted_header` is given, spilling to `temp_dir`.
+    pub fn new(
+        writer: Option<bam::Writer>,
+        sorted_header: Option<bam::Header>,
+        temp_dir: Option<&str>,
+    ) -> Self {
         let sorter = if writer.is_some() {
-            sorted_header.map(RecordSorter::new)
+            sorted_header.map(|header| RecordSorter {
+                temp_dir: temp_dir.map(PathBuf::from),
+                ..RecordSorter::new(header)
+            })
         } else {
             None
         };
@@ -69,6 +78,8 @@ pub struct RecordSorter {
     byte_limit: usize,
     fan_in: usize,
     next_order: u64,
+    /// Where spills are written; the system temporary directory when `None`.
+    temp_dir: Option<PathBuf>,
 }
 
 impl RecordSorter {
@@ -81,7 +92,16 @@ impl RecordSorter {
             byte_limit: 64 * 1024 * 1024,
             fan_in: 64,
             next_order: 0,
+            temp_dir: None,
         }
+    }
+
+    fn spill_path(&self) -> std::io::Result<TempPath> {
+        let file = match &self.temp_dir {
+            Some(directory) => tempfile::NamedTempFile::new_in(directory),
+            None => tempfile::NamedTempFile::new(),
+        }?;
+        Ok(file.into_temp_path())
     }
 
     pub fn push(&mut self, record: Record) -> Result<(), SortError> {
@@ -98,7 +118,7 @@ impl RecordSorter {
             return Ok(());
         }
         self.buffer.sort_by_key(coordinate_sort_key);
-        let path = tempfile::NamedTempFile::new()?.into_temp_path();
+        let path = self.spill_path()?;
         let mut writer = bam::Writer::from_path(&path, &self.header, bam::Format::Bam)?;
         for record in &self.buffer {
             writer.write(record)?;
@@ -129,7 +149,7 @@ impl RecordSorter {
     }
 
     fn merge_to_run(&self, runs: Vec<Run>) -> Result<Run, SortError> {
-        let path = tempfile::NamedTempFile::new()?.into_temp_path();
+        let path = self.spill_path()?;
         let mut writer = bam::Writer::from_path(&path, &self.header, bam::Format::Bam)?;
         let order = runs[0].order;
         let count = merge_runs(&runs, |record| Ok(writer.write(record)?))?;
@@ -261,6 +281,27 @@ mod tests {
             .unwrap();
         assert_eq!(actual, expected);
         assert!(paths.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn spills_go_to_the_given_directory() {
+        let (header, records) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let mut sorter = RecordSorter::new(header);
+        sorter.temp_dir = Some(directory.path().to_path_buf());
+        sorter.byte_limit = 1;
+        sorter.fan_in = 3;
+        for record in records {
+            sorter.push(record).unwrap();
+        }
+        let runs: Vec<_> = sorter.levels.iter().flatten().collect();
+        assert_ne!(runs.len(), 0);
+        assert!(
+            runs.iter()
+                .all(|run| run.path.starts_with(directory.path()))
+        );
+        sorter.finish(|_| Ok(())).unwrap();
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     #[test]
