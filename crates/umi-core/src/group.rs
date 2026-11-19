@@ -56,16 +56,12 @@ type Drained<K> = BTreeMap<K, BTreeMap<GroupKey, HashMap<Vec<u8>, GroupSlot>>>;
 
 struct GroupBuffer<K: Ord = i64> {
     groups: Drained<K>,
-    insertion_counters: BTreeMap<K, BTreeMap<GroupKey, u32>>,
 }
 
 impl GroupBuffer<i64> {
     fn drain_up_to(&mut self, threshold: i64) -> Drained<i64> {
         let rest = self.groups.split_off(&(threshold + 1));
-        let drained = std::mem::replace(&mut self.groups, rest);
-        let rest_counters = self.insertion_counters.split_off(&(threshold + 1));
-        let _ = std::mem::replace(&mut self.insertion_counters, rest_counters);
-        drained
+        std::mem::replace(&mut self.groups, rest)
     }
 }
 
@@ -73,17 +69,11 @@ impl<K: Ord + Clone> GroupBuffer<K> {
     const fn new() -> Self {
         Self {
             groups: BTreeMap::new(),
-            insertion_counters: BTreeMap::new(),
         }
     }
 
     fn add(&mut self, record: Record, pos: K, key: GroupKey, umi: Vec<u8>) {
-        let umi_map = self
-            .groups
-            .entry(pos.clone())
-            .or_default()
-            .entry(key.clone())
-            .or_default();
+        let umi_map = self.groups.entry(pos).or_default().entry(key).or_default();
 
         if let Some(slot) = umi_map.get_mut(&umi) {
             slot.count += 1;
@@ -91,15 +81,7 @@ impl<K: Ord + Clone> GroupBuffer<K> {
             return;
         }
 
-        let counter = self
-            .insertion_counters
-            .entry(pos)
-            .or_default()
-            .entry(key)
-            .or_default();
-        let order = *counter;
-        *counter += 1;
-
+        let order = u32::try_from(umi_map.len()).unwrap_or(u32::MAX);
         umi_map.insert(
             umi,
             GroupSlot {
@@ -111,16 +93,13 @@ impl<K: Ord + Clone> GroupBuffer<K> {
     }
 
     fn drain_key(&mut self, key: &K) -> Drained<K> {
-        self.insertion_counters.remove(key);
         self.groups
             .remove(key)
             .map_or_default(|key_map| BTreeMap::from([(key.clone(), key_map)]))
     }
 
     fn drain_all(&mut self) -> Drained<K> {
-        let drained = std::mem::take(&mut self.groups);
-        self.insertion_counters.clear();
-        drained
+        std::mem::take(&mut self.groups)
     }
 }
 
@@ -457,8 +436,6 @@ pub enum GroupError {
     TsvWrite(String),
     #[error("unknown chromosome: {0}")]
     UnknownChrom(String),
-    #[error("invalid regex: {0}")]
-    InvalidRegex(String),
     #[error(transparent)]
     Barcode(#[from] BarcodeError),
     #[error(transparent)]
