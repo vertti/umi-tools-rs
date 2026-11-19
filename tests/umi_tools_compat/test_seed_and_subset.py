@@ -36,7 +36,7 @@ def test_group_seeds_python_random_with_all_bits_of_a_large_seed(rust_binary, so
     )
 
 
-@pytest.mark.parametrize("command", [["dedup"], ["count", "--per-contig", "--per-gene"]])
+@pytest.mark.parametrize("command", [["dedup", "--out-sam"], ["count", "--per-contig", "--per-gene"]])
 def test_numpy_seed_range_is_enforced(rust_binary, source, command):
     result = run(rust_binary, source, *command, "--random-seed=4294967296")
     assert result.returncode == 1

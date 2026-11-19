@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::alignment_io::RecordSource;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor, split_all};
 use crate::clustering::{MixedUmiLengths, cluster_umis};
-use crate::dedup::{DedupMethod, PythonRandom, TieBreakRng};
+use crate::dedup::{DedupMethod, PythonRandom, sampled_barcode};
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 use crate::pairing::{PairingError, PairingOptions};
 
@@ -123,16 +123,14 @@ pub fn run_count(
             continue;
         }
 
-        if config.subset.is_some_and(|s| rng.random() >= s) {
-            continue;
-        }
-
-        if record.mapq() < config.mapping_quality {
-            continue;
-        }
-
-        let Some(Barcode { umi, cell }) =
-            config.barcode.for_grouping(&record, config.ignore_umi)?
+        let Some(Barcode { umi, cell }) = sampled_barcode(
+            &record,
+            config.subset,
+            &mut rng,
+            config.mapping_quality,
+            &config.barcode,
+            config.ignore_umi,
+        )?
         else {
             continue;
         };

@@ -134,6 +134,23 @@ impl TieBreakRng for PythonRandom {
     }
 }
 
+/// The barcode of a read that passes `--subset` and `--mapping-quality`.
+///
+/// The subset draw comes first: `umi_tools` takes one per read before any other filter.
+pub(crate) fn sampled_barcode(
+    record: &Record,
+    subset: Option<f64>,
+    rng: &mut impl TieBreakRng,
+    mapping_quality: u8,
+    barcode: &BarcodeExtractor,
+    ignore_umi: bool,
+) -> Result<Option<Barcode>, BarcodeError> {
+    if subset.is_some_and(|fraction| rng.random() >= fraction) || record.mapq() < mapping_quality {
+        return Ok(None);
+    }
+    barcode.for_grouping(record, ignore_umi)
+}
+
 /// MT19937 PRNG matching `NumPy`'s `np.random.seed(int)` + `np.random.random()`.
 ///
 /// `NumPy` seeds with `init_genrand(seed)` directly (unlike `CPython` which uses
@@ -1210,17 +1227,14 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
             continue;
         }
 
-        // Subset check consumes one RNG call per mapped read (before buffer.add)
-        if config.subset.is_some_and(|s| rng.random() >= s) {
-            continue;
-        }
-
-        if record.mapq() < config.mapping_quality {
-            continue;
-        }
-
-        let Some(Barcode { umi, cell }) =
-            config.barcode.for_grouping(&record, config.ignore_umi)?
+        let Some(Barcode { umi, cell }) = sampled_barcode(
+            &record,
+            config.subset,
+            &mut rng,
+            config.mapping_quality,
+            &config.barcode,
+            config.ignore_umi,
+        )?
         else {
             continue;
         };

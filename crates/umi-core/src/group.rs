@@ -9,8 +9,8 @@ use crate::alignment_sort::RecordOutput;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor};
 use crate::clustering::{MixedUmiLengths, cluster_umis};
 use crate::dedup::{
-    DedupMethod, GroupKey, PositionOptions, PythonRandom, TieBreakRng, five_prime_position,
-    get_read_position,
+    DedupMethod, GroupKey, PositionOptions, PythonRandom, five_prime_position, get_read_position,
+    sampled_barcode,
 };
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 use crate::pairing::PairingOptions;
@@ -337,17 +337,14 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
             continue;
         }
 
-        // Subset check consumes one RNG call per grouped read (before buffer.add)
-        if config.subset.is_some_and(|s| rng.random() >= s) {
-            continue;
-        }
-
-        if record.mapq() < config.mapping_quality {
-            continue;
-        }
-
-        let Some(Barcode { umi, cell }) =
-            config.barcode.for_grouping(&record, config.ignore_umi)?
+        let Some(Barcode { umi, cell }) = sampled_barcode(
+            &record,
+            config.subset,
+            &mut rng,
+            config.mapping_quality,
+            &config.barcode,
+            config.ignore_umi,
+        )?
         else {
             continue;
         };
