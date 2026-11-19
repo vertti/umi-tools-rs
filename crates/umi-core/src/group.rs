@@ -31,7 +31,7 @@ pub struct GroupConfig {
     pub group_out: Option<String>,
     pub edit_distance_threshold: u32,
     pub position: PositionOptions,
-    pub subset: Option<f32>,
+    pub subset: Option<f64>,
     pub mapping_quality: u8,
     pub buffer_whole_contig: bool,
     pub gene: GeneOptions,
@@ -303,7 +303,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
     };
 
     #[allow(clippy::cast_possible_truncation)]
-    let mut rng = PythonRandom::new(config.random_seed as u32);
+    let mut rng = PythonRandom::new(config.random_seed);
 
     let mut output = RecordOutput::new(
         writer,
@@ -338,7 +338,7 @@ pub fn run_group(config: &GroupConfig, input_path: &str) -> Result<GroupStats, G
         }
 
         // Subset check consumes one RNG call per grouped read (before buffer.add)
-        if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
+        if config.subset.is_some_and(|s| rng.random() >= s) {
             continue;
         }
 

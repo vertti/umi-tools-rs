@@ -43,7 +43,7 @@ pub struct CountConfig {
     pub mapping_quality: u8,
     pub pairing: PairingOptions,
     pub chrom: Option<String>,
-    pub subset: Option<f32>,
+    pub subset: Option<f64>,
     pub random_seed: u64,
 }
 
@@ -91,7 +91,7 @@ pub fn run_count(
         })
         .transpose()?;
     #[allow(clippy::cast_possible_truncation)]
-    let mut rng = PythonRandom::new(config.random_seed as u32);
+    let mut rng = PythonRandom::new(config.random_seed);
     if let Some(map) = assigner.transcript_map() {
         source = RecordSource::by_contig(bam_path, config.reference.as_deref(), map.genes.clone())
             .map_err(|e| CountError::BamOpen(e.to_string()))?;
@@ -123,7 +123,7 @@ pub fn run_count(
             continue;
         }
 
-        if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
+        if config.subset.is_some_and(|s| rng.random() >= s) {
             continue;
         }
 

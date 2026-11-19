@@ -40,11 +40,13 @@ impl PythonRandom {
     const UPPER_MASK: u32 = 0x8000_0000;
     const LOWER_MASK: u32 = 0x7fff_ffff;
 
-    /// Seed the same way `CPython` `random.seed(int)` does:
-    /// `init_genrand(19_650_218)` then `init_by_array(&[seed])`.
-    pub(crate) fn new(seed: u32) -> Self {
+    /// Seed the same way `CPython` `random.seed(int)` does: `init_genrand(19_650_218)`
+    /// then `init_by_array` over the seed's 32-bit words, low word first.
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn new(seed: u64) -> Self {
         let mut rng = Self::init_genrand(19_650_218);
-        rng.init_by_array(&[seed]);
+        let words = [seed as u32, (seed >> 32) as u32];
+        rng.init_by_array(if words[1] == 0 { &words[..1] } else { &words });
         rng
     }
 
@@ -161,7 +163,7 @@ pub struct DedupConfig {
     pub chrom: Option<String>,
     pub edit_distance_threshold: u32,
     pub position: PositionOptions,
-    pub subset: Option<f32>,
+    pub subset: Option<f64>,
     pub mapping_quality: u8,
     pub multimapping_detection: Option<MultimappingDetection>,
     pub buffer_whole_contig: bool,
@@ -1141,8 +1143,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
         })
         .transpose()?;
 
-    #[allow(clippy::cast_possible_truncation)]
-    let mut rng = PythonRandom::new(config.random_seed as u32);
+    let mut rng = PythonRandom::new(config.random_seed);
     let mut buffer = ReadBuffer::<i64>::new();
     let mut gene_buffer = ReadBuffer::<Vec<u8>>::new();
     let mut stats = DedupStats {
@@ -1210,7 +1211,7 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
         }
 
         // Subset check consumes one RNG call per mapped read (before buffer.add)
-        if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
+        if config.subset.is_some_and(|s| rng.random() >= s) {
             continue;
         }
 
