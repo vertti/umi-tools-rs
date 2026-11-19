@@ -20,6 +20,15 @@ pub enum CountError {
     NotPerGene,
     #[error("unknown chromosome: {0}")]
     UnknownChrom(String),
+    #[error("line: {0} does not contain 2 columns")]
+    TabColumns(String),
+    #[error(
+        "Could not extract UMI or CB from the read ID, please check UMI and CB are encoded in \
+         the read name:{0}"
+    )]
+    TabBarcode(String),
+    #[error("empty separator")]
+    EmptySeparator,
     #[error(transparent)]
     Pairing(#[from] PairingError),
     #[error("I/O error: {0}")]
@@ -261,6 +270,10 @@ pub fn run_count_tab(
         writeln!(output, "gene\tcount")?;
     }
 
+    if config.separator.is_empty() {
+        return Err(CountError::EmptySeparator);
+    }
+
     let mut current_gene: Option<String> = None;
     let mut cell_umis = CellUmiMap::default();
 
@@ -271,17 +284,10 @@ pub fn run_count_tab(
         if n == 0 {
             break;
         }
-        let line = line_buf.trim_end_matches('\n').trim_end_matches('\r');
-        if line.is_empty() {
-            continue;
-        }
-
-        let mut cols = line.splitn(2, '\t');
-        let Some(read_name) = cols.next() else {
-            continue;
-        };
-        let Some(gene) = cols.next() else {
-            continue;
+        let mut columns = line_buf.trim().split('\t');
+        let (Some(read_name), Some(gene), None) = (columns.next(), columns.next(), columns.next())
+        else {
+            return Err(CountError::TabColumns(line_buf));
         };
         let gene = gene.to_string();
 
@@ -302,8 +308,12 @@ pub fn run_count_tab(
         let parts = split_all(read_name.as_bytes(), &config.separator);
         let umi = parts.last().map_or_else(Vec::new, |s| s.to_vec());
 
-        let cell_key = if config.per_cell && parts.len() >= 2 {
-            Some(String::from_utf8_lossy(parts[parts.len() - 2]).into_owned())
+        let cell_key = if config.per_cell {
+            let cell = parts
+                .len()
+                .checked_sub(2)
+                .ok_or_else(|| CountError::TabBarcode(read_name.to_string()))?;
+            Some(String::from_utf8_lossy(parts[cell]).into_owned())
         } else {
             None
         };
@@ -420,4 +430,70 @@ fn flush_count_tab_gene(
         writeln!(output, "{gene}\t{total}")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn count_tab(input: &str, per_cell: bool, separator: &str) -> Result<String, CountError> {
+        let config = CountTabConfig {
+            method: DedupMethod::Directional,
+            per_cell,
+            separator: separator.as_bytes().to_vec(),
+            edit_distance_threshold: 1,
+        };
+        let mut output = Vec::new();
+        run_count_tab(&config, &mut input.as_bytes(), &mut output)?;
+        Ok(String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn count_tab_strips_whitespace_around_each_line() {
+        assert_eq!(
+            count_tab("  r1_AAAA\tg1 \nr2_CCCC\tg1\r\n", false, "_").unwrap(),
+            "gene\tcount\ng1\t2\n"
+        );
+    }
+
+    #[test]
+    fn count_tab_rejects_lines_without_exactly_two_columns() {
+        for input in [
+            "r1_AAAA\tg1\textra\n",
+            "r1_AAAA\n",
+            "r1_AAAA g1\n",
+            "r1_AAAA\t\n",
+            "r1_AAAA\tg1\n\nr2_CCCC\tg1\n",
+            "r1_AAAA\tg1\n\n",
+        ] {
+            let error = count_tab(input, false, "_").unwrap_err().to_string();
+            assert!(
+                error.contains("does not contain 2 columns"),
+                "{input:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn count_tab_per_cell_needs_a_cell_in_the_read_name() {
+        assert_eq!(
+            count_tab("r1AAAA\tg1\n", false, "_").unwrap(),
+            "gene\tcount\ng1\t1\n"
+        );
+        let error = count_tab("r1AAAA\tg1\n", true, "_")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Could not extract UMI or CB from the read ID"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn count_tab_rejects_an_empty_separator() {
+        let error = count_tab("r1_AAAA\tg1\n", false, "")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "empty separator");
+    }
 }
