@@ -40,6 +40,24 @@ dedup_paired_mapq:
   references: [dedup_paired_mapq.sam.gz]
   options: dedup --paired --out-sam --random-seed=123456789 --mapping-quality=20
 
+dedup_no_sort_output:
+  stdin: chr19_sub.bam
+  outputs: [stdout]
+  references: [dedup_no_sort_output.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --no-sort-output
+
+dedup_paired_no_sort_output:
+  stdin: paired_mixed_sub.bam
+  outputs: [stdout]
+  references: [dedup_paired_no_sort_output.sam.gz]
+  options: dedup --paired --out-sam --random-seed=123456789 --no-sort-output
+
+dedup_per_gene_no_sort_output:
+  stdin: chr19_gene_tags.bam
+  outputs: [stdout]
+  references: [dedup_per_gene_no_sort_output.sam.gz]
+  options: dedup --out-sam --random-seed=123456789 --per-gene --gene-tag=XF --no-sort-output
+
 dedup_single_mapq:
   stdin: chr19_gene_tags.bam
   outputs: [stdout]

@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::Write as IoWrite;
 
 use rust_htslib::bam::record::{Aux, Cigar};
-use rust_htslib::bam::{Read as BamRead, Record};
+use rust_htslib::bam::{self, Read as BamRead, Record};
 
 use crate::alignment_io::{self, AlignmentFormat, AlignmentOutput};
 use crate::alignment_sort::RecordOutput;
@@ -184,6 +184,7 @@ pub struct DedupConfig {
     pub mapping_quality: u8,
     pub multimapping_detection: Option<MultimappingDetection>,
     pub buffer_whole_contig: bool,
+    pub no_sort_output: bool,
     pub barcode: BarcodeExtractor,
     pub gene: GeneOptions,
     pub output_stats: Option<String>,
@@ -661,6 +662,99 @@ impl<K: Ord + Clone> ReadBuffer<K> {
     }
 }
 
+/// Writes the read2 of each read1 that was written, as `umi_tools`' `TwoPassPairWriter` does.
+struct MateWriter<'a> {
+    input_path: &'a str,
+    reference: Option<&'a str>,
+    /// Name, contig and position of each read2 still to be written.
+    awaited: HashSet<(Vec<u8>, i32, i64)>,
+    contig: Option<i32>,
+    /// Unsorted output carries the mates found on a contig right after its read1s.
+    after_each_contig: bool,
+}
+
+impl MateWriter<'_> {
+    fn before_read1(
+        &mut self,
+        read1: &Record,
+        output: &mut RecordOutput,
+    ) -> Result<(), DedupError> {
+        if read1.is_unmapped() || read1.is_mate_unmapped() {
+            return Ok(());
+        }
+        if self.after_each_contig && self.contig != Some(read1.tid()) {
+            self.write_mates_on_contig(output)?;
+            self.contig = Some(read1.tid());
+        }
+        self.awaited
+            .insert((read1.qname().to_vec(), read1.mtid(), read1.mpos()));
+        Ok(())
+    }
+
+    fn finish(&mut self, output: &mut RecordOutput) -> Result<(), DedupError> {
+        if self.after_each_contig {
+            self.write_mates_on_contig(output)?;
+        }
+        let mut reader = self.open()?;
+        self.write_awaited(reader.records(), None, output)
+    }
+
+    fn write_mates_on_contig(&mut self, output: &mut RecordOutput) -> Result<(), DedupError> {
+        let Some(contig) = self.contig else {
+            return Ok(());
+        };
+        if self.awaited.is_empty() {
+            return Ok(());
+        }
+        let indexed = u32::try_from(contig).ok().and_then(|tid| {
+            let mut reader = bam::IndexedReader::from_path(self.input_path).ok()?;
+            if let Some(reference) = self.reference {
+                reader.set_reference(reference).ok()?;
+            }
+            reader.fetch(tid).ok()?;
+            Some(reader)
+        });
+        if let Some(mut reader) = indexed {
+            self.write_awaited(reader.records(), None, output)
+        } else {
+            let mut reader = self.open()?;
+            self.write_awaited(reader.records(), Some(contig), output)
+        }
+    }
+
+    fn open(&self) -> Result<bam::Reader, DedupError> {
+        alignment_io::open_reader(self.input_path, self.reference)
+            .map_err(|e| DedupError::BamOpen(e.to_string()))
+    }
+
+    fn write_awaited(
+        &mut self,
+        records: impl Iterator<Item = Result<Record, rust_htslib::errors::Error>>,
+        contig: Option<i32>,
+        output: &mut RecordOutput,
+    ) -> Result<(), DedupError> {
+        for record in records {
+            let record = record.map_err(|e| DedupError::BamRead(e.to_string()))?;
+            if record.is_unmapped()
+                || record.is_mate_unmapped()
+                || record.is_first_in_template()
+                || contig.is_some_and(|contig| record.tid() != contig)
+            {
+                continue;
+            }
+            if self
+                .awaited
+                .remove(&(record.qname().to_vec(), record.tid(), record.pos()))
+            {
+                output
+                    .push(record)
+                    .map_err(|e| DedupError::BamWrite(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Bundles the stats collector + read generator for passing through drain calls.
 struct StatsContext {
     collector: StatsCollector,
@@ -1134,7 +1228,11 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
         .map_err(|e| DedupError::BamOpen(e.to_string()))?;
     }
     let mut flusher = assigner.as_ref().map(GeneAssigner::flusher);
-    let header = alignment_io::coordinate_sorted_header(source.header());
+    let header = if config.no_sort_output {
+        bam::Header::from_template(source.header())
+    } else {
+        alignment_io::coordinate_sorted_header(source.header())
+    };
 
     let writer = alignment_io::open_writer(
         &header,
@@ -1169,12 +1267,18 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
         positions: 0,
     };
 
-    let mut output = RecordOutput::new(Some(writer), Some(header));
-    let mut mate_set: HashSet<(Vec<u8>, i32, i64)> = HashSet::new();
+    let mut output = RecordOutput::new(Some(writer), (!config.no_sort_output).then_some(header));
+    let mut mates = config.pairing.paired.then(|| MateWriter {
+        input_path,
+        reference: config.reference.as_deref(),
+        awaited: HashSet::new(),
+        contig: None,
+        after_each_contig: config.no_sort_output,
+    });
     let mut emit_selected = |records: Vec<Record>| -> Result<(), DedupError> {
         for record in records {
-            if config.pairing.paired {
-                mate_set.insert((record.qname().to_vec(), record.mtid(), record.mpos()));
+            if let Some(mates) = &mut mates {
+                mates.before_read1(&record, &mut output)?;
             }
             output
                 .push(record)
@@ -1325,25 +1429,9 @@ pub fn run_dedup(config: &DedupConfig, input_path: &str) -> Result<DedupStats, D
         wl_ref,
     )?)?;
 
-    // Paired mode: second pass to find R2 mates of surviving R1 reads.
-    if config.pairing.paired {
-        let mut reader2 = alignment_io::open_reader(input_path, config.reference.as_deref())
-            .map_err(|e| DedupError::BamOpen(e.to_string()))?;
-        for result in reader2.records() {
-            let record = result.map_err(|e| DedupError::BamRead(e.to_string()))?;
-            if record.is_unmapped() || record.is_mate_unmapped() {
-                continue;
-            }
-            if record.is_first_in_template() {
-                continue;
-            }
-            let key = (record.qname().to_vec(), record.tid(), record.pos());
-            if mate_set.remove(&key) {
-                output
-                    .push(record)
-                    .map_err(|e| DedupError::BamWrite(e.to_string()))?;
-            }
-        }
+    drop(emit_selected);
+    if let Some(mut mates) = mates {
+        mates.finish(&mut output)?;
     }
 
     stats.output_reads = output

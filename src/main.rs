@@ -359,6 +359,10 @@ struct DedupArgs {
     #[arg(short = 'I', long = "stdin")]
     input: Option<String>,
 
+    /// Skip coordinate sorting of output
+    #[arg(long = "no-sort-output")]
+    no_sort_output: bool,
+
     /// Dedup method: unique, percentile, cluster, adjacency, directional
     #[arg(long = "method", default_value = "directional")]
     method: String,
@@ -1638,6 +1642,7 @@ fn run_dedup_cmd(args: &DedupArgs) -> Result<String> {
         mapping_quality: args.mapping_quality,
         multimapping_detection,
         buffer_whole_contig: args.buffer_whole_contig,
+        no_sort_output: args.no_sort_output,
         gene,
         output_stats: args.output_stats.clone(),
         pairing,
