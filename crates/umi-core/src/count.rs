@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::alignment_io::RecordSource;
 use crate::barcode::{Barcode, BarcodeError, BarcodeExtractor, split_all};
 use crate::clustering::{MixedUmiLengths, cluster_umis};
-use crate::dedup::{DedupMethod, PythonRandom, TieBreakRng};
+use crate::dedup::{DedupMethod, PythonRandom, sampled_barcode};
 use crate::gene::{Flush, GeneAssigner, GeneError, GeneOptions};
 use crate::pairing::{PairingError, PairingOptions};
 
@@ -52,7 +52,7 @@ pub struct CountConfig {
     pub mapping_quality: u8,
     pub pairing: PairingOptions,
     pub chrom: Option<String>,
-    pub subset: Option<f32>,
+    pub subset: Option<f64>,
     pub random_seed: u64,
 }
 
@@ -100,7 +100,7 @@ pub fn run_count(
         })
         .transpose()?;
     #[allow(clippy::cast_possible_truncation)]
-    let mut rng = PythonRandom::new(config.random_seed as u32);
+    let mut rng = PythonRandom::new(config.random_seed);
     if let Some(map) = assigner.transcript_map() {
         source = RecordSource::by_contig(bam_path, config.reference.as_deref(), map.genes.clone())
             .map_err(|e| CountError::BamOpen(e.to_string()))?;
@@ -132,16 +132,14 @@ pub fn run_count(
             continue;
         }
 
-        if config.subset.is_some_and(|s| rng.random() >= f64::from(s)) {
-            continue;
-        }
-
-        if record.mapq() < config.mapping_quality {
-            continue;
-        }
-
-        let Some(Barcode { umi, cell }) =
-            config.barcode.for_grouping(&record, config.ignore_umi)?
+        let Some(Barcode { umi, cell }) = sampled_barcode(
+            &record,
+            config.subset,
+            &mut rng,
+            config.mapping_quality,
+            &config.barcode,
+            config.ignore_umi,
+        )?
         else {
             continue;
         };
