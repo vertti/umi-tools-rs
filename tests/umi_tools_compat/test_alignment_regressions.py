@@ -63,3 +63,16 @@ def test_transcript_map_replaces_an_existing_mc_tag(rust_binary, tmp_path, comma
             read, = list(stream)
         assert read.get_tag("MC") == "GENE1"
         assert [name for name, _ in read.tags].count("MC") == 1
+
+
+@pytest.mark.parametrize("tag", ["B", "ABC"])
+def test_group_rejects_a_tag_that_is_not_two_characters(rust_binary, tmp_path, tag):
+    source = tmp_path / "in.bam"
+    write_bam(source, [])
+    result = subprocess.run(
+        [str(rust_binary), "group", "--stdin", str(source), "--output-bam",
+         "--stdout", str(tmp_path / "out.bam"), f"--umi-group-tag={tag}"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 1
+    assert f"Invalid tag: {tag}" in result.stderr

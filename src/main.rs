@@ -35,6 +35,7 @@ use umi_core::whitelist::{
     version,
     about = "Fast UMI tools in Rust",
     infer_long_args = true,
+    args_override_self = true,
     propagate_version = true
 )]
 struct Cli {
@@ -68,7 +69,7 @@ enum Commands {
 #[allow(clippy::struct_excessive_bools)]
 struct ExtractArgs {
     /// Barcode pattern for read1 (e.g. NNNXXXXNN). N=UMI, C=cell, X=retained sequence.
-    #[arg(long = "bc-pattern")]
+    #[arg(short = 'p', long = "bc-pattern")]
     bc_pattern: Option<String>,
 
     /// Barcode pattern for read2 (paired-end mode)
@@ -156,7 +157,7 @@ struct ExtractArgs {
     quality_filter_mask: Option<u8>,
 
     /// Extract from read2 only; requires --bc-pattern2 and forbids --bc-pattern
-    #[arg(long = "read2-only", action = ArgAction::SetTrue, overrides_with = "read2_only")]
+    #[arg(long = "read2-only", action = ArgAction::SetTrue)]
     read2_only: bool,
 
     /// Stop after this many input reads
@@ -175,7 +176,7 @@ struct ExtractArgs {
 #[allow(clippy::struct_excessive_bools)]
 struct WhitelistArgs {
     /// Barcode pattern (e.g. CCCCCCNNNNNNNNNN). N=UMI, C=cell, X=retained sequence.
-    #[arg(long = "bc-pattern")]
+    #[arg(short = 'p', long = "bc-pattern")]
     bc_pattern: Option<String>,
 
     /// Barcode pattern for read2; its cell bases follow read1's
@@ -187,7 +188,7 @@ struct WhitelistArgs {
     read2_in: Option<String>,
 
     /// Extract from read2 only; requires --bc-pattern2 and forbids --bc-pattern
-    #[arg(long = "read2-only", action = ArgAction::SetTrue, overrides_with = "read2_only")]
+    #[arg(long = "read2-only", action = ArgAction::SetTrue)]
     read2_only: bool,
 
     /// Output file for read2s whose pair failed barcode extraction
@@ -195,7 +196,7 @@ struct WhitelistArgs {
     filtered_out2: Option<String>,
 
     /// Accepted for umi-tools compatibility; whitelist writes no read names, so it has no effect
-    #[arg(long = "ignore-read-pair-suffixes", action = ArgAction::SetTrue, overrides_with = "ignore_read_pair_suffixes")]
+    #[arg(long = "ignore-read-pair-suffixes", action = ArgAction::SetTrue)]
     ignore_read_pair_suffixes: bool,
 
     /// Count reads or distinct UMIs per cell barcode
@@ -203,7 +204,7 @@ struct WhitelistArgs {
     method: String,
 
     /// Write an empty whitelist instead of failing when the density knee finds no threshold
-    #[arg(long = "allow-threshold-error", action = ArgAction::SetTrue, overrides_with = "allow_threshold_error")]
+    #[arg(long = "allow-threshold-error", action = ArgAction::SetTrue)]
     allow_threshold_error: bool,
 
     /// Extraction method: "string" for fixed-position, "regex" for named capture groups
@@ -334,7 +335,7 @@ struct GroupArgs {
     multimapping_detection_method: Option<String>,
 
     /// Buffer a whole contig before grouping instead of a 1 kb window; uses more memory
-    #[arg(long = "buffer-whole-contig", alias = "whole-contig", action = ArgAction::SetTrue, overrides_with = "buffer_whole_contig")]
+    #[arg(long = "buffer-whole-contig", alias = "whole-contig", action = ArgAction::SetTrue)]
     buffer_whole_contig: bool,
 
     /// Include unmapped reads in output (alias for --unmapped-reads=output)
@@ -403,7 +404,7 @@ struct DedupArgs {
     multimapping_detection_method: Option<String>,
 
     /// Buffer a whole contig before grouping instead of a 1 kb window; uses more memory
-    #[arg(long = "buffer-whole-contig", alias = "whole-contig", action = ArgAction::SetTrue, overrides_with = "buffer_whole_contig")]
+    #[arg(long = "buffer-whole-contig", alias = "whole-contig", action = ArgAction::SetTrue)]
     buffer_whole_contig: bool,
 
     /// Random subset of reads to process (0.0-1.0)
@@ -442,6 +443,10 @@ struct CountArgs {
     #[arg(short = 'I', long = "stdin")]
     input: Option<String>,
 
+    /// Accepted as in umi-tools, where counting per gene never looks at them
+    #[command(flatten)]
+    _position: PositionArgs,
+
     /// Output file (default: stdout)
     #[arg(short = 'S', long = "stdout")]
     output: Option<String>,
@@ -464,7 +469,7 @@ struct CountArgs {
     barcode: BarcodeArgs,
 
     /// Ignore UMIs and count one molecule per gene (and cell)
-    #[arg(long = "ignore-umi", action = ArgAction::SetTrue, overrides_with = "ignore_umi")]
+    #[arg(long = "ignore-umi", action = ArgAction::SetTrue)]
     ignore_umi: bool,
 
     /// Output wide-format cell counts (requires --per-cell)
@@ -488,7 +493,7 @@ struct CountArgs {
     subset: Option<f64>,
 
     /// Accepted for umi-tools compatibility; count writes no alignments, so it has no effect
-    #[arg(long = "no-sort-output", action = ArgAction::SetTrue, overrides_with = "no_sort_output")]
+    #[arg(long = "no-sort-output", action = ArgAction::SetTrue)]
     no_sort_output: bool,
 
     #[command(flatten)]
@@ -534,7 +539,7 @@ struct CountTabArgs {
     in_format: Option<String>,
 
     /// Accepted for umi-tools compatibility; `count_tab` reads a table, so it has no effect
-    #[arg(short = 'i', long = "in-sam", action = ArgAction::SetTrue, overrides_with = "in_sam")]
+    #[arg(short = 'i', long = "in-sam", action = ArgAction::SetTrue)]
     in_sam: bool,
 
     /// Accepted for umi-tools compatibility; `count_tab` reads a table, so it has no effect
@@ -546,7 +551,7 @@ struct CountTabArgs {
     reference_filename: Option<String>,
 
     /// Accepted for umi-tools compatibility; `count_tab` has no positions, so it has no effect
-    #[arg(long = "read-length", action = ArgAction::SetTrue, overrides_with = "read_length")]
+    #[arg(long = "read-length", action = ArgAction::SetTrue)]
     read_length: bool,
 
     /// Accepted for umi-tools compatibility; `count_tab` has no positions, so it has no effect
@@ -554,7 +559,7 @@ struct CountTabArgs {
     soft_clip_threshold: Option<f64>,
 
     /// Accepted for umi-tools compatibility; `count_tab` has no positions, so it has no effect
-    #[arg(long = "spliced-is-unique", action = ArgAction::SetTrue, overrides_with = "spliced_is_unique")]
+    #[arg(long = "spliced-is-unique", action = ArgAction::SetTrue)]
     spliced_is_unique: bool,
 
     #[command(flatten)]
@@ -569,7 +574,7 @@ struct InputFormatArgs {
     _in_format: Option<String>,
 
     /// Input is SAM. Detected from the file content, so this has no effect.
-    #[arg(short = 'i', long = "in-sam", action = ArgAction::SetTrue, overrides_with = "_in_sam")]
+    #[arg(short = 'i', long = "in-sam", action = ArgAction::SetTrue)]
     _in_sam: bool,
 
     /// FASTA reference for reading and writing CRAM. Local path only; defaults to the UR field of the input header.
@@ -625,7 +630,7 @@ struct BarcodeArgs {
     cell_tag_delimiter: Option<String>,
 
     /// Group, deduplicate or count per cell barcode
-    #[arg(long = "per-cell", action = ArgAction::SetTrue, overrides_with = "per_cell")]
+    #[arg(long = "per-cell", action = ArgAction::SetTrue)]
     per_cell: bool,
 }
 
@@ -664,7 +669,7 @@ impl BarcodeArgs {
 #[derive(clap::Args, Clone)]
 struct GeneArgs {
     /// Group, deduplicate or count per gene; needs --gene-tag or --per-contig
-    #[arg(long = "per-gene", action = ArgAction::SetTrue, overrides_with = "per_gene")]
+    #[arg(long = "per-gene", action = ArgAction::SetTrue)]
     per_gene: bool,
 
     /// Tag holding the assigned gene
@@ -680,7 +685,7 @@ struct GeneArgs {
     skip_tags_regex: String,
 
     /// Use the contig (RNAME) as the gene, e.g. for transcriptome alignments
-    #[arg(long = "per-contig", action = ArgAction::SetTrue, overrides_with = "per_contig")]
+    #[arg(long = "per-contig", action = ArgAction::SetTrue)]
     per_contig: bool,
 
     /// Tab-separated gene and transcript columns; reads are grouped per gene across its transcripts
@@ -708,11 +713,11 @@ impl GeneArgs {
 #[derive(clap::Args, Clone)]
 struct PairedArgs {
     /// Paired-end input: read2s follow their read1 in dedup and group output
-    #[arg(long = "paired", action = ArgAction::SetTrue, overrides_with = "paired")]
+    #[arg(long = "paired", action = ArgAction::SetTrue)]
     paired: bool,
 
     /// Group read pairs by read1 alone, ignoring template length
-    #[arg(long = "ignore-tlen", action = ArgAction::SetTrue, overrides_with = "ignore_tlen")]
+    #[arg(long = "ignore-tlen", action = ArgAction::SetTrue)]
     ignore_tlen: bool,
 
     /// Read1s whose mate is unmapped: discard, use (group on read1 alone) or output (group only, ungrouped)
@@ -783,7 +788,7 @@ fn validate_numpy_seed(seed: u64) -> Result<()> {
 #[derive(clap::Args, Clone, Copy)]
 struct PositionArgs {
     /// Treat a spliced read as different from an unspliced one at the same position
-    #[arg(long = "spliced-is-unique", action = ArgAction::SetTrue, overrides_with = "spliced_is_unique")]
+    #[arg(long = "spliced-is-unique", action = ArgAction::SetTrue)]
     spliced_is_unique: bool,
 
     /// Bases soft-clipped from the 5' end before a read counts as spliced
@@ -791,7 +796,7 @@ struct PositionArgs {
     soft_clip_threshold: f64,
 
     /// Use read length as well as position and UMI to identify duplicates
-    #[arg(long = "read-length", action = ArgAction::SetTrue, overrides_with = "read_length")]
+    #[arg(long = "read-length", action = ArgAction::SetTrue)]
     read_length: bool,
 }
 
@@ -813,7 +818,7 @@ struct OutputFormatArgs {
     out_format: Option<String>,
 
     /// Output SAM (same as --out-format=sam)
-    #[arg(short = 'o', long = "out-sam", action = ArgAction::SetTrue, overrides_with = "out_sam")]
+    #[arg(short = 'o', long = "out-sam", action = ArgAction::SetTrue)]
     out_sam: bool,
 
     /// htslib format options for writing. Accepted for umi-tools compatibility; has no effect.
@@ -847,7 +852,7 @@ struct CommonArgs {
     log: Option<String>,
 
     /// Print the run summary to stderr (the default)
-    #[arg(long = "log2stderr", action = ArgAction::SetTrue, overrides_with = "_log2stderr")]
+    #[arg(long = "log2stderr", action = ArgAction::SetTrue)]
     _log2stderr: bool,
 
     /// Write umi-tools-rs notes and errors to this file instead of stderr. htslib messages still go to stderr.
@@ -858,8 +863,8 @@ struct CommonArgs {
     #[arg(short = 'v', long = "verbose", default_value = "1")]
     verbose: u8,
 
-    /// gzip level for .gz outputs, 1-9. umi-tools defaults to 6.
-    #[arg(long = "compresslevel", default_value = "3", value_parser = clap::value_parser!(u32).range(1..=9))]
+    /// gzip level for .gz outputs, 0-9. umi-tools defaults to 6.
+    #[arg(long = "compresslevel", default_value = "3", value_parser = clap::value_parser!(u32).range(0..=9))]
     compresslevel: u32,
 
     /// Same as --help
@@ -879,7 +884,7 @@ struct CommonArgs {
     timeit_name: Option<String>,
 
     /// Write a header to the timing file. Accepted for umi-tools compatibility; has no effect.
-    #[arg(long = "timeit-header", action = ArgAction::SetTrue, overrides_with = "timeit_header")]
+    #[arg(long = "timeit-header", action = ArgAction::SetTrue)]
     timeit_header: bool,
 }
 
@@ -1534,6 +1539,9 @@ fn run_group_cmd(args: &GroupArgs) -> Result<String> {
     if args.output.is_some() && !args.output_bam {
         bail!("--stdout requires --output-bam");
     }
+    if args.umi_group_tag.len() != 2 {
+        bail!("Invalid tag: {}", args.umi_group_tag);
+    }
     args.input_format.note_ignored_flags();
     args.output_format.note_ignored_flags();
 
@@ -1845,9 +1853,15 @@ mod tests {
 
     #[test]
     fn compresslevel_is_range_checked() {
-        assert!(Cli::try_parse_from(["umi-tools-rs", "extract", "--compresslevel=0"]).is_err());
-        let cli = parse(&["extract", "--bc-pattern=NNN", "--compresslevel=9"]);
-        assert_eq!(cli.command.common().compresslevel, 9);
+        assert!(Cli::try_parse_from(["umi-tools-rs", "extract", "--compresslevel=10"]).is_err());
+        for level in [0, 9] {
+            let cli = parse(&[
+                "extract",
+                "--bc-pattern=NNN",
+                &format!("--compresslevel={level}"),
+            ]);
+            assert_eq!(cli.command.common().compresslevel, level);
+        }
     }
 
     #[test]
@@ -1958,6 +1972,88 @@ mod tests {
     #[test]
     fn ambiguous_prefix_is_rejected() {
         assert!(Cli::try_parse_from(["umi-tools-rs", "dedup", "--std=x"]).is_err());
+    }
+
+    #[test]
+    fn bc_pattern_has_the_short_form_p() {
+        let Commands::Extract(args) = parse(&["extract", "-p", "NNNN"]).command else {
+            panic!("expected extract");
+        };
+        assert_eq!(args.bc_pattern.as_deref(), Some("NNNN"));
+        let Commands::Whitelist(args) = parse(&["whitelist", "-p", "CCNN"]).command else {
+            panic!("expected whitelist");
+        };
+        assert_eq!(args.bc_pattern.as_deref(), Some("CCNN"));
+    }
+
+    #[test]
+    fn a_repeated_option_takes_its_last_value() {
+        let cli = parse(&[
+            "extract",
+            "--bc-pattern=NN",
+            "--bc-pattern=NNN",
+            "--3prime",
+            "--3prime",
+            "-I",
+            "a",
+            "-I",
+            "b",
+            "-L",
+            "x",
+            "-L",
+            "y",
+            "--umi-separator=:",
+            "--umi-separator=+",
+        ]);
+        let Commands::Extract(args) = cli.command else {
+            panic!("expected extract");
+        };
+        assert_eq!(args.bc_pattern.as_deref(), Some("NNN"));
+        assert!(args.prime3);
+        assert_eq!(args.input.as_deref(), Some("b"));
+        assert_eq!(args.common.log.as_deref(), Some("y"));
+        assert_eq!(args.umi_separator, "+");
+
+        let cli = parse(&[
+            "dedup",
+            "--method=unique",
+            "--method=cluster",
+            "--ignore-umi",
+            "--ignore-umi",
+            "--random-seed=1",
+            "--random-seed=2",
+        ]);
+        let Commands::Dedup(args) = cli.command else {
+            panic!("expected dedup");
+        };
+        assert_eq!(args.method, "cluster");
+        assert!(args.ignore_umi);
+        assert_eq!(args.random_seed, 2);
+
+        parse(&[
+            "group",
+            "--output-bam",
+            "--output-bam",
+            "--no-sort-output",
+            "--no-sort-output",
+        ]);
+        parse(&[
+            "count",
+            "--wide-format-cell-counts",
+            "--wide-format-cell-counts",
+        ]);
+        parse(&["count_tab", "--per-cell", "--per-cell"]);
+        parse(&["whitelist", "--set-cell-number=1", "--set-cell-number=2"]);
+    }
+
+    #[test]
+    fn count_accepts_the_position_flags_of_dedup() {
+        parse(&[
+            "count",
+            "--read-length",
+            "--spliced-is-unique",
+            "--soft-clip-threshold=2",
+        ]);
     }
 
     #[test]
