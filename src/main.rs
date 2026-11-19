@@ -1288,7 +1288,7 @@ fn extract_config(args: &ExtractArgs) -> Result<ExtractConfig> {
         reconcile_pairs: args.reconcile_pairs,
         quality_filter_mask: args.quality_filter_mask,
         either_read_resolve,
-        subset_reads: args.subset_reads,
+        subset_reads: args.subset_reads.filter(|&limit| limit > 0),
     })
 }
 
@@ -1337,10 +1337,9 @@ fn run_extract(args: &ExtractArgs) -> Result<String> {
     finish_outputs([Some(primary), secondary, filtered1, filtered2])?;
 
     Ok(format!(
-        "Reads input: {}, output: {}, too short: {}, no match: {}, quality filtered: {}, whitelist filtered: {}",
+        "Reads input: {}, output: {}, no match: {}, quality filtered: {}, whitelist filtered: {}",
         stats.input_reads,
         stats.output_reads,
-        stats.too_short,
         stats.no_match,
         stats.quality_filtered,
         stats.whitelist_filtered,

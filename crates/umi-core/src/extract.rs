@@ -89,7 +89,6 @@ impl ExtractConfig {
 pub struct ExtractStats {
     pub input_reads: u64,
     pub output_reads: u64,
-    pub too_short: u64,
     pub no_match: u64,
     pub quality_filtered: u64,
     pub whitelist_filtered: u64,
@@ -313,7 +312,7 @@ fn try_extract<'a>(
 ) -> Result<Option<ExtractionView<'a>>, ExtractError> {
     match extract_record(record, pattern) {
         Ok(result) => Ok(Some(result)),
-        Err(ExtractError::ReadTooShort { .. } | ExtractError::RegexNoMatch) => Ok(None),
+        Err(ExtractError::RegexNoMatch) => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -400,6 +399,9 @@ fn filter_barcodes(
         return false;
     }
     config.mask_umi(&mut barcodes.umi, &barcodes.quality);
+    let Some(whitelist) = &config.whitelist else {
+        return true;
+    };
     let blacklisted = |cell: &[u8]| {
         config
             .blacklist
@@ -410,9 +412,7 @@ fn filter_barcodes(
         stats.whitelist_filtered += 1;
         return false;
     }
-    if let Some(whitelist) = &config.whitelist
-        && !whitelist.contains(barcodes.cell.as_ref())
-    {
+    if !whitelist.contains(barcodes.cell.as_ref()) {
         if let Some(corrected) = config
             .correction_map
             .as_ref()
@@ -447,10 +447,6 @@ fn extract_and_filter<'a>(
     let mut extraction = match result {
         Ok(Some(extraction)) => extraction,
         Ok(None) => return Ok(None),
-        Err(ExtractError::ReadTooShort { .. }) => {
-            stats.too_short += 1;
-            return Ok(None);
-        }
         Err(ExtractError::RegexNoMatch) => {
             stats.no_match += 1;
             return Ok(None);
