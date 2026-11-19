@@ -16,6 +16,15 @@ pub enum ExtractError {
     )]
     InvalidCellNumber { requested: usize, observed: usize },
 
+    #[error("no cell barcodes were observed")]
+    NoBarcodes,
+
+    #[error("Something's gone wrong here!!")]
+    KneeAtFirstBarcode,
+
+    #[error("{0}")]
+    DensityFit(&'static str),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

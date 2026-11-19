@@ -95,6 +95,9 @@ pub fn run_whitelist<R: Read + Send, W: Write, FW: Write>(
     } else {
         whitelist
     };
+    if whitelist.is_empty() && !config.allow_threshold_error {
+        return Err(ExtractError::NoThreshold);
+    }
 
     let mut entries: Vec<WhitelistEntry> = whitelist
         .into_iter()
@@ -253,7 +256,10 @@ fn write_record<W: Write>(writer: &mut W, record: &SequenceRecord) -> Result<(),
     write_fastq_record(writer, record.id(), &record.seq(), qual)
 }
 
-/// Determine which barcodes to whitelist based on knee detection or explicit cell number.
+/// The barcodes passing the knee or the explicit cell number, possibly none.
+///
+/// `umi_tools` fits the knee before it looks at the cell number, so a knee that
+/// cannot be fitted fails either way.
 fn determine_whitelist(
     all_counts: &HashMap<String, u64>,
     config: &WhitelistConfig,
@@ -261,45 +267,51 @@ fn determine_whitelist(
     let mut sorted_barcodes: Vec<(&String, &u64)> = all_counts.iter().collect();
     sorted_barcodes.sort_by(|a, b| b.1.cmp(a.1));
 
-    if let Some(n) = config.cell_number.filter(|&n| n != 0) {
-        let threshold = *sorted_barcodes
-            .get(n)
-            .ok_or(ExtractError::InvalidCellNumber {
-                requested: n,
-                observed: sorted_barcodes.len(),
-            })?
-            .1;
-        return Ok(sorted_barcodes
-            .iter()
-            .filter(|(_, count)| **count > threshold)
-            .map(|(bc, _)| (*bc).clone())
-            .collect());
+    let cell_number = config.cell_number.filter(|&n| n != 0);
+    let invalid_cell_number = |requested| ExtractError::InvalidCellNumber {
+        requested,
+        observed: sorted_barcodes.len(),
+    };
+    if let Some(n) = cell_number.filter(|&n| n > sorted_barcodes.len()) {
+        return Err(invalid_cell_number(n));
     }
-    match config.knee_method {
+    if sorted_barcodes.is_empty() {
+        return Err(ExtractError::NoBarcodes);
+    }
+
+    let knee = match config.knee_method {
         KneeMethod::Distance => {
             let counts: Vec<u64> = sorted_barcodes.iter().map(|(_, c)| **c).collect();
-            if counts.is_empty() {
-                return Ok(Vec::new());
-            }
-            let knee = knee_distance(&counts);
-            Ok(sorted_barcodes[..=knee]
+            let knee = knee_distance(&counts)?;
+            sorted_barcodes[..=knee]
                 .iter()
                 .map(|(bc, _)| (*bc).clone())
-                .collect())
+                .collect()
         }
-        KneeMethod::Density => match knee_density(&sorted_barcodes, config.expect_cells) {
-            Some(whitelist) => Ok(whitelist),
-            None if config.allow_threshold_error => Ok(Vec::new()),
-            None => Err(ExtractError::NoThreshold),
-        },
-    }
+        KneeMethod::Density => knee_density(&sorted_barcodes, config.expect_cells)?,
+    };
+    let Some(n) = cell_number else {
+        return Ok(knee);
+    };
+    let threshold = *sorted_barcodes
+        .get(n)
+        .ok_or_else(|| invalid_cell_number(n))?
+        .1;
+    Ok(sorted_barcodes
+        .iter()
+        .filter(|(_, count)| **count > threshold)
+        .map(|(bc, _)| (*bc).clone())
+        .collect())
 }
 
 /// Iterative distance-to-diagonal knee detection on cumulative counts.
-fn knee_distance(sorted_desc_counts: &[u64]) -> usize {
+fn knee_distance(sorted_desc_counts: &[u64]) -> Result<usize, ExtractError> {
     let values = cumulative_sum(sorted_desc_counts);
     let mut prev = 0;
     let mut knee = get_max_distance_index(&values);
+    if knee == 0 {
+        return Err(ExtractError::KneeAtFirstBarcode);
+    }
     for _ in 0..100 {
         if knee == prev {
             break;
@@ -308,7 +320,7 @@ fn knee_distance(sorted_desc_counts: &[u64]) -> usize {
         let end = (knee * 3).min(values.len());
         knee = get_max_distance_index(&values[..end]);
     }
-    knee
+    Ok(knee)
 }
 
 /// Find the index with maximum perpendicular distance to the line from first to last point.
@@ -364,11 +376,7 @@ fn cumulative_sum(counts: &[u64]) -> Vec<f64> {
 fn knee_density(
     sorted_barcodes: &[(&String, &u64)],
     expect_cells: Option<usize>,
-) -> Option<Vec<String>> {
-    if sorted_barcodes.is_empty() {
-        return None;
-    }
-
+) -> Result<Vec<String>, ExtractError> {
     let max_count = *sorted_barcodes[0].1 as f64;
     let abundance_threshold = max_count * 0.001;
 
@@ -380,13 +388,18 @@ fn knee_density(
         .map(f64::log10)
         .collect();
 
-    if log_counts.is_empty() {
-        return None;
+    if log_counts.len() < 2 {
+        return Err(ExtractError::DensityFit(
+            "`dataset` input should have multiple elements.",
+        ));
     }
 
     let bw = sample_std(&log_counts) * 0.1;
     if bw <= 0.0 {
-        return None;
+        return Err(ExtractError::DensityFit(
+            "The data appears to lie in a lower-dimensional subspace of the space in which it \
+             is expressed. This has resulted in a singular data covariance matrix",
+        ));
     }
 
     let log_min = log_counts.iter().copied().fold(f64::INFINITY, f64::min);
@@ -403,10 +416,6 @@ fn knee_density(
     let local_mins: Vec<usize> = (1..density.len() - 1)
         .filter(|&i| density[i] < density[i - 1] && density[i] < density[i + 1])
         .collect();
-
-    if local_mins.is_empty() {
-        return None;
-    }
 
     // Select the appropriate local minimum by iterating in reverse
     let mut selected_min: Option<usize> = None;
@@ -437,16 +446,15 @@ fn knee_density(
         }
     }
 
-    let min_idx = selected_min?;
-
+    let Some(min_idx) = selected_min else {
+        return Ok(Vec::new());
+    };
     let threshold = 10.0_f64.powf(xx[min_idx]);
-    Some(
-        sorted_barcodes
-            .iter()
-            .filter(|(_, c)| **c as f64 > threshold)
-            .map(|(bc, _)| (*bc).clone())
-            .collect(),
-    )
+    Ok(sorted_barcodes
+        .iter()
+        .filter(|(_, c)| **c as f64 > threshold)
+        .map(|(bc, _)| (*bc).clone())
+        .collect())
 }
 
 /// Gaussian KDE evaluation matching scipy's `gaussian_kde` behavior.
