@@ -4,15 +4,18 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5
         with:
           install_args: "rust uv"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: rustup component add rustfmt clippy
       - run: mise run ci
         env:
@@ -24,23 +27,23 @@ jobs:
   msrv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: rustup toolchain install 1.98 --profile minimal
       - run: cargo +1.98 build --locked --workspace
 
   compat:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: CGATOxford/UMI-tools
           ref: 79d8b818676c1e7fb6c5a620e4cb24b372d03eea
           path: umi-tools
-      - uses: jdx/mise-action@v5
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5
         with:
           install_args: "rust uv"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: mise run compat
         env:
           MISE_AUTO_INSTALL: "false"

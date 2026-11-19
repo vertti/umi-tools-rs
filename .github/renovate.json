@@ -2,7 +2,8 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "mode": "full",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
   ],
   "labels": ["dependencies"],
   "packageRules": [
@@ -21,9 +22,16 @@
     },
     {
       "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["patch", "minor", "digest", "pin", "pinDigest"],
       "groupName": "github actions",
       "groupSlug": "gh-actions",
       "automerge": true
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "github actions (major)",
+      "groupSlug": "gh-actions-major"
     },
     {
       "matchManagers": ["pip_requirements", "pep621"],
