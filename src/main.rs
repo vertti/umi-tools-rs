@@ -1261,7 +1261,7 @@ fn extract_config(args: &ExtractArgs) -> Result<ExtractConfig> {
         reconcile_pairs: args.reconcile_pairs,
         quality_filter_mask: args.quality_filter_mask,
         either_read_resolve,
-        subset_reads: args.subset_reads,
+        subset_reads: args.subset_reads.filter(|&limit| limit > 0),
     })
 }
 
@@ -1449,7 +1449,10 @@ fn run_whitelist_cmd(args: &WhitelistArgs) -> Result<String> {
         expect_cells: args.expect_cells,
         error_correct_threshold: args.error_correct_threshold,
         ed_above_threshold: ed_above,
-        subset_reads: args.subset_reads,
+        subset_reads: match args.subset_reads {
+            0 => usize::MAX,
+            limit => limit,
+        },
     };
 
     let reader = open_input(args.input.as_deref())?;

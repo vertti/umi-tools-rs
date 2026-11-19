@@ -27,3 +27,17 @@ def test_read_shorter_than_string_pattern_aborts(rust_binary, tmp_path, options)
     result = run(rust_binary, tmp_path, options, reads=READS, short=SHORT)
     assert result.returncode == 1
     assert "panicked" not in result.stderr
+
+
+def test_extract_subset_of_zero_reads_everything(rust_binary, tmp_path):
+    result = run(rust_binary, tmp_path,
+                 ["extract", "--bc-pattern=NNN", "-I", "reads", "--subset-reads=0"], reads=READS)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("@") == 2
+
+
+def test_whitelist_subset_of_zero_reads_everything(rust_binary, tmp_path):
+    options = ["whitelist", "--bc-pattern=CCCCNN", "-I", "cells", "--set-cell-number=2"]
+    unlimited = run(rust_binary, tmp_path, [*options, "--subset-reads=0"], cells=CELLS)
+    assert unlimited.returncode == 0, unlimited.stderr
+    assert unlimited.stdout == "AAAA\t\t3\t\nCCCC\t\t2\t\n"
