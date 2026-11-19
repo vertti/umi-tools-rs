@@ -632,6 +632,9 @@ impl<K: Ord + Clone> ReadBuffer<K> {
                             cluster_counts.push(*cluster_count);
                         }
                     }
+                    if bundle_records.is_empty() {
+                        continue;
+                    }
                     if let Some(ctx) = stats_ctx.as_mut() {
                         ctx.collector.record_bundle(
                             &umi_map,
@@ -1177,10 +1180,18 @@ impl StatsCollector {
         let pre_null_binned = digitize(&self.pre_cluster_stats_null);
         let post_null_binned = digitize(&self.post_cluster_stats_null);
 
-        let pre_counts = bincount(&pre_binned, minlength);
         let post_counts = bincount(&post_binned, minlength);
-        let pre_null_counts = bincount(&pre_null_binned, minlength);
         let post_null_counts = bincount(&post_null_binned, minlength);
+        // umi_tools builds the columns as a dict, so for the unique method the
+        // post-deduplication tallies replace the "unique" columns of the same name.
+        let (pre_counts, pre_null_counts) = if method_name == "unique" {
+            (post_counts.clone(), post_null_counts.clone())
+        } else {
+            (
+                bincount(&pre_binned, minlength),
+                bincount(&pre_null_binned, minlength),
+            )
+        };
 
         let path = format!("{prefix}_edit_distance.tsv");
         let mut f =
