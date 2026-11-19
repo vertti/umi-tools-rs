@@ -58,7 +58,7 @@ def test_gzip_output_decodes_with_python_at_each_level(rust_binary, tmp_path, le
 @pytest.mark.parametrize("command,options,data", [
     ("count_tab", [], "r_AAAA\tGENE1\n"),
     ("extract", ["--bc-pattern=NN"], "@r\nAATT\n+\nIIII\n"),
-    ("whitelist", ["--bc-pattern=CC", "--set-cell-number=1"],
+    ("whitelist", ["--bc-pattern=CCNN", "--set-cell-number=1"],
      "@r1\nAATT\n+\nIIII\n@r2\nAATT\n+\nIIII\n@r3\nCCTT\n+\nIIII\n"),
 ])
 def test_gzip_finalization_failure_is_reported(rust_binary, tmp_path, command, options, data):
@@ -80,14 +80,14 @@ def test_gzip_finalization_failure_is_reported(rust_binary, tmp_path, command, o
 
 
 @pytest.mark.parametrize("flag,expected", [
-    ("--whitelist", "@r_AA_\nTT\n+\nII\n"),
+    ("--whitelist", "@r_AA_T\nT\n+\nI\n"),
     ("--blacklist", ""),
 ])
 def test_extract_reads_compressed_barcode_lists(rust_binary, tmp_path, flag, expected):
     path = tmp_path / "barcodes.tsv.gz"
     path.write_bytes(gzip.compress(b"AA\n"))
     result = subprocess.run(
-        [str(rust_binary), "extract", "--bc-pattern=CC", flag, str(path)],
+        [str(rust_binary), "extract", "--bc-pattern=CCN", flag, str(path)],
         input="@r\nAATT\n+\nIIII\n", capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr

@@ -116,8 +116,8 @@ struct ExtractArgs {
     quality_filter_threshold: Option<u8>,
 
     /// Quality encoding scheme: phred33, phred64, solexa
-    #[arg(long = "quality-encoding", default_value = "phred33")]
-    quality_encoding: String,
+    #[arg(long = "quality-encoding")]
+    quality_encoding: Option<String>,
 
     /// Strip /1 and /2 suffixes from read names before appending UMI
     #[arg(long = "ignore-read-pair-suffixes")]
@@ -1084,36 +1084,151 @@ fn parse_pattern(raw: &str, extract_method: &str, prime3: bool) -> Result<Barcod
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
+struct BarcodeOptions<'a> {
+    read2_only: bool,
+    pattern: Option<&'a str>,
+    pattern2: Option<&'a str>,
+    paired: bool,
+    filtered_out: bool,
+    filtered_out2: bool,
+    extract_method: &'a str,
+    prime3: bool,
+}
+
+struct Barcodes {
+    pattern: Option<BarcodePattern>,
+    pattern2: Option<BarcodePattern>,
+    extract_cell: bool,
+}
+
+impl BarcodeOptions<'_> {
+    /// `validateExtractOptions`, shared by `extract` and `whitelist`.
+    fn validate(&self) -> Result<Barcodes> {
+        validate_read2_only(self.read2_only, self.pattern, self.pattern2)?;
+        if self.pattern.is_none() && self.pattern2.is_none() {
+            if self.paired {
+                bail!("Must supply --bc-pattern and/or --bc-pattern2 if paired-end ");
+            }
+            bail!("Must supply --bc-pattern for single-end");
+        }
+        if self.pattern2.is_some() && !self.paired {
+            bail!("must specify a paired fastq ``--read2-in``");
+        }
+        if self.filtered_out2 && !self.paired {
+            bail!("Cannot use --filtered-out2 without read2 input (--read2-in)");
+        }
+        if (self.paired && self.filtered_out && !self.filtered_out2)
+            || (self.filtered_out2 && !self.filtered_out)
+        {
+            bail!(
+                "Must supply both --filtered-out and --filtered-out2 to write out filtered reads \
+                 for paired end"
+            );
+        }
+
+        let parse = |raw: Option<&str>| {
+            raw.map(|raw| parse_pattern(raw, self.extract_method, self.prime3))
+                .transpose()
+        };
+        let pattern = parse(self.pattern)?;
+        let pattern2 = parse(self.pattern2)?;
+        let any = |has: fn(&BarcodePattern) -> bool| {
+            pattern.as_ref().is_some_and(has) || pattern2.as_ref().is_some_and(has)
+        };
+        if !any(BarcodePattern::has_umi) {
+            bail!("{}", self.lacks("umi", 'N'));
+        }
+        Ok(Barcodes {
+            extract_cell: any(BarcodePattern::has_cell),
+            pattern,
+            pattern2,
+        })
+    }
+
+    /// The `umi_tools` message for patterns without UMI or cell positions.
+    fn lacks(&self, kind: &str, base: char) -> String {
+        let patterns = format!(
+            "{}, {}",
+            self.pattern.unwrap_or("None"),
+            self.pattern2.unwrap_or("None")
+        );
+        if self.extract_method == "regex" {
+            format!(
+                "barcode regex(es) do not include any {kind} groups (starting with '{kind}_') \
+                 {patterns}"
+            )
+        } else {
+            format!(
+                "barcode pattern(s) do not include any {kind} bases (marked with '{base}s') \
+                 {patterns}"
+            )
+        }
+    }
+}
+
 fn extract_config(args: &ExtractArgs) -> Result<ExtractConfig> {
-    let is_paired = args.read2_in.is_some();
-    validate_read2_only(
-        args.read2_only,
-        args.bc_pattern.as_deref(),
-        args.bc_pattern2.as_deref(),
-    )?;
-    if !is_paired && args.bc_pattern.is_none() {
-        bail!("--bc-pattern is required for single-end extraction");
+    let is_regex = args.extract_method == "regex";
+    if args.filtered_out.is_some() && !is_regex && args.whitelist.is_none() {
+        bail!(
+            "Reads will not be filtered unless extract method is set to regex \
+             (--extract-method=regex) or cell barcodes are filtered (--whitelist)"
+        );
     }
-    if is_paired && args.bc_pattern.is_none() && args.bc_pattern2.is_none() {
-        bail!("at least one of --bc-pattern or --bc-pattern2 is required");
+    let filters_quality = [args.quality_filter_threshold, args.quality_filter_mask]
+        .iter()
+        .any(|threshold| threshold.is_some_and(|threshold| threshold > 0));
+    if filters_quality && args.quality_encoding.is_none() {
+        bail!(
+            "must provide a quality encoding (--quality-encoding) to filter UMIs by quality \
+             (--quality-filter-threshold) or mask low quality bases with (--quality-filter-mask)"
+        );
     }
 
-    let pattern = args
-        .bc_pattern
-        .as_deref()
-        .map(|p| parse_pattern(p, args.extract_method.as_str(), args.prime3))
-        .transpose()?;
-    let pattern2 = args
-        .bc_pattern2
-        .as_deref()
-        .map(|p| parse_pattern(p, args.extract_method.as_str(), args.prime3))
-        .transpose()?;
+    let options = BarcodeOptions {
+        read2_only: args.read2_only,
+        pattern: args.bc_pattern.as_deref(),
+        pattern2: args.bc_pattern2.as_deref(),
+        paired: args.read2_in.is_some(),
+        filtered_out: args.filtered_out.is_some(),
+        filtered_out2: args.filtered_out2.is_some(),
+        extract_method: &args.extract_method,
+        prime3: args.prime3,
+    };
+    let Barcodes {
+        pattern,
+        pattern2,
+        extract_cell,
+    } = options.validate()?;
 
-    let qe = match args.quality_encoding.as_str() {
-        "phred33" => QualityEncoding::Phred33,
-        "phred64" => QualityEncoding::Phred64,
-        "solexa" => QualityEncoding::Solexa,
-        other => {
+    if args.either_read {
+        if extract_cell {
+            bail!(
+                "Option to extract from either read (--either-read) is not currently compatible \
+                 with cell barcode extraction"
+            );
+        }
+        if !is_regex {
+            bail!(
+                "Option to extract from either read (--either-read) requires --extract-method=regex"
+            );
+        }
+        if pattern.is_none() || pattern2.is_none() {
+            bail!(
+                "Option to extract from either read (--either-read) requires \
+                 --bc-pattern=[PATTERN1] and --bc-pattern2=[PATTERN2]"
+            );
+        }
+    }
+    if args.whitelist.is_some() && !extract_cell {
+        bail!("{}", options.lacks("cell", 'C'));
+    }
+
+    let qe = match args.quality_encoding.as_deref() {
+        None | Some("phred33") => QualityEncoding::Phred33,
+        Some("phred64") => QualityEncoding::Phred64,
+        Some("solexa") => QualityEncoding::Solexa,
+        Some(other) => {
             bail!("unknown quality encoding '{other}'; expected 'phred33', 'phred64', or 'solexa'")
         }
     };
@@ -1265,30 +1380,42 @@ fn load_blacklist(path: &str) -> Result<HashSet<Vec<u8>>> {
 }
 
 fn run_whitelist_cmd(args: &WhitelistArgs) -> Result<String> {
-    validate_read2_only(
-        args.read2_only,
-        args.bc_pattern.as_deref(),
-        args.bc_pattern2.as_deref(),
-    )?;
-    if args.bc_pattern.is_none() && args.bc_pattern2.is_none() {
-        bail!("Must supply --bc-pattern for single-end");
+    if args.filtered_out.is_some() && args.extract_method != "regex" {
+        bail!(
+            "Reads will not be filtered unless extract method is set to regex \
+             (--extract-method=regex)"
+        );
     }
-    if args.bc_pattern2.is_some() && args.read2_in.is_none() {
-        bail!("must specify a paired fastq --read2-in");
+    if args.expect_cells.is_some_and(|cells| cells > 0) {
+        if args.knee_method == "distance" {
+            bail!(
+                "Cannot use --expect-cells with 'distance' knee method. Switch to \
+                 --knee-method=density if you want to provide an expectation for the number of \
+                 cells. Alternatively, if you know the number of cell barcodes, use --cell-number"
+            );
+        }
+        if args.set_cell_number.is_some_and(|cells| cells > 0) {
+            bail!("Cannot supply both --expect-cells and --cell-number options");
+        }
     }
-    if args.filtered_out2.is_some() && args.read2_in.is_none() {
-        bail!("Cannot use --filtered-out2 without read2 input (--read2-in)");
+    let options = BarcodeOptions {
+        read2_only: args.read2_only,
+        pattern: args.bc_pattern.as_deref(),
+        pattern2: args.bc_pattern2.as_deref(),
+        paired: args.read2_in.is_some(),
+        filtered_out: args.filtered_out.is_some(),
+        filtered_out2: args.filtered_out2.is_some(),
+        extract_method: &args.extract_method,
+        prime3: args.prime3,
+    };
+    let Barcodes {
+        pattern,
+        pattern2,
+        extract_cell,
+    } = options.validate()?;
+    if !extract_cell {
+        bail!("{}", options.lacks("cell", 'C'));
     }
-    let pattern = args
-        .bc_pattern
-        .as_deref()
-        .map(|p| parse_pattern(p, args.extract_method.as_str(), args.prime3))
-        .transpose()?;
-    let pattern2 = args
-        .bc_pattern2
-        .as_deref()
-        .map(|p| parse_pattern(p, args.extract_method.as_str(), args.prime3))
-        .transpose()?;
     let method = match args.method.as_str() {
         "reads" => WhitelistMethod::Reads,
         "umis" => WhitelistMethod::Umis,
