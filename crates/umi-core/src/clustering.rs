@@ -305,6 +305,297 @@ mod tests {
         }
     }
 
+    /// UMIs with their counts, in first-seen order.
+    const BUNDLES: &[&[(&str, u32)]] = &[
+        &[
+            ("ATAT", 456),
+            ("GTAT", 2),
+            ("CCAT", 90),
+            ("ATAG", 72),
+            ("CCAG", 2),
+            ("AAAT", 1),
+            ("TTTT", 5),
+            ("TTTA", 5),
+        ],
+        &[
+            ("AAAA", 10),
+            ("AAAT", 9),
+            ("AATT", 1),
+            ("TTTT", 4),
+            ("TTTA", 4),
+            ("GGGG", 1),
+        ],
+        &[("ACGT", 3)],
+        &[("ACGT", 1), ("ACGA", 1), ("ACAA", 1), ("AAAA", 1)],
+    ];
+
+    /// `UMIClusterer(method)(counts, threshold)` of `umi_tools` on each bundle.
+    const EXPECTED_GROUPS: &[(usize, DedupMethod, u32, &[&[&str]])] = &[
+        (
+            0,
+            DedupMethod::Unique,
+            1,
+            &[
+                &["ATAT"],
+                &["GTAT"],
+                &["CCAT"],
+                &["ATAG"],
+                &["CCAG"],
+                &["AAAT"],
+                &["TTTT"],
+                &["TTTA"],
+            ],
+        ),
+        (
+            0,
+            DedupMethod::Percentile,
+            1,
+            &[
+                &["ATAT"],
+                &["GTAT"],
+                &["CCAT"],
+                &["ATAG"],
+                &["CCAG"],
+                &["AAAT"],
+                &["TTTT"],
+                &["TTTA"],
+            ],
+        ),
+        (
+            0,
+            DedupMethod::Cluster,
+            1,
+            &[
+                &["ATAT", "ATAG", "GTAT", "AAAT"],
+                &["CCAT", "CCAG"],
+                &["TTTA", "TTTT"],
+            ],
+        ),
+        (
+            0,
+            DedupMethod::Cluster,
+            2,
+            &[&[
+                "ATAT", "CCAT", "ATAG", "TTTA", "TTTT", "CCAG", "GTAT", "AAAT",
+            ]],
+        ),
+        (
+            0,
+            DedupMethod::Adjacency,
+            1,
+            &[
+                &["ATAT", "ATAG", "GTAT", "AAAT"],
+                &["CCAT", "CCAG"],
+                &["TTTA", "TTTT"],
+            ],
+        ),
+        (
+            0,
+            DedupMethod::Adjacency,
+            2,
+            &[
+                &["ATAT", "GTAT", "TTTT", "AAAT"],
+                &["CCAT", "CCAG"],
+                &["ATAG"],
+                &["TTTA"],
+            ],
+        ),
+        (
+            0,
+            DedupMethod::Directional,
+            1,
+            &[
+                &["ATAT", "ATAG", "GTAT", "AAAT"],
+                &["CCAT", "CCAG"],
+                &["TTTT"],
+                &["TTTA"],
+            ],
+        ),
+        (
+            0,
+            DedupMethod::Directional,
+            2,
+            &[
+                &["ATAT", "CCAT", "ATAG", "TTTT", "CCAG", "GTAT", "AAAT"],
+                &["TTTA"],
+            ],
+        ),
+        (
+            1,
+            DedupMethod::Unique,
+            1,
+            &[
+                &["AAAA"],
+                &["AAAT"],
+                &["AATT"],
+                &["TTTT"],
+                &["TTTA"],
+                &["GGGG"],
+            ],
+        ),
+        (
+            1,
+            DedupMethod::Percentile,
+            1,
+            &[
+                &["AAAA"],
+                &["AAAT"],
+                &["AATT"],
+                &["TTTT"],
+                &["TTTA"],
+                &["GGGG"],
+            ],
+        ),
+        (
+            1,
+            DedupMethod::Cluster,
+            1,
+            &[&["AAAA", "AAAT", "AATT"], &["TTTA", "TTTT"], &["GGGG"]],
+        ),
+        (
+            1,
+            DedupMethod::Cluster,
+            2,
+            &[&["AAAA", "AAAT", "TTTA", "TTTT", "AATT"], &["GGGG"]],
+        ),
+        (
+            1,
+            DedupMethod::Adjacency,
+            1,
+            &[&["AAAA"], &["AAAT", "AATT"], &["TTTA", "TTTT"], &["GGGG"]],
+        ),
+        (
+            1,
+            DedupMethod::Adjacency,
+            2,
+            &[&["AAAA", "AATT"], &["AAAT"], &["TTTA", "TTTT"], &["GGGG"]],
+        ),
+        (
+            1,
+            DedupMethod::Directional,
+            1,
+            &[
+                &["AAAA"],
+                &["AAAT", "AATT"],
+                &["TTTT"],
+                &["TTTA"],
+                &["GGGG"],
+            ],
+        ),
+        (
+            1,
+            DedupMethod::Directional,
+            2,
+            &[
+                &["AAAA", "AATT"],
+                &["AAAT"],
+                &["TTTT"],
+                &["TTTA"],
+                &["GGGG"],
+            ],
+        ),
+        (2, DedupMethod::Unique, 1, &[&["ACGT"]]),
+        (2, DedupMethod::Percentile, 1, &[&["ACGT"]]),
+        (2, DedupMethod::Cluster, 1, &[&["ACGT"]]),
+        (2, DedupMethod::Cluster, 2, &[&["ACGT"]]),
+        (2, DedupMethod::Adjacency, 1, &[&["ACGT"]]),
+        (2, DedupMethod::Adjacency, 2, &[&["ACGT"]]),
+        (2, DedupMethod::Directional, 1, &[&["ACGT"]]),
+        (2, DedupMethod::Directional, 2, &[&["ACGT"]]),
+        (
+            3,
+            DedupMethod::Unique,
+            1,
+            &[&["ACGT"], &["ACGA"], &["ACAA"], &["AAAA"]],
+        ),
+        (
+            3,
+            DedupMethod::Percentile,
+            1,
+            &[&["ACGT"], &["ACGA"], &["ACAA"], &["AAAA"]],
+        ),
+        (
+            3,
+            DedupMethod::Cluster,
+            1,
+            &[&["AAAA", "ACAA", "ACGA", "ACGT"]],
+        ),
+        (
+            3,
+            DedupMethod::Cluster,
+            2,
+            &[&["AAAA", "ACAA", "ACGA", "ACGT"]],
+        ),
+        (
+            3,
+            DedupMethod::Adjacency,
+            1,
+            &[&["AAAA"], &["ACAA"], &["ACGA", "ACGT"]],
+        ),
+        (
+            3,
+            DedupMethod::Adjacency,
+            2,
+            &[&["AAAA", "ACGA"], &["ACAA", "ACGT"]],
+        ),
+        (
+            3,
+            DedupMethod::Directional,
+            1,
+            &[&["AAAA", "ACAA", "ACGA", "ACGT"]],
+        ),
+        (
+            3,
+            DedupMethod::Directional,
+            2,
+            &[&["AAAA", "ACAA", "ACGA", "ACGT"]],
+        ),
+    ];
+
+    #[test]
+    fn groups_match_umi_tools_for_every_method() {
+        for &(bundle, method, threshold, groups) in EXPECTED_GROUPS {
+            let entries = BUNDLES[bundle]
+                .iter()
+                .zip(0..)
+                .map(|(&(umi, count), order)| (umi.as_bytes(), count, order));
+            let actual: Vec<Vec<&str>> = cluster_umis(method, entries, threshold)
+                .unwrap()
+                .into_iter()
+                .map(|group| {
+                    group
+                        .into_iter()
+                        .map(|umi| std::str::from_utf8(umi).unwrap())
+                        .collect()
+                })
+                .collect();
+            // Past the lead UMI, umi_tools lists an adjacency group in set order, which
+            // varies with the Python hash seed.
+            let normalised = |groups: Vec<Vec<&str>>| -> Vec<Vec<String>> {
+                groups
+                    .into_iter()
+                    .map(|mut group| {
+                        if method == DedupMethod::Adjacency {
+                            group[1..].sort_unstable();
+                        }
+                        group.into_iter().map(str::to_string).collect()
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                normalised(actual),
+                normalised(groups.iter().map(|group| group.to_vec()).collect()),
+                "bundle {bundle}, {method:?}, threshold {threshold}"
+            );
+        }
+    }
+
+    #[test]
+    fn median_of_an_even_number_of_counts_is_the_midpoint() {
+        assert!((median(&[1, 2, 3, 10]) - 2.5).abs() < f64::EPSILON);
+        assert!((median(&[7, 1, 3]) - 3.0).abs() < f64::EPSILON);
+    }
+
     #[test]
     fn min_set_cover_matches_rescanning_reference() {
         for size in [1_usize, 2, 3, 50, 500] {
