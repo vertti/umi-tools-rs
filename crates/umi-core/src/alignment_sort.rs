@@ -97,10 +97,10 @@ impl RecordSorter {
     }
 
     fn spill_path(&self) -> std::io::Result<TempPath> {
-        let file = match &self.temp_dir {
-            Some(directory) => tempfile::NamedTempFile::new_in(directory),
-            None => tempfile::NamedTempFile::new(),
-        }?;
+        let file = self.temp_dir.as_ref().map_or_else(
+            tempfile::NamedTempFile::new,
+            tempfile::NamedTempFile::new_in,
+        )?;
         Ok(file.into_temp_path())
     }
 
